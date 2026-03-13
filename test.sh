@@ -663,10 +663,17 @@ run_cmd '(org-gtd-cli/set-next "Buy a formicarium" nil)'
 # This has DONE, NEXT, TODO children — it has NEXT, so it should say "Already has NEXT"
 assert_exit 0 "$LAST_RC" "exits 0 (already has NEXT)"
 
-echo "test: leaf task (no children) → exit 1"
+echo "test: leaf task (no children) → sets task itself to NEXT"
 reset_fixtures
 run_cmd '(org-gtd-cli/set-next "Pay quarterly taxes" nil)'
-assert_exit 1 "$LAST_RC" "exits 1 for leaf task"
+assert_exit 0 "$LAST_RC" "exits 0 for leaf task"
+assert_output_contains "$LAST_OUTPUT" "Set NEXT" "set next on leaf task"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT [#A] Pay quarterly taxes" "leaf task promoted to NEXT"
+
+echo "test: leaf task already NEXT → no-op"
+run_cmd '(org-gtd-cli/set-next "Pay quarterly taxes" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Already NEXT" "already NEXT message for leaf"
 
 echo "test: subproject set-next"
 reset_fixtures

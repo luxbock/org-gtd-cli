@@ -1007,9 +1007,10 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
 ;; --- set-next ---
 
 (defun org-gtd-cli/set-next (substring &optional index)
-  "Set the first TODO child of a project to NEXT.
-If the project already has a NEXT subtask, report it and exit 0.
-If no TODO children exist, exit 1."
+  "Set a task to NEXT state.
+For leaf tasks (no children), set the task itself to NEXT.
+For projects (has children), promote the first TODO child to NEXT.
+If the target already has a NEXT (subtask or itself), report it and exit 0."
   (let* ((idx (org-gtd-cli/parse-index index))
          (buf-pos (org-gtd-cli/find-task substring idx t)))
     (with-current-buffer (car buf-pos)
@@ -1039,8 +1040,19 @@ If no TODO children exist, exit 1."
                    (setq first-todo-pos (point)))))))
          (cond
           ((not has-children)
-           (princ (format "Error: \"%s\" has no children (not a project)\n" heading))
-           (kill-emacs 1))
+           ;; Leaf task: set it to NEXT directly (like set-state SUBSTR NEXT)
+           (let ((current-state (org-get-todo-state)))
+             (cond
+              ((string= current-state "NEXT")
+               (princ (format "Already NEXT: \"%s\" (%s:%d)\n" heading rel-file line)))
+              ((not (member current-state org-not-done-keywords))
+               (princ (format "Error: \"%s\" is in done state %s\n" heading current-state))
+               (kill-emacs 1))
+              (t
+               (let ((org-inhibit-logging nil))
+                 (org-todo "NEXT"))
+               (save-buffer)
+               (princ (format "Set NEXT: \"%s\" (%s:%d)\n" heading rel-file line))))))
           (existing-next
            (princ (format "Already has NEXT: \"%s\" (%s:%d)\n"
                           (nth 0 existing-next) rel-file (nth 1 existing-next)))
