@@ -765,32 +765,28 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
               (line (line-number-at-pos))
               (level (org-current-level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point))))
-         ;; Find insertion point: after planning lines, before first child or
-         ;; before creation timestamp if present
+         ;; Find insertion point: after body text, before creation timestamp,
+         ;; before first child heading
          (org-end-of-meta-data t)
-         (let ((insert-point (point)))
-           ;; If there are child headings, insert before them
+         (let* ((body-start (point))
+                (body-end (save-excursion
+                            (if (re-search-forward
+                                 (format "^\\*\\{%d,\\} " (1+ level))
+                                 subtree-end t)
+                                (line-beginning-position)
+                              subtree-end)))
+                (insert-point body-end))
+           ;; Scan body for last inactive timestamp line and insert before it
            (save-excursion
-             (when (re-search-forward
-                    (format "^\\*\\{%d,\\} " (1+ level))
-                    subtree-end t)
-               (setq insert-point (line-beginning-position))))
-           ;; Look for the creation timestamp (inactive timestamp at end of body)
-           ;; and insert before it
-           (save-excursion
-             (goto-char insert-point)
-             (let ((search-end (min insert-point subtree-end)))
-               (goto-char (cdr buf-pos))
-               (org-end-of-meta-data t)
-               ;; Scan body lines for last inactive timestamp before children
-               (let ((last-ts-pos nil))
-                 (while (and (< (point) insert-point)
-                             (not (eobp)))
-                   (when (looking-at "^\\[[-0-9]+ [A-Z][a-z]+ [0-9:]+\\]$")
-                     (setq last-ts-pos (point)))
-                   (forward-line 1))
-                 (when last-ts-pos
-                   (setq insert-point last-ts-pos)))))
+             (goto-char body-start)
+             (let ((last-ts-pos nil))
+               (while (and (< (point) body-end)
+                           (not (eobp)))
+                 (when (looking-at "^\\[[-0-9]+ [A-Z][a-z]+\\( [0-9:]+\\)?\\]$")
+                   (setq last-ts-pos (point)))
+                 (forward-line 1))
+               (when last-ts-pos
+                 (setq insert-point last-ts-pos))))
            (goto-char insert-point)
            (insert text "\n"))
          (save-buffer)

@@ -90,9 +90,9 @@ DEADLINE: <2026-03-14 Sat>
 Review the options above and order one. Domestic sellers
 are safest for the deadline.
 **** TODO Buy anti-escape coating for the outworld
-[2026-03-12 Thu]
 Messor barbarus can climb smooth surfaces. Search for "fluon ant"
 or "PTFE anti-escape" online.
+[2026-03-12 Thu]
 * Travel                                                                  :travel:
 :PROPERTIES:
 :ID:       test-id-travel

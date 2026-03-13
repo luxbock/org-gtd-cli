@@ -84,6 +84,18 @@ assert_file_not_contains() {
   fi
 }
 
+assert_line_before() {
+  local file="$1" first="$2" second="$3" desc="$4"
+  local line_a line_b
+  line_a=$(grep -nF "$first" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+  line_b=$(grep -nF "$second" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+  if [[ -n "$line_a" && -n "$line_b" && "$line_a" -lt "$line_b" ]]; then
+    echo "  PASS: $desc"; ((PASS++))
+  else
+    echo "  FAIL: $desc ('$first' at line ${line_a:-?} not before '$second' at line ${line_b:-?})"; ((FAIL++))
+  fi
+}
+
 summary() {
   echo ""
   echo "═══════════════════════════════════════"
@@ -518,12 +530,30 @@ assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/formicarium-resea
 echo ""
 echo "=== append-body ==="
 
-echo "test: appends to task with existing body"
+echo "test: appends to task with existing body (before timestamp with time)"
 reset_fixtures
 run_cmd '(org-gtd-cli/append-body "Buy a small UPS" "Check APC models" nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Check APC models" "text appended"
 assert_output_contains "$LAST_OUTPUT" "Appended to" "append message"
+assert_line_before "$TEST_DIR/tasks.org" "Check APC models" "[2026-03-11 Wed 13:35]" "text before timestamp"
+
+echo "test: appends before date-only timestamp"
+reset_fixtures
+run_cmd '(org-gtd-cli/append-body "Buy anti-escape coating" "Also check Fluon PTFE spray" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Also check Fluon PTFE spray" "text appended"
+# Verify ordering: new text appears after existing body but before the timestamp.
+assert_line_before "$TEST_DIR/tasks.org" "PTFE anti-escape" "Also check Fluon PTFE spray" "new text after existing body"
+# Verify the timestamp is after the new text (check relative to task heading)
+TASK_LINE=$(grep -n "Buy anti-escape coating" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+TEXT_LINE=$(grep -n "Also check Fluon PTFE spray" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+TS_LINE=$(awk -v start="$TASK_LINE" 'NR>start && /^\[2026-03-12 Thu\]$/{print NR; exit}' "$TEST_DIR/tasks.org")
+if [[ -n "$TEXT_LINE" && -n "$TS_LINE" && "$TEXT_LINE" -lt "$TS_LINE" ]]; then
+  echo "  PASS: text before date-only timestamp"; ((PASS++))
+else
+  echo "  FAIL: text before date-only timestamp (text=$TEXT_LINE, ts=$TS_LINE)"; ((FAIL++))
+fi
 
 echo "test: appends to task with no body"
 reset_fixtures
