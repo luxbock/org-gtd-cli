@@ -1,0 +1,11 @@
+#+title: Calendar
+
+* DONE Team standup :calpersonal:
+CLOSED: [2026-03-08 Sun 16:00]
+:PROPERTIES:
+:ID:       test-id-standup
+:END:
+<2026-03-08 Sun 16:00-17:00>
+
+* Dentist appointment :calpersonal:
+<2026-03-14 Sat 10:00-11:00>

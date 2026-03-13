@@ -1,0 +1,131 @@
+#+TITLE: Tasks
+#+STARTUP: content
+#+TAGS: work computers family finance buy research
+
+* Work                                                                    :work:
+:PROPERTIES:
+:ID:       test-id-work
+:END:
+** TODO Write quarterly report
+DEADLINE: <2026-03-20 Fri>
+[2026-03-01 Sun 10:00]
+** DONE Submit expense claims
+CLOSED: [2026-03-05 Thu 16:00] SCHEDULED: <2026-03-05 Thu>
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-03-05 Thu 16:00]
+:END:
+[2026-03-03 Tue 09:00]
+* Computers                                                               :computers:
+:PROPERTIES:
+:ID:       test-id-computers
+:END:
+** Agents
+*** TODO Set up automated backups for agent workspace :@agent:
+AGENT: research backup strategies and implement a simple cron-based solution
+- Should back up agent-notes/ and any generated artifacts
+- Prefer incremental backups
+[2026-03-08 Sun 14:00]
+*** TODO Improve agent workflow :@agent:
+[2026-03-09 Mon 11:00]
+**** DONE What are the current pain points?
+CLOSED: [2026-03-10 Tue 15:00]
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-03-10 Tue 15:00]
+:END:
+[2026-03-09 Mon 11:00]
+
+Top pain points identified:
+1. No CLI tool for common operations
+2. Must read entire files to query tasks
+**** DONE What are the commonly repeated tasks?
+CLOSED: [2026-03-10 Tue 16:00]
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-03-10 Tue 16:00]
+:END:
+[2026-03-09 Mon 12:00]
+**** NEXT Design CLI tool
+[2026-03-10 Tue 09:00]
+**** TODO Implement CLI tool
+[2026-03-10 Tue 09:00]
+** Emacs                                                                  :emacs:
+:PROPERTIES:
+:ID:       test-id-emacs
+:END:
+*** DONE Fix org-capture workspace issue
+CLOSED: [2026-03-07 Sat 16:03]
+:PROPERTIES:
+:ID:       test-id-capture-fix
+:END:
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-03-07 Sat 16:03]
+:END:
+It appears in the existing Emacs instance instead.
+[2026-03-06 Fri 14:33]
+** NixOS                                                                  :nixos:
+*** TODO [#B] Add aliases to common systemctl commands
+[2026-03-11 Wed 13:21]
+* Family                                                                  :family:
+:PROPERTIES:
+:ID:       test-id-family
+:END:
+** Pet Ants
+*** TODO Buy a formicarium :@agent:
+- The ants are a species of Messor Barbarus
+- They currently reside in a test tube with the queen and ten workers
+- I should have the formicarium ready by <2026-03-17 Tue>
+[2026-03-12 Thu 16:58]
+**** DONE Research formicarium options
+CLOSED: [2026-03-12 Thu]
+[2026-03-12 Thu]
+Research file: [[file:agent-notes/formicarium-research.org]]
+**** NEXT Choose a formicarium and place order
+DEADLINE: <2026-03-14 Sat>
+[2026-03-12 Thu]
+Review the options above and order one. Domestic sellers
+are safest for the deadline.
+**** TODO Buy anti-escape coating for the outworld
+[2026-03-12 Thu]
+Messor barbarus can climb smooth surfaces. Search for "fluon ant"
+or "PTFE anti-escape" online.
+* Travel                                                                  :travel:
+:PROPERTIES:
+:ID:       test-id-travel
+:END:
+** Holiday Trip
+*** TODO Holiday pre-trip tasks
+[2026-03-06 Fri 23:27]
+**** DONE Book flights
+CLOSED: [2026-03-07 Sat 16:00] SCHEDULED: <2026-03-07 Sat>
+:LOGBOOK:
+- State "DONE"       from "NEXT"       [2026-03-07 Sat 16:00]
+:END:
+[2026-03-06 Fri 23:24]
+**** NEXT Book a rental car
+[2026-03-06 Fri 23:26]
+**** WAITING Get travel insurance quote :WAITING:email:
+[2026-03-08 Sun 10:00]
+Waiting for reply from insurance company
+* Finance                                                                 :finance:
+:PROPERTIES:
+:ID:       test-id-finance
+:END:
+** TODO [#A] Pay quarterly taxes
+DEADLINE: <2026-03-15 Sun>
+[2026-03-10 Tue 16:21]
+* Shopping                                                                :buy:
+:PROPERTIES:
+:ID:       test-id-shopping
+:END:
+** TODO Buy a small UPS for the server
+- Power outage corrupted the database (had to resync from scratch)
+- Need USB UPS with auto-shutdown support
+[2026-03-11 Wed 13:35]
+** WAITING Consider buying a new monitor :WAITING:
+SCHEDULED: <2026-03-09 Mon>
+[2026-03-08 Sun 23:51]
+* Research                                                                :research:
+:PROPERTIES:
+:ID:       test-id-research
+:END:
+** TODO Check out [[http://example.com/interesting-project][Interesting Project]] for connections to my work :url:
+[2026-03-11 Wed 12:29]
