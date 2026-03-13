@@ -34,9 +34,9 @@
         (sequence "WAITING(w/!)" "DEFER(f/!)" "|" "CANCELLED(c/!)")))
 
 (setq org-todo-state-tags-triggers
-      '(("CANCELLED" ("CANCELLED" . t))
-        ("WAITING" ("WAITING" . t))
-        ("DEFER" ("WAITING" . t) ("DEFER" . t))
+      '(("CANCELLED" ("CANCELLED" . t) ("WAITING") ("DEFER"))
+        ("WAITING" ("WAITING" . t) ("CANCELLED") ("DEFER"))
+        ("DEFER" ("WAITING" . t) ("DEFER" . t) ("CANCELLED"))
         (done ("WAITING") ("CANCELLED") ("DEFER"))
         ("TODO" ("WAITING") ("CANCELLED") ("DEFER"))
         ("NEXT" ("WAITING") ("CANCELLED") ("DEFER"))
@@ -45,9 +45,11 @@
 (setq org-tag-alist '((:startgroup)
                        ("@errand" . ?e)
                        ("@agent" . ?a)
+                       ("@phone" . ?h)
+                       ("@computer" . ?c)
+                       ("@home" . ?H)
                        (:endgroup)
                        ("buy" . ?b)
-                       ("call" . ?h)
                        ("email" . ?E)
                        ("url" . ?u)
                        ("nocal" . ?x)))
@@ -321,15 +323,15 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                                               (member tag tags))
                                             tag-list)))
                             ;; Date range filter (on scheduled or deadline)
+                            ;; When date filters are active, tasks without
+                            ;; any date are excluded (they can't be in range)
                             (or (not from-time)
                                 (let ((s-time (when scheduled
                                                 (org-time-string-to-time scheduled)))
                                       (d-time (when deadline
                                                 (org-time-string-to-time deadline))))
                                   (or (and s-time (not (time-less-p s-time from-time)))
-                                      (and d-time (not (time-less-p d-time from-time)))
-                                      ;; Tasks without dates pass through
-                                      (and (not s-time) (not d-time)))))
+                                      (and d-time (not (time-less-p d-time from-time))))))
                             (or (not to-time)
                                 (let ((s-time (when scheduled
                                                 (org-time-string-to-time scheduled)))
@@ -338,9 +340,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                                   (or (and s-time (time-less-p s-time
                                                                (time-add to-time (seconds-to-time 86400))))
                                       (and d-time (time-less-p d-time
-                                                               (time-add to-time (seconds-to-time 86400))))
-                                      ;; Tasks without dates pass through
-                                      (and (not s-time) (not d-time))))))
+                                                               (time-add to-time (seconds-to-time 86400))))))))
                    (let ((line-str
                           (concat state
                                   (when (and priority-char
@@ -868,6 +868,19 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
 
 (defun org-gtd-cli/set-state (substring new-state &optional index dry-run)
   "Change a task's TODO state."
+  ;; Validate state before doing anything
+  (let ((all-states (apply #'append
+                           (mapcar (lambda (seq)
+                                     (cl-remove-if
+                                      (lambda (s) (member s '("|")))
+                                      (mapcar (lambda (s)
+                                                (replace-regexp-in-string "(.*)" "" s))
+                                              (cdr seq))))
+                                   org-todo-keywords))))
+    (unless (member new-state all-states)
+      (princ (format "Error: \"%s\" is not a valid state\nValid states: %s\n"
+                     new-state (mapconcat #'identity all-states ", ")))
+      (kill-emacs 1)))
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))

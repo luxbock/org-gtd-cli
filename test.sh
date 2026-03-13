@@ -261,6 +261,15 @@ reset_fixtures
 run_cmd '(org-gtd-cli/agenda nil nil nil nil)'
 assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "file reference shown"
 
+echo "test: date range filter"
+reset_fixtures
+run_cmd '(org-gtd-cli/agenda nil nil "2026-03-10" "2026-03-15")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Pay quarterly taxes" "task with deadline in range"
+assert_output_contains "$LAST_OUTPUT" "Choose a formicarium" "task with deadline in range"
+assert_output_not_contains "$LAST_OUTPUT" "Write quarterly report" "task with deadline outside range excluded"
+assert_output_not_contains "$LAST_OUTPUT" "Buy groceries" "task without date excluded"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # show
 # ══════════════════════════════════════════════════════════════════════════════
@@ -430,6 +439,29 @@ reset_fixtures
 run_cmd '(org-gtd-cli/set-state "Pay quarterly taxes" "NEXT" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT [#A] Pay quarterly taxes" "priority preserved"
+
+echo "test: invalid state gives clean error"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-state "Book a rental car" "INVALID" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "not a valid state" "clean error message"
+assert_output_contains "$LAST_OUTPUT" "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" "lists valid states"
+
+echo "test: DEFER → WAITING cleans DEFER tag"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-state "Book a rental car" "DEFER" nil nil)'
+run_cmd '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" ":WAITING:" "WAITING tag present"
+assert_file_not_contains "$TEST_DIR/tasks.org" ":DEFER:" "DEFER tag removed"
+
+echo "test: WAITING → TODO cleans WAITING tag"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil)'
+run_cmd '(org-gtd-cli/set-state "Book a rental car" "TODO" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+# The fixture already has a WAITING task, so check specifically on this task's line
+assert_file_contains "$TEST_DIR/tasks.org" "TODO Book a rental car" "state is TODO"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # refile
