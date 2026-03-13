@@ -593,6 +593,72 @@ run_cmd '(org-gtd-cli/append-body "Reply to dentist" "Call if no reply by Friday
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "Call if no reply by Friday" "text appended"
 
+echo "test: rejects body starting with org heading"
+reset_fixtures
+run_cmd '(org-gtd-cli/append-body "Buy a small UPS" "** Test heading" nil)'
+assert_exit 1 "$LAST_RC" "exits 1 for heading body"
+assert_output_contains "$LAST_OUTPUT" "Error" "error message"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# set-body
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== set-body ==="
+
+echo "test: replaces existing body"
+reset_fixtures
+# "Buy a small UPS" has body lines about power outage + USB UPS, plus a timestamp
+run_cmd '(org-gtd-cli/set-body "Buy a small UPS" "Brand new body text here." nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Set body" "set-body message"
+assert_file_contains "$TEST_DIR/tasks.org" "Brand new body text here." "new body present"
+assert_file_not_contains "$TEST_DIR/tasks.org" "Power outage corrupted" "old body removed"
+assert_file_not_contains "$TEST_DIR/tasks.org" "USB UPS with auto-shutdown" "old body line 2 removed"
+# Timestamp should still be there
+assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-11 Wed 13:35]" "timestamp preserved"
+assert_line_before "$TEST_DIR/tasks.org" "Brand new body text here." "[2026-03-11 Wed 13:35]" "new body before timestamp"
+
+echo "test: empty text removes body"
+reset_fixtures
+# "Buy anti-escape coating" has body text + a date-only timestamp
+run_cmd '(org-gtd-cli/set-body "Buy anti-escape coating" "" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_not_contains "$TEST_DIR/tasks.org" "Messor barbarus can climb" "body text removed"
+assert_file_not_contains "$TEST_DIR/tasks.org" "PTFE anti-escape" "body text line 2 removed"
+# Timestamp preserved
+assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-12 Thu]" "timestamp preserved"
+
+echo "test: set-body on task with no body"
+reset_fixtures
+# "Reply to dentist" in inbox.org has no body, just a timestamp
+run_cmd '(org-gtd-cli/set-body "Reply to dentist" "Please call them Monday." nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" "Please call them Monday." "body inserted"
+
+echo "test: rejects body starting with org heading"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-body "Buy a small UPS" "** Sneaky heading" nil)'
+assert_exit 1 "$LAST_RC" "exits 1 for heading body"
+assert_output_contains "$LAST_OUTPUT" "Error" "error message"
+
+echo "test: preserves metadata (PROPERTIES, LOGBOOK, SCHEDULED/DEADLINE)"
+reset_fixtures
+# "Fix org-capture workspace issue" has PROPERTIES, LOGBOOK, body, and timestamp
+run_cmd '(org-gtd-cli/set-body "Fix org-capture" "Replaced body." nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Replaced body." "new body present"
+assert_file_not_contains "$TEST_DIR/tasks.org" "It appears in the existing Emacs instance" "old body removed"
+assert_file_contains "$TEST_DIR/tasks.org" ":ID:       test-id-capture-fix" "PROPERTIES preserved"
+assert_file_contains "$TEST_DIR/tasks.org" "State \"DONE\"       from \"TODO\"" "LOGBOOK preserved"
+assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-06 Fri 14:33]" "timestamp preserved"
+
+echo "test: index disambiguation"
+reset_fixtures
+# "Buy a" matches multiple tasks — use --index to pick the second one
+run_cmd '(org-gtd-cli/set-body "Buy a" "Index test body." "2")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Index test body." "body set with index"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # move
 # ══════════════════════════════════════════════════════════════════════════════

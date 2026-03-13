@@ -269,6 +269,33 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/append-body $(to_elisp "$SUBSTRING") $(to_elisp "$TEXT") $(to_elisp "$INDEX"))"
         ;;
 
+      set-body)
+        shift
+        SUBSTRING="" TEXT="" INDEX=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli set-body SUBSTR TEXT [--index N]"; exit 0
+        fi
+        # First positional arg is substring
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          SUBSTRING="$1"; shift
+        fi
+        # Second positional arg is text (may be empty string)
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          TEXT="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --index) INDEX="$2"; shift 2 ;;
+            *)       echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli set-body SUBSTRING TEXT [--index N]" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/set-body $(to_elisp "$SUBSTRING") $(to_elisp "$TEXT") $(to_elisp "$INDEX"))"
+        ;;
+
       done)
         shift
         SUBSTRING="" INDEX="" DRY_RUN=""
@@ -561,6 +588,7 @@ writeShellApplication {
       add-note --title TITLE [--link-task SUBSTR] [--tags T1,T2]
         [--sections S1,S2]
       append-body SUBSTR TEXT [--index N]
+      set-body SUBSTR TEXT [--index N]
       done SUBSTR [--index N] [--dry-run]
       set-state SUBSTR STATE [--index N] [--dry-run]
       set-next SUBSTR [--index N]

@@ -798,6 +798,11 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
 
 (defun org-gtd-cli/append-body (substring text &optional index)
   "Append text to an existing task's body."
+  ;; Reject text that starts with an org heading — it would corrupt the tree
+  (when (string-match-p "\\`\\*+ " text)
+    (princ (format "Error: body text starts with an org heading: %s\n"
+                   (car (split-string text "\n"))))
+    (kill-emacs 1))
   (let* ((idx (org-gtd-cli/parse-index index))
          (buf-pos (org-gtd-cli/find-task substring idx t)))
     (with-current-buffer (car buf-pos)
@@ -834,6 +839,58 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
            (insert text "\n"))
          (save-buffer)
          (princ (format "Appended to: \"%s\" (%s:%d)\n" heading rel-file line))))))
+  (kill-emacs 0))
+
+;; --- set-body ---
+
+(defun org-gtd-cli/set-body (substring text &optional index)
+  "Replace the body of an existing task, or remove it if TEXT is empty."
+  ;; Reject text that starts with an org heading — it would corrupt the tree
+  (when (and (not (string-empty-p text))
+             (string-match-p "\\`\\*+ " text))
+    (princ (format "Error: body text starts with an org heading: %s\n"
+                   (car (split-string text "\n"))))
+    (kill-emacs 1))
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (line (line-number-at-pos))
+              (level (org-current-level))
+              (subtree-end (save-excursion (org-end-of-subtree t) (point))))
+         (org-end-of-meta-data t)
+         (let* ((body-start (point))
+                (body-end (save-excursion
+                            (if (re-search-forward
+                                 (format "^\\*\\{%d,\\} " (1+ level))
+                                 subtree-end t)
+                                (line-beginning-position)
+                              subtree-end)))
+                (ts-start nil))
+           ;; Find trailing inactive timestamp line
+           (save-excursion
+             (goto-char body-start)
+             (let ((last-ts-pos nil))
+               (while (and (< (point) body-end)
+                           (not (eobp)))
+                 (when (looking-at "^\\[[-0-9]+ [A-Z][a-z]+\\( [0-9:]+\\)?\\]$")
+                   (setq last-ts-pos (point)))
+                 (forward-line 1))
+               (when last-ts-pos
+                 (setq ts-start last-ts-pos))))
+           ;; Delete existing body (everything from body-start to timestamp or body-end)
+           (let ((delete-end (or ts-start body-end)))
+             (when (< body-start delete-end)
+               (delete-region body-start delete-end)))
+           ;; Insert new text if non-empty
+           (when (not (string-empty-p text))
+             (goto-char body-start)
+             (insert text "\n")))
+         (save-buffer)
+         (princ (format "Set body: \"%s\" (%s:%d)\n" heading rel-file line))))))
   (kill-emacs 0))
 
 ;; --- done ---
