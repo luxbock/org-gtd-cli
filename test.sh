@@ -125,7 +125,7 @@ reset_fixtures
 run_cmd '(org-gtd-cli/add-task "Test task" nil nil nil nil nil nil nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "TODO Test task" "task in inbox"
-assert_output_contains "$LAST_OUTPUT" "Added: Test task -> inbox.org" "output message"
+assert_output_contains "$LAST_OUTPUT" "Added: Test task -> inbox.org (inbox.org:" "output message with file:line"
 
 echo "test: with tags"
 reset_fixtures
@@ -286,8 +286,9 @@ reset_fixtures
 run_cmd '(org-gtd-cli/subtasks "Improve agent workflow" nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points" "DONE child"
-assert_output_contains "$LAST_OUTPUT" "NEXT Design CLI tool" "NEXT child"
+assert_output_contains "$LAST_OUTPUT" "TODO Design CLI tool" "TODO child (subproject)"
 assert_output_contains "$LAST_OUTPUT" "2/4 done" "progress count"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "child has file:line"
 
 echo "test: exits 1 if no subtasks"
 reset_fixtures
@@ -327,11 +328,13 @@ reset_fixtures
 run_cmd '(org-gtd-cli/process-agent-tasks)'
 assert_output_contains "$LAST_OUTPUT" "2/4 done" "subtask progress"
 
-echo "test: includes project context"
+echo "test: includes project context (skips non-TODO ancestors)"
 reset_fixtures
 run_cmd '(org-gtd-cli/process-agent-tasks)'
-assert_output_contains "$LAST_OUTPUT" "Project: Agents" "project context"
-assert_output_contains "$LAST_OUTPUT" "Project: Pet Ants" "project context for formicarium"
+# "Set up automated backups" is under "Agents" (no TODO keyword) → no project
+assert_output_not_contains "$LAST_OUTPUT" "Project: Agents" "skips non-TODO ancestor"
+# "Buy a formicarium" is under "Pet Ants" (no TODO keyword) → no project
+assert_output_not_contains "$LAST_OUTPUT" "Project: Pet Ants" "skips non-TODO ancestor for formicarium"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # done
@@ -343,7 +346,7 @@ echo "test: marks single match as DONE"
 reset_fixtures
 run_cmd '(org-gtd-cli/done "Book a rental car" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "Done: Book a rental car" "done message"
+assert_output_contains "$LAST_OUTPUT" "Done: Book a rental car (tasks.org:" "done message with file:line"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Book a rental car" "state changed in file"
 
 echo "test: exit 2 on ambiguous"
@@ -367,10 +370,10 @@ assert_file_contains "$TEST_DIR/tasks.org" "NEXT Book a rental car" "file unchan
 
 echo "test: auto-progress promotes next TODO to NEXT"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "Design CLI tool" nil nil)'
+run_cmd '(org-gtd-cli/done "Add more test cases" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Auto-progressed" "auto-progress message"
-assert_file_contains "$TEST_DIR/tasks.org" "NEXT Implement CLI tool" "next sibling promoted"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Test on actual project" "next sibling promoted"
 
 echo "test: done removes WAITING tag"
 reset_fixtures
@@ -388,7 +391,7 @@ echo "test: changes state"
 reset_fixtures
 run_cmd '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "NEXT -> WAITING" "state change message"
+assert_output_contains "$LAST_OUTPUT" "NEXT -> WAITING (tasks.org:" "state change message with file:line"
 assert_file_contains "$TEST_DIR/tasks.org" "WAITING Book a rental car" "state in file"
 
 echo "test: WAITING adds tag"
@@ -429,6 +432,7 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
 assert_file_contains "$TEST_DIR/tasks.org" "Buy groceries" "added to tasks.org"
 assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "refile shows file:line"
 
 echo "test: target not found fails"
 reset_fixtures
@@ -538,6 +542,7 @@ reset_fixtures
 run_cmd '(org-gtd-cli/move "Implement CLI tool" "up" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Moved:" "move message"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "move shows file:line"
 
 echo "test: move down"
 reset_fixtures
@@ -550,6 +555,247 @@ reset_fixtures
 run_cmd '(org-gtd-cli/move "Buy anti-escape coating" "after" "Research formicarium" nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Moved:" "move message"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# org-timestamp --inactive
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== org-timestamp --inactive ==="
+
+echo "test: inactive timestamp uses square brackets"
+run_cmd '(org-gtd-cli/org-timestamp "2026-03-15" nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "[2026-03-15 Sun]" "inactive timestamp"
+
+echo "test: inactive timestamp with time"
+run_cmd '(org-gtd-cli/org-timestamp "2026-03-15" "14:00" "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "[2026-03-15 Sun 14:00]" "inactive timestamp with time"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# set-next
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== set-next ==="
+
+echo "test: already has NEXT → no-op"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "already has NEXT message"
+
+echo "test: promotes first TODO child"
+reset_fixtures
+# First complete the NEXT child so there's no NEXT
+run_cmd '(org-gtd-cli/done "Book a rental car" nil nil)'
+# Now the WAITING child remains but no TODO — set-state it first
+run_cmd '(org-gtd-cli/set-state "Get travel insurance" "TODO" nil nil)'
+run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Set NEXT" "set next message"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Get travel insurance" "child promoted"
+
+echo "test: no TODO children → exit 1"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-next "Buy a formicarium" nil)'
+# This has DONE, NEXT, TODO children — it has NEXT, so it should say "Already has NEXT"
+assert_exit 0 "$LAST_RC" "exits 0 (already has NEXT)"
+
+echo "test: leaf task (no children) → exit 1"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-next "Pay quarterly taxes" nil)'
+assert_exit 1 "$LAST_RC" "exits 1 for leaf task"
+
+echo "test: subproject set-next"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-next "Design CLI tool" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "Design CLI tool already has NEXT child"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Subproject tests
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== subproject ==="
+
+echo "test: subtasks of subproject"
+reset_fixtures
+run_cmd '(org-gtd-cli/subtasks "Design CLI tool" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "NEXT Add more test cases" "first child"
+assert_output_contains "$LAST_OUTPUT" "TODO Test on actual project" "second child"
+assert_output_contains "$LAST_OUTPUT" "TODO Start using it" "third child"
+assert_output_contains "$LAST_OUTPUT" "0/3 done" "progress"
+
+echo "test: parent project includes subproject as child"
+reset_fixtures
+run_cmd '(org-gtd-cli/subtasks "Improve agent workflow" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "TODO Design CLI tool" "subproject shown as child"
+assert_output_contains "$LAST_OUTPUT" "TODO Implement CLI tool" "sibling shown"
+
+echo "test: process-agent-tasks shows correct direct-child subtask count"
+reset_fixtures
+run_cmd '(org-gtd-cli/process-agent-tasks)'
+assert_output_contains "$LAST_OUTPUT" "2/4 done" "correct subtask count for improved workflow"
+
+echo "test: process-agent-tasks subtasks have file:line"
+reset_fixtures
+run_cmd '(org-gtd-cli/process-agent-tasks)'
+assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points? (tasks.org:" "child has file:line"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Edge case tests: out-of-bounds index
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== edge cases: out-of-bounds index ==="
+
+assert_file_unchanged() {
+  local file="$1" before="$2" desc="$3"
+  local after
+  after=$(md5sum "$file" | cut -d' ' -f1)
+  if [[ "$before" == "$after" ]]; then
+    echo "  PASS: $desc"; ((PASS++))
+  else
+    echo "  FAIL: $desc (file was modified)"; ((FAIL++))
+  fi
+}
+
+echo "test: done with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/done "Buy" "999" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: set-state with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/set-state "Buy" "NEXT" "999" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: refile with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/refile "Buy" "Shopping" "999" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: append-body with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/append-body "Buy" "text" "999")'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: move with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/move "Buy" "up" nil "999")'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: add-subtask with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/add-subtask "Buy" "child" nil nil nil nil nil nil "999")'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Edge case tests: no match found
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== edge cases: no match ==="
+
+echo "test: done nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/done "xyznonexistent" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: set-state nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-state "xyznonexistent" "NEXT" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: refile nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/refile "xyznonexistent" "Shopping" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: append-body nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/append-body "xyznonexistent" "text" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: move nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/move "xyznonexistent" "up" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Edge case: invalid refile target
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== edge cases: invalid refile target ==="
+
+echo "test: refile to nonexistent heading"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/inbox.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/refile "Buy groceries" "Nonexistent Heading" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/inbox.org" "$BEFORE" "file unchanged"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Integration test: add-subtask → set-next → done chain
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== integration: add-subtask → set-next → done chain ==="
+
+reset_fixtures
+
+echo "test: step 1 - set-next on project with existing NEXT → no-op"
+run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "already has NEXT"
+
+echo "test: step 2 - done Book a rental car → auto-progress"
+run_cmd '(org-gtd-cli/done "Book a rental car" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "DONE Book a rental car" "done"
+
+echo "test: step 3 - verify via subtasks"
+run_cmd '(org-gtd-cli/subtasks "Holiday pre-trip tasks" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "DONE Book a rental car" "done shown"
+assert_output_contains "$LAST_OUTPUT" "WAITING Get travel insurance" "waiting shown"
+
+echo "test: step 4 - set-next with no TODO children → exit 1"
+run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+assert_exit 1 "$LAST_RC" "exits 1 (no TODO to promote)"
+
+echo "test: step 5 - set-state WAITING → TODO"
+run_cmd '(org-gtd-cli/set-state "Get travel insurance" "TODO" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+
+echo "test: step 6 - set-next promotes to NEXT"
+run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Set NEXT" "promoted"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Get travel insurance" "promoted in file"
+
+echo "test: step 7 - add-subtask to NEXT task demotes parent to TODO"
+run_cmd '(org-gtd-cli/add-subtask "Get travel insurance" "Compare providers" nil nil nil nil nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "TODO Get travel insurance" "demoted to TODO"
+assert_file_contains "$TEST_DIR/tasks.org" "TODO Compare providers" "subtask added"
+
+echo "test: step 8 - verify demotion via show"
+run_cmd '(org-gtd-cli/show "Get travel insurance" nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "TODO Get travel insurance" "state is TODO"
+assert_output_contains "$LAST_OUTPUT" "Compare providers" "has child"
 
 echo ""
 echo "All tests completed."

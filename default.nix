@@ -50,13 +50,23 @@ writeShellApplication {
     case "''${1:-}" in
       org-timestamp)
         shift
-        DATE="''${1:-}"
-        TIME="''${2:-}"
+        DATE="" TIME="" INACTIVE=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --inactive) INACTIVE="t"; shift ;;
+            --help|-h)  echo "Usage: org-gtd-cli org-timestamp DATE [TIME] [--inactive]"; exit 0 ;;
+            *)
+              if [[ -z "$DATE" ]]; then DATE="$1"
+              elif [[ -z "$TIME" ]]; then TIME="$1"
+              else echo "Unknown option: $1" >&2; exit 1
+              fi; shift ;;
+          esac
+        done
         if [[ -z "$DATE" ]]; then
-          echo "Usage: org-gtd-cli org-timestamp DATE [TIME]" >&2
+          echo "Usage: org-gtd-cli org-timestamp DATE [TIME] [--inactive]" >&2
           exit 1
         fi
-        run_elisp "(org-gtd-cli/org-timestamp $(to_elisp "$DATE") $(to_elisp "$TIME"))"
+        run_elisp "(org-gtd-cli/org-timestamp $(to_elisp "$DATE") $(to_elisp "$TIME") $(to_elisp "$INACTIVE"))"
         ;;
 
       agenda)
@@ -64,6 +74,7 @@ writeShellApplication {
         STATES="" TAG="" FROM="" TO=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
+            --help|-h) echo "Usage: org-gtd-cli agenda [--state S1,S2] [--tag TAG] [--from DATE] [--to DATE]"; exit 0 ;;
             --state)  STATES="$2"; shift 2 ;;
             --tag)    TAG="$2"; shift 2 ;;
             --from)   FROM="$2"; shift 2 ;;
@@ -77,6 +88,9 @@ writeShellApplication {
       show)
         shift
         SUBSTRING="''${1:-}"
+        if [[ "$SUBSTRING" == "--help" || "$SUBSTRING" == "-h" ]]; then
+          echo "Usage: org-gtd-cli show SUBSTR [--index N]"; exit 0
+        fi
         shift || true
         INDEX=""
         while [[ $# -gt 0 ]]; do
@@ -86,7 +100,7 @@ writeShellApplication {
           esac
         done
         if [[ -z "$SUBSTRING" ]]; then
-          echo "Usage: org-gtd-cli show SUBSTRING [--index N]" >&2
+          echo "Usage: org-gtd-cli show SUBSTR [--index N]" >&2
           exit 1
         fi
         run_elisp "(org-gtd-cli/show $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX"))"
@@ -95,6 +109,9 @@ writeShellApplication {
       subtasks)
         shift
         SUBSTRING="''${1:-}"
+        if [[ "$SUBSTRING" == "--help" || "$SUBSTRING" == "-h" ]]; then
+          echo "Usage: org-gtd-cli subtasks SUBSTR [--index N]"; exit 0
+        fi
         shift || true
         INDEX=""
         while [[ $# -gt 0 ]]; do
@@ -104,13 +121,17 @@ writeShellApplication {
           esac
         done
         if [[ -z "$SUBSTRING" ]]; then
-          echo "Usage: org-gtd-cli subtasks SUBSTRING [--index N]" >&2
+          echo "Usage: org-gtd-cli subtasks SUBSTR [--index N]" >&2
           exit 1
         fi
         run_elisp "(org-gtd-cli/subtasks $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX"))"
         ;;
 
       process-agent-tasks)
+        shift || true
+        if [[ "''${1:-}" == "--help" || "''${1:-}" == "-h" ]]; then
+          echo "Usage: org-gtd-cli process-agent-tasks"; exit 0
+        fi
         run_elisp "(org-gtd-cli/process-agent-tasks)"
         ;;
 
@@ -118,6 +139,9 @@ writeShellApplication {
         shift
         TITLE="" BODY="" TAGS="" SCHEDULE="" DEADLINE="" PRIORITY="" FILE="" CATEGORY="" STATE=""
         # First positional arg is title
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli add-task TITLE [--body TEXT] [--tags T1,T2] [--schedule DATE] [--deadline DATE] [--priority A|B|C] [--file FILE] [--category HEADING] [--state STATE]"; exit 0
+        fi
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           TITLE="$1"; shift
         fi
@@ -144,6 +168,9 @@ writeShellApplication {
       add-subtask)
         shift
         PARENT="" TITLE="" BODY="" TAGS="" SCHEDULE="" DEADLINE="" PRIORITY="" STATE="" INDEX=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli add-subtask SUBSTR TITLE [--body TEXT] [--tags T1,T2] [--schedule DATE] [--deadline DATE] [--priority A|B|C] [--state STATE] [--index N]"; exit 0
+        fi
         # First two positional args are parent and title
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           PARENT="$1"; shift
@@ -173,6 +200,9 @@ writeShellApplication {
       add-event)
         shift
         TITLE="" DATE="" TIME="" TAG="" FILE=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli add-event TITLE --date DATE [--time TIME] [--tag TAG] [--file FILE]"; exit 0
+        fi
         # First positional arg is title
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           TITLE="$1"; shift
@@ -198,6 +228,7 @@ writeShellApplication {
         TITLE="" LINK_TASK="" TAGS="" SECTIONS=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
+            --help|-h)   echo "Usage: org-gtd-cli add-note --title TITLE [--link-task SUBSTR] [--tags T1,T2] [--sections S1,S2]"; exit 0 ;;
             --title)     TITLE="$2"; shift 2 ;;
             --link-task) LINK_TASK="$2"; shift 2 ;;
             --tags)      TAGS="$2"; shift 2 ;;
@@ -215,6 +246,9 @@ writeShellApplication {
       append-body)
         shift
         SUBSTRING="" TEXT="" INDEX=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli append-body SUBSTR TEXT [--index N]"; exit 0
+        fi
         # First two positional args
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           SUBSTRING="$1"; shift
@@ -238,6 +272,9 @@ writeShellApplication {
       done)
         shift
         SUBSTRING="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli done SUBSTR [--index N] [--dry-run]"; exit 0
+        fi
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           SUBSTRING="$1"; shift
         fi
@@ -258,6 +295,9 @@ writeShellApplication {
       set-state)
         shift
         SUBSTRING="" STATE="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli set-state SUBSTR STATE [--index N] [--dry-run]"; exit 0
+        fi
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           SUBSTRING="$1"; shift
         fi
@@ -281,6 +321,9 @@ writeShellApplication {
       refile)
         shift
         SUBSTRING="" TARGET="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli refile SUBSTR --to TARGET [--index N] [--dry-run]"; exit 0
+        fi
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           SUBSTRING="$1"; shift
         fi
@@ -299,9 +342,33 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/refile $(to_elisp "$SUBSTRING") $(to_elisp "$TARGET") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
         ;;
 
+      set-next)
+        shift
+        SUBSTRING="''${1:-}"
+        if [[ "$SUBSTRING" == "--help" || "$SUBSTRING" == "-h" ]]; then
+          echo "Usage: org-gtd-cli set-next SUBSTR [--index N]"; exit 0
+        fi
+        shift || true
+        INDEX=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --index) INDEX="$2"; shift 2 ;;
+            *)       echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli set-next SUBSTR [--index N]" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/set-next $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX"))"
+        ;;
+
       move)
         shift
         SUBSTRING="" DIRECTION="" SIBLING="" INDEX=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli move SUBSTR --up|--down|--before SIBL|--after SIBL [--index N]"; exit 0
+        fi
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           SUBSTRING="$1"; shift
         fi
@@ -327,20 +394,29 @@ writeShellApplication {
     Usage: org-gtd-cli <command> [options]
 
     Commands:
-      org-timestamp DATE [TIME]         Generate org timestamp
-      agenda [OPTIONS]                  Query tasks by state/tag/date
-      show SUBSTRING [--index N]        Show full task content
-      subtasks SUBSTRING [--index N]    List subtasks of a project
-      process-agent-tasks               Get @agent task work queue
-      add-task TITLE [OPTIONS]          Add a TODO task
-      add-subtask PARENT TITLE [OPTS]   Add subtask under a task
-      add-event TITLE --date DATE       Add calendar event
-      add-note --title TITLE [OPTS]     Create a note file
-      append-body SUBSTR TEXT           Append text to task body
-      done SUBSTRING [--index N]        Mark task as DONE
-      set-state SUBSTR STATE            Change task state
-      refile SUBSTR --to TARGET         Move task to heading
-      move SUBSTR --up|--down|...       Reorder among siblings
+      org-timestamp DATE [TIME] [--inactive]
+      agenda [--state S1,S2] [--tag TAG] [--from DATE] [--to DATE]
+      show SUBSTR [--index N]
+      subtasks SUBSTR [--index N]
+      process-agent-tasks
+      add-task TITLE [--body TEXT] [--tags T1,T2] [--schedule DATE]
+        [--deadline DATE] [--priority A|B|C] [--file FILE]
+        [--category HEADING] [--state STATE]
+      add-subtask SUBSTR TITLE [--body TEXT] [--tags T1,T2]
+        [--schedule DATE] [--deadline DATE] [--priority A|B|C]
+        [--state STATE] [--index N]
+      add-event TITLE --date DATE [--time TIME] [--tag TAG] [--file FILE]
+      add-note --title TITLE [--link-task SUBSTR] [--tags T1,T2]
+        [--sections S1,S2]
+      append-body SUBSTR TEXT [--index N]
+      done SUBSTR [--index N] [--dry-run]
+      set-state SUBSTR STATE [--index N] [--dry-run]
+      set-next SUBSTR [--index N]
+      refile SUBSTR --to TARGET [--index N] [--dry-run]
+      move SUBSTR --up|--down|--before SIBL|--after SIBL [--index N]
+
+    SUBSTR matches task headings case-insensitively. --index N (1-based)
+    disambiguates when multiple tasks match.
 
     Environment:
       ORG_DIRECTORY    Path to org files (default: ~/Nextcloud/org/)

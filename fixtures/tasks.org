@@ -43,7 +43,13 @@ CLOSED: [2026-03-10 Tue 16:00]
 - State "DONE"       from "TODO"       [2026-03-10 Tue 16:00]
 :END:
 [2026-03-09 Mon 12:00]
-**** NEXT Design CLI tool
+**** TODO Design CLI tool
+[2026-03-10 Tue 09:00]
+***** NEXT Add more test cases
+[2026-03-10 Tue 09:00]
+***** TODO Test on actual project
+[2026-03-10 Tue 09:00]
+***** TODO Start using it
 [2026-03-10 Tue 09:00]
 **** TODO Implement CLI tool
 [2026-03-10 Tue 09:00]
