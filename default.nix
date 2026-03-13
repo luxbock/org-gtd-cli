@@ -389,6 +389,158 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/move $(to_elisp "$SUBSTRING") $(to_elisp "$DIRECTION") $(to_elisp "$SIBLING") $(to_elisp "$INDEX"))"
         ;;
 
+      rename)
+        shift
+        SUBSTRING="" NEWTITLE="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli rename SUBSTR NEWTITLE [--index N] [--dry-run]"; exit 0
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          SUBSTRING="$1"; shift
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          NEWTITLE="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --index)   INDEX="$2"; shift 2 ;;
+            --dry-run) DRY_RUN="t"; shift ;;
+            *)         echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" || -z "$NEWTITLE" ]]; then
+          echo "Usage: org-gtd-cli rename SUBSTRING NEWTITLE [--index N] [--dry-run]" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/rename $(to_elisp "$SUBSTRING") $(to_elisp "$NEWTITLE") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        ;;
+
+      set-schedule)
+        shift
+        SUBSTRING="" DATE="" TIME="" CLEAR="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli set-schedule SUBSTR DATE [--time TIME] [--clear] [--index N] [--dry-run]"; exit 0
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          SUBSTRING="$1"; shift
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          DATE="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --time)    TIME="$2"; shift 2 ;;
+            --clear)   CLEAR="t"; shift ;;
+            --index)   INDEX="$2"; shift 2 ;;
+            --dry-run) DRY_RUN="t"; shift ;;
+            *)         echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli set-schedule SUBSTR DATE [--time TIME] [--clear] [--index N] [--dry-run]" >&2
+          exit 1
+        fi
+        if [[ -z "$DATE" && -z "$CLEAR" ]]; then
+          echo "Error: provide a DATE or --clear" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/set-schedule $(to_elisp "$SUBSTRING") $(to_elisp "$DATE") $(to_elisp "$TIME") $(to_elisp "$CLEAR") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        ;;
+
+      set-deadline)
+        shift
+        SUBSTRING="" DATE="" TIME="" CLEAR="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli set-deadline SUBSTR DATE [--time TIME] [--clear] [--index N] [--dry-run]"; exit 0
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          SUBSTRING="$1"; shift
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          DATE="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --time)    TIME="$2"; shift 2 ;;
+            --clear)   CLEAR="t"; shift ;;
+            --index)   INDEX="$2"; shift 2 ;;
+            --dry-run) DRY_RUN="t"; shift ;;
+            *)         echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli set-deadline SUBSTR DATE [--time TIME] [--clear] [--index N] [--dry-run]" >&2
+          exit 1
+        fi
+        if [[ -z "$DATE" && -z "$CLEAR" ]]; then
+          echo "Error: provide a DATE or --clear" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/set-deadline $(to_elisp "$SUBSTRING") $(to_elisp "$DATE") $(to_elisp "$TIME") $(to_elisp "$CLEAR") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        ;;
+
+      set-tags)
+        shift
+        SUBSTRING="" ADD="" REMOVE="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli set-tags SUBSTR --add T1,T2 --remove T3 [--index N] [--dry-run]"; exit 0
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          SUBSTRING="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --add)     ADD="$2"; shift 2 ;;
+            --remove)  REMOVE="$2"; shift 2 ;;
+            --index)   INDEX="$2"; shift 2 ;;
+            --dry-run) DRY_RUN="t"; shift ;;
+            *)         echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli set-tags SUBSTR --add T1,T2 --remove T3 [--index N] [--dry-run]" >&2
+          exit 1
+        fi
+        if [[ -z "$ADD" && -z "$REMOVE" ]]; then
+          echo "Error: at least one of --add or --remove is required" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/set-tags $(to_elisp "$SUBSTRING") $(to_elisp "$ADD") $(to_elisp "$REMOVE") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        ;;
+
+      archive)
+        shift
+        SUBSTRING="" INDEX="" DRY_RUN="" ALL=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli archive SUBSTR [--index N] [--dry-run]"; echo "       org-gtd-cli archive --all [--dry-run]"; exit 0
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --all)     ALL="t"; shift ;;
+            --index)   INDEX="$2"; shift 2 ;;
+            --dry-run) DRY_RUN="t"; shift ;;
+            *)
+              if [[ -z "$SUBSTRING" ]]; then SUBSTRING="$1"
+              else echo "Unknown option: $1" >&2; exit 1
+              fi; shift ;;
+          esac
+        done
+        if [[ -n "$ALL" && -n "$SUBSTRING" ]]; then
+          echo "Error: --all and SUBSTR are mutually exclusive" >&2
+          exit 1
+        fi
+        if [[ -z "$ALL" && -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli archive SUBSTR [--index N] [--dry-run]" >&2
+          echo "       org-gtd-cli archive --all [--dry-run]" >&2
+          exit 1
+        fi
+        if [[ -n "$ALL" ]]; then
+          run_elisp "(org-gtd-cli/archive-all $(to_elisp "$DRY_RUN"))"
+        else
+          run_elisp "(org-gtd-cli/archive $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        fi
+        ;;
+
       -h|--help|help|"")
         cat << 'EOF'
     Usage: org-gtd-cli <command> [options]
@@ -414,6 +566,12 @@ writeShellApplication {
       set-next SUBSTR [--index N]
       refile SUBSTR --to TARGET [--index N] [--dry-run]
       move SUBSTR --up|--down|--before SIBL|--after SIBL [--index N]
+      rename SUBSTR NEWTITLE [--index N] [--dry-run]
+      set-schedule SUBSTR DATE [--time TIME] [--clear] [--index N] [--dry-run]
+      set-deadline SUBSTR DATE [--time TIME] [--clear] [--index N] [--dry-run]
+      set-tags SUBSTR --add T1,T2 --remove T3 [--index N] [--dry-run]
+      archive SUBSTR [--index N] [--dry-run]
+      archive --all [--dry-run]
 
     SUBSTR matches task headings case-insensitively. --index N (1-based)
     disambiguates when multiple tasks match.

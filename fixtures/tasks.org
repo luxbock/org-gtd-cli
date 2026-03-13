@@ -108,6 +108,12 @@ CLOSED: [2026-03-07 Sat 16:00] SCHEDULED: <2026-03-07 Sat>
 [2026-03-06 Fri 23:24]
 **** NEXT Book a rental car
 [2026-03-06 Fri 23:26]
+**** DONE Pack suitcases
+CLOSED: [2026-01-10 Fri 12:00]
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-01-10 Fri 12:00]
+:END:
+[2026-01-08 Wed]
 **** WAITING Get travel insurance quote :WAITING:email:
 [2026-03-08 Sun 10:00]
 Waiting for reply from insurance company
@@ -129,9 +135,24 @@ DEADLINE: <2026-03-15 Sun>
 ** WAITING Consider buying a new monitor :WAITING:
 SCHEDULED: <2026-03-09 Mon>
 [2026-03-08 Sun 23:51]
+** DONE Buy new router
+CLOSED: [2026-01-15 Thu 10:00]
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-01-15 Thu 10:00]
+:END:
+[2026-01-10 Sat]
+Old router kept dropping connections.
+** DONE Mystery task
+Some old task with no dates at all
 * Research                                                                :research:
 :PROPERTIES:
 :ID:       test-id-research
 :END:
 ** TODO Check out [[http://example.com/interesting-project][Interesting Project]] for connections to my work :url:
 [2026-03-11 Wed 12:29]
+** DONE Research dentists
+CLOSED: [2026-01-20 Tue 14:00]
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-01-20 Tue 14:00]
+:END:
+[2026-01-18 Sun]
