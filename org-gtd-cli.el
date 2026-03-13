@@ -5,6 +5,7 @@
 
 (require 'org)
 (require 'org-agenda)
+(require 'org-archive)
 (require 'cl-lib)
 
 ;; ══════════════════════════════════════════════════════════════════════════════
@@ -61,6 +62,7 @@
       org-outline-path-complete-in-steps nil
       org-refile-allow-creating-parent-nodes 'confirm
       org-archive-location "%s_archive::* Archived Tasks"
+      org-archive-mark-done nil
       org-tags-column -100
       org-startup-with-inline-images nil)
 
@@ -129,6 +131,47 @@
           (setq parent-task (point))))
       (goto-char parent-task)
       parent-task)))
+
+;; ══════════════════════════════════════════════════════════════════════════════
+;; Sibling reordering by state
+;; ══════════════════════════════════════════════════════════════════════════════
+
+(defun org-gtd-cli/state-sort-priority (state)
+  "Return sort priority for STATE. Lower = earlier among siblings."
+  (cond
+   ((null state) 5)
+   ((member state org-done-keywords) 0)
+   ((string= state "NEXT") 1)
+   ((string= state "TODO") 2)
+   ((string= state "WAITING") 3)
+   ((string= state "DEFER") 4)
+   (t 5)))
+
+(defun org-gtd-cli/reorder-siblings-by-state ()
+  "Sort siblings of heading at point by state priority.
+Point must be on a child heading (level > 1). Only sorts when all
+siblings have TODO keywords (skips if organizational headings are mixed in)."
+  (org-back-to-heading 'invisible-ok)
+  (when (> (org-current-level) 1)
+    (let ((level (org-current-level))
+          (all-tasks t))
+      ;; Check that all siblings at this level have TODO keywords
+      (save-excursion
+        (org-up-heading-safe)
+        (let ((parent-end (save-excursion (org-end-of-subtree t) (point))))
+          (save-excursion
+            (forward-line 1)
+            (while (and all-tasks (< (point) parent-end)
+                        (re-search-forward org-heading-regexp parent-end t))
+              (when (and (= (org-current-level) level)
+                         (not (org-get-todo-state)))
+                (setq all-tasks nil))))
+          (when all-tasks
+            (org-sort-entries nil ?f
+                             (lambda ()
+                               (number-to-string
+                                (org-gtd-cli/state-sort-priority
+                                 (org-get-todo-state)))))))))))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
 ;; Shared helpers
@@ -847,18 +890,10 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                            (setq auto-msg
                                  (format "  Auto-progressed: \"%s\" -> NEXT (%s:%d)\n"
                                          next-heading rel-file next-line)))))))))
-             ;; Group done: move completed task behind active siblings
+             ;; Reorder siblings by state (DONE first, then NEXT, TODO, etc.)
              (save-excursion
                (goto-char (cdr buf-pos))
-               (org-back-to-heading 'invisible-ok)
-               (let ((keep-going t) (count -1))
-                 (save-excursion
-                   (while (and keep-going (org-goto-sibling 'prev))
-                     (cl-incf count)
-                     (when (org-entry-is-done-p)
-                       (setq keep-going nil))))
-                 (when (> count 0)
-                   (org-move-subtree-up count))))
+               (org-gtd-cli/reorder-siblings-by-state))
              (save-buffer)
              (princ (format "Done: %s (%s:%d)\n" heading rel-file line))
              (when auto-msg (princ auto-msg))))))))
@@ -897,6 +932,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                             heading old-state new-state rel-file line))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
+           (org-gtd-cli/reorder-siblings-by-state)
            (save-buffer)
            (princ (format "State change: \"%s\" %s -> %s (%s:%d)\n"
                           heading old-state new-state rel-file line)))))))
@@ -1018,6 +1054,7 @@ If no TODO children exist, exit 1."
                  (child-line (line-number-at-pos)))
              (let ((org-inhibit-logging nil))
                (org-todo "NEXT"))
+             (org-gtd-cli/reorder-siblings-by-state)
              (save-buffer)
              (princ (format "Set NEXT: \"%s\" (%s:%d)\n"
                             child-heading rel-file child-line)))))))))
@@ -1104,6 +1141,332 @@ If no TODO children exist, exit 1."
            (princ (format "Error: unknown direction \"%s\"\n" direction))
            (kill-emacs 1)))
          (save-buffer)))))
+  (kill-emacs 0))
+
+;; --- rename ---
+
+(defun org-gtd-cli/rename (substring new-title &optional index dry-run)
+  "Rename a task's heading to NEW-TITLE.
+Preserves TODO state, priority, and tags."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((old-heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (line (line-number-at-pos)))
+         (if is-dry-run
+             (princ (format "Would rename: \"%s\" -> \"%s\" (%s:%d)\n"
+                            old-heading new-title rel-file line))
+           (org-edit-headline new-title)
+           (save-buffer)
+           (princ (format "Renamed: \"%s\" -> \"%s\" (%s:%d)\n"
+                          old-heading new-title rel-file line)))))))
+  (kill-emacs 0))
+
+;; --- set-schedule ---
+
+(defun org-gtd-cli/set-schedule (substring date-str &optional time-str clear index dry-run)
+  "Set or clear the SCHEDULED date on a task."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (is-clear (and clear (not (equal clear "nil"))
+                        (not (string-empty-p clear))))
+         (date-str (when (and date-str (not (string-empty-p date-str))
+                              (not (equal date-str "nil")))
+                     date-str))
+         (time-str (when (and time-str (not (string-empty-p time-str))
+                              (not (equal time-str "nil")))
+                     time-str))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (line (line-number-at-pos)))
+         (cond
+          (is-clear
+           (if is-dry-run
+               (princ (format "Would clear schedule: \"%s\" (%s:%d)\n"
+                              heading rel-file line))
+             (org-schedule '(4))
+             (save-buffer)
+             (princ (format "Cleared schedule: \"%s\" (%s:%d)\n"
+                            heading rel-file line))))
+          (date-str
+           (let ((ts (org-gtd-cli/make-timestamp date-str time-str t)))
+             (if is-dry-run
+                 (princ (format "Would schedule: \"%s\" %s (%s:%d)\n"
+                                heading ts rel-file line))
+               (org-schedule nil ts)
+               (save-buffer)
+               (princ (format "Scheduled: \"%s\" %s (%s:%d)\n"
+                              heading ts rel-file line)))))
+          (t
+           (princ "Error: provide a DATE or --clear\n")
+           (kill-emacs 1)))))))
+  (kill-emacs 0))
+
+;; --- set-deadline ---
+
+(defun org-gtd-cli/set-deadline (substring date-str &optional time-str clear index dry-run)
+  "Set or clear the DEADLINE date on a task."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (is-clear (and clear (not (equal clear "nil"))
+                        (not (string-empty-p clear))))
+         (date-str (when (and date-str (not (string-empty-p date-str))
+                              (not (equal date-str "nil")))
+                     date-str))
+         (time-str (when (and time-str (not (string-empty-p time-str))
+                              (not (equal time-str "nil")))
+                     time-str))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (line (line-number-at-pos)))
+         (cond
+          (is-clear
+           (if is-dry-run
+               (princ (format "Would clear deadline: \"%s\" (%s:%d)\n"
+                              heading rel-file line))
+             (org-deadline '(4))
+             (save-buffer)
+             (princ (format "Cleared deadline: \"%s\" (%s:%d)\n"
+                            heading rel-file line))))
+          (date-str
+           (let ((ts (org-gtd-cli/make-timestamp date-str time-str t)))
+             (if is-dry-run
+                 (princ (format "Would set deadline: \"%s\" %s (%s:%d)\n"
+                                heading ts rel-file line))
+               (org-deadline nil ts)
+               (save-buffer)
+               (princ (format "Deadline: \"%s\" %s (%s:%d)\n"
+                              heading ts rel-file line)))))
+          (t
+           (princ "Error: provide a DATE or --clear\n")
+           (kill-emacs 1)))))))
+  (kill-emacs 0))
+
+;; --- set-tags ---
+
+(defun org-gtd-cli/set-tags (substring add-csv remove-csv &optional index dry-run)
+  "Add and/or remove tags on an existing task.
+ADD-CSV and REMOVE-CSV are comma-separated tag strings."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (add-tags (when (and add-csv (not (string-empty-p add-csv))
+                              (not (equal add-csv "nil")))
+                     (split-string add-csv ",")))
+         (remove-tags (when (and remove-csv (not (string-empty-p remove-csv))
+                                 (not (equal remove-csv "nil")))
+                        (split-string remove-csv ",")))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (line (line-number-at-pos))
+              (old-tags (org-get-tags nil t))
+              (new-tags (copy-sequence old-tags)))
+         ;; Add tags (skip duplicates)
+         (dolist (tag add-tags)
+           (unless (member tag new-tags)
+             (setq new-tags (append new-tags (list tag)))))
+         ;; Remove tags
+         (dolist (tag remove-tags)
+           (setq new-tags (cl-remove tag new-tags :test #'string=)))
+         (let ((old-str (if old-tags (concat ":" (mapconcat #'identity old-tags ":") ":") ""))
+               (new-str (if new-tags (concat ":" (mapconcat #'identity new-tags ":") ":") "")))
+           (if is-dry-run
+               (princ (format "Would set tags: \"%s\" %s -> %s (%s:%d)\n"
+                              heading old-str new-str rel-file line))
+             (org-set-tags new-tags)
+             (save-buffer)
+             (princ (format "Tags: \"%s\" %s -> %s (%s:%d)\n"
+                            heading old-str new-str rel-file line))))))))
+  (kill-emacs 0))
+
+;; --- archive helpers ---
+
+(defun org-gtd-cli/subtree-has-recent-dates-p ()
+  "Return non-nil if the subtree at point contains dates from this or last month."
+  (save-excursion
+    (let* ((subtree-end (save-excursion (org-end-of-subtree t)))
+           (this-month (format-time-string "%Y-%m-"))
+           ;; Subtract (day-of-month + 1) days to get a date in last month
+           (day-of-month (string-to-number (format-time-string "%d")))
+           (last-month-time (time-subtract (current-time)
+                                           (days-to-time (1+ day-of-month))))
+           (last-month (format-time-string "%Y-%m-" last-month-time))
+           (recent-re (concat last-month "\\|" this-month)))
+      (re-search-forward recent-re subtree-end t))))
+
+(defun org-gtd-cli/subtree-has-any-dates-p ()
+  "Return non-nil if the subtree at point contains any YYYY-MM-DD date string."
+  (save-excursion
+    (let ((subtree-end (save-excursion (org-end-of-subtree t))))
+      (re-search-forward "[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}" subtree-end t))))
+
+(defun org-gtd-cli/inside-active-project-p ()
+  "Return the heading of an active (non-done) ancestor, or nil.
+Walks up via `org-up-heading-safe'.  An ancestor is \"active\" if it has
+a TODO keyword that is NOT in `org-done-keywords'."
+  (save-excursion
+    (let ((result nil))
+      (while (and (not result) (org-up-heading-safe))
+        (let ((state (org-get-todo-state)))
+          (when (and state
+                     (member state org-todo-keywords-1)
+                     (not (member state org-done-keywords)))
+            (setq result (org-get-heading t t t t)))))
+      result)))
+
+;; --- archive (single task) ---
+
+(defun org-gtd-cli/archive (substring &optional index dry-run)
+  "Archive a single completed task."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (line (line-number-at-pos))
+              (state (org-get-todo-state)))
+         ;; Rule 1: must be done
+         (unless (member state org-done-keywords)
+           (princ (format "Not archivable: \"%s\" is still active (%s) (%s:%d)\n"
+                          heading state rel-file line))
+           (kill-emacs 1))
+         ;; Rule 2b: no recent dates
+         (when (org-gtd-cli/subtree-has-recent-dates-p)
+           (princ (format "Not archivable: \"%s\" has recent dates (%s:%d)\n"
+                          heading rel-file line))
+           (kill-emacs 1))
+         ;; Rule 3: not inside active project
+         (let ((active-parent (org-gtd-cli/inside-active-project-p)))
+           (when active-parent
+             (princ (format "Not archivable: \"%s\" is inside active project \"%s\" (%s:%d)\n"
+                            heading active-parent rel-file line))
+             (kill-emacs 1)))
+         ;; All checks passed
+         (if is-dry-run
+             (progn
+               (princ (format "Would archive: \"%s\" (%s:%d)\n" heading rel-file line))
+               (kill-emacs 0))
+           ;; Archive
+           (org-archive-subtree)
+           ;; Save all modified buffers (source + archive)
+           (dolist (buf (buffer-list))
+             (when (and (buffer-file-name buf)
+                        (buffer-modified-p buf))
+               (with-current-buffer buf (save-buffer))))
+           (princ (format "Archived: \"%s\" (%s:%d)\n" heading rel-file line)))))))
+  (kill-emacs 0))
+
+;; --- archive-all (batch) ---
+
+(defun org-gtd-cli/archive-all (&optional dry-run)
+  "Archive all eligible completed tasks across agenda files."
+  (let* ((is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (candidates '())
+         (archived 0)
+         (skipped 0))
+    ;; Collect all DONE/CANCELLED headings
+    (dolist (file (org-agenda-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (goto-char (point-min))
+           (while (re-search-forward org-heading-regexp nil t)
+             (let ((state (org-get-todo-state)))
+               (when (and state (member state org-done-keywords))
+                 (let* ((heading (org-get-heading t t t t))
+                        (pos (line-beginning-position))
+                        (line (line-number-at-pos))
+                        (rel-file (org-gtd-cli/relative-filename file)))
+                   (push (list (current-buffer) pos heading rel-file line)
+                         candidates)))))))))
+    (setq candidates (nreverse candidates))
+    ;; Filter candidates
+    (let ((archivable '()))
+      (dolist (cand candidates)
+        (cl-destructuring-bind (buf pos heading rel-file line) cand
+          (with-current-buffer buf
+            (org-with-wide-buffer
+             (goto-char pos)
+             (cond
+              ;; Rule 3: inside active project → skip silently
+              ((org-gtd-cli/inside-active-project-p)
+               (cl-incf skipped))
+              ;; Rule 2b: recent dates → skip silently
+              ((org-gtd-cli/subtree-has-recent-dates-p)
+               (cl-incf skipped))
+              ;; Rule 2a: no dates at all → skip with message
+              ((not (org-gtd-cli/subtree-has-any-dates-p))
+               (cl-incf skipped)
+               (princ (format "Skipped (no dates): \"%s\" (%s:%d)\n"
+                              heading rel-file line)))
+              ;; All rules pass
+              (t
+               (push (list buf pos heading rel-file line) archivable)))))))
+      (setq archivable (nreverse archivable))
+      (if (null archivable)
+          (progn
+            (when (> skipped 0)
+              (princ (format "%d tasks skipped\n" skipped)))
+            (princ "No archivable tasks found\n")
+            (kill-emacs 0))
+        ;; Sort: within each file, process bottom-up (highest position first)
+        ;; Group by buffer, reverse position order within each group
+        (let ((by-buffer (make-hash-table :test 'eq)))
+          (dolist (item archivable)
+            (let ((buf (nth 0 item)))
+              (puthash buf (cons item (gethash buf by-buffer)) by-buffer)))
+          ;; Each buffer's list is already reversed (highest pos first) due to cons
+          ;; Flatten back to a single list
+          (setq archivable '())
+          (maphash (lambda (_buf items) (setq archivable (append items archivable)))
+                   by-buffer))
+        (dolist (item archivable)
+          (cl-destructuring-bind (buf pos heading rel-file line) item
+            (if is-dry-run
+                (progn
+                  (princ (format "Would archive: \"%s\" (%s:%d)\n"
+                                 heading rel-file line))
+                  (cl-incf archived))
+              (with-current-buffer buf
+                (org-with-wide-buffer
+                 (goto-char pos)
+                 ;; Verify we're still at the right heading (positions may shift)
+                 (org-back-to-heading t)
+                 (org-archive-subtree)
+                 (cl-incf archived))))))
+        ;; Save all modified buffers
+        (unless is-dry-run
+          (dolist (buf (buffer-list))
+            (when (and (buffer-file-name buf)
+                       (buffer-modified-p buf))
+              (with-current-buffer buf (save-buffer)))))
+        (princ (format "%s %d tasks, %d skipped\n"
+                       (if is-dry-run "Would archive" "Archived")
+                       archived skipped)))))
   (kill-emacs 0))
 
 ;;; org-gtd-cli.el ends here

@@ -859,5 +859,472 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "TODO Get travel insurance" "state is TODO"
 assert_output_contains "$LAST_OUTPUT" "Compare providers" "has child"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# rename
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== rename ==="
+
+echo "test: basic rename"
+reset_fixtures
+run_cmd '(org-gtd-cli/rename "Buy groceries" "Buy organic groceries" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Renamed:" "rename message"
+assert_output_contains "$LAST_OUTPUT" "\"Buy groceries\" -> \"Buy organic groceries\"" "old and new in output"
+assert_file_contains "$TEST_DIR/inbox.org" "Buy organic groceries" "new heading in file"
+assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "old heading removed"
+
+echo "test: rename preserves state, priority, and tags"
+reset_fixtures
+run_cmd '(org-gtd-cli/rename "Pay quarterly taxes" "Pay quarterly income taxes" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "TODO [#A] Pay quarterly income taxes" "state and priority preserved"
+
+echo "test: rename preserves tags"
+reset_fixtures
+run_cmd '(org-gtd-cli/rename "Get travel insurance" "Get travel insurance from Allianz" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Get travel insurance from Allianz" "renamed"
+assert_file_contains "$TEST_DIR/tasks.org" ":WAITING:" "WAITING tag preserved"
+assert_file_contains "$TEST_DIR/tasks.org" ":email:" "email tag preserved"
+
+echo "test: rename dry-run"
+reset_fixtures
+run_cmd '(org-gtd-cli/rename "Buy groceries" "Buy organic groceries" nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would rename" "dry-run message"
+assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "file unchanged"
+
+echo "test: rename ambiguous"
+reset_fixtures
+run_cmd '(org-gtd-cli/rename "Buy" "Something" nil nil)'
+assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# set-schedule
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== set-schedule ==="
+
+echo "test: set schedule on unscheduled task"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" nil nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Scheduled:" "schedule message"
+assert_file_contains "$TEST_DIR/inbox.org" "SCHEDULED: <2026-03-20 Fri>" "schedule in file"
+
+echo "test: set schedule with time"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" "14:00" nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" "SCHEDULED: <2026-03-20 Fri 14:00>" "schedule with time in file"
+
+echo "test: overwrite existing schedule"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "Consider buying a new monitor" "2026-04-01" nil nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "SCHEDULED: <2026-04-01 Wed>" "new schedule in file"
+assert_file_not_contains "$TEST_DIR/tasks.org" "SCHEDULED: <2026-03-09 Mon>" "old schedule gone"
+
+echo "test: clear existing schedule"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "Consider buying a new monitor" nil nil "t" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Cleared schedule" "clear message"
+assert_file_not_contains "$TEST_DIR/tasks.org" "SCHEDULED: <2026-03-09 Mon>" "schedule removed"
+
+echo "test: clear when no schedule (no-op)"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "Buy groceries" nil nil "t" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Cleared schedule" "clear message even when none existed"
+
+echo "test: set-schedule dry-run"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" nil nil nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would schedule" "dry-run message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "SCHEDULED:" "file unchanged"
+
+echo "test: set-schedule ambiguous"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "Buy" "2026-03-20" nil nil nil nil)'
+assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# set-deadline
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== set-deadline ==="
+
+echo "test: set deadline on task without one"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" nil nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Deadline:" "deadline message"
+assert_file_contains "$TEST_DIR/inbox.org" "DEADLINE: <2026-03-25 Wed>" "deadline in file"
+
+echo "test: set deadline with time"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" "17:00" nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" "DEADLINE: <2026-03-25 Wed 17:00>" "deadline with time in file"
+
+echo "test: overwrite existing deadline"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-deadline "Pay quarterly taxes" "2026-03-30" nil nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "DEADLINE: <2026-03-30 Mon>" "new deadline"
+assert_file_not_contains "$TEST_DIR/tasks.org" "DEADLINE: <2026-03-15 Sun>" "old deadline gone"
+
+echo "test: clear existing deadline"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-deadline "Pay quarterly taxes" nil nil "t" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Cleared deadline" "clear message"
+assert_file_not_contains "$TEST_DIR/tasks.org" "DEADLINE: <2026-03-15 Sun>" "deadline removed"
+
+echo "test: clear when no deadline (no-op)"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-deadline "Buy groceries" nil nil "t" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Cleared deadline" "clear message even when none existed"
+
+echo "test: set-deadline dry-run"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" nil nil nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would set deadline" "dry-run message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "DEADLINE:" "file unchanged"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# set-tags
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== set-tags ==="
+
+echo "test: add tag"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "Buy groceries" "urgent" nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Tags:" "tags message"
+assert_file_contains "$TEST_DIR/inbox.org" ":urgent:" "tag added"
+# Original tags preserved
+assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag preserved"
+assert_file_contains "$TEST_DIR/inbox.org" ":@errand:" "errand tag preserved"
+
+echo "test: remove tag"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "Buy groceries" nil "@errand" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag preserved"
+
+echo "test: add and remove in one call"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "Buy groceries" "urgent,@home" "@errand" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" ":urgent:" "urgent added"
+assert_file_contains "$TEST_DIR/inbox.org" ":@home:" "home added"
+
+echo "test: remove nonexistent tag (no-op)"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "Buy groceries" nil "nonexistent" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+# Original tags still there
+assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag preserved"
+assert_file_contains "$TEST_DIR/inbox.org" ":@errand:" "errand tag preserved"
+
+echo "test: add tag that already exists (no-op)"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "Buy groceries" "buy" nil nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag still there"
+
+echo "test: set-tags dry-run"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "Buy groceries" "urgent" nil nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would set tags" "dry-run message"
+assert_file_not_contains "$TEST_DIR/inbox.org" ":urgent:" "file unchanged"
+
+echo "test: set-tags ambiguous"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "Buy" "urgent" nil nil nil)'
+assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Edge cases for new commands: out-of-bounds index
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== edge cases: new commands out-of-bounds index ==="
+
+echo "test: rename with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/rename "Buy" "Something" "999" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: set-schedule with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/set-schedule "Buy" "2026-03-20" nil nil "999" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: set-deadline with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/set-deadline "Buy" "2026-03-25" nil nil "999" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+echo "test: set-tags with out-of-bounds index"
+reset_fixtures
+BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+run_cmd '(org-gtd-cli/set-tags "Buy" "urgent" nil "999" nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Edge cases for new commands: no match
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== edge cases: new commands no match ==="
+
+echo "test: rename nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/rename "xyznonexistent" "Something" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: set-schedule nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-schedule "xyznonexistent" "2026-03-20" nil nil nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: set-deadline nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-deadline "xyznonexistent" "2026-03-25" nil nil nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: set-tags nonexistent"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-tags "xyznonexistent" "urgent" nil nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# archive (single task)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== archive: single task ==="
+
+echo "test: archive happy path"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive "buy new router" nil nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" 'Archived: "Buy new router"' "output confirms archive"
+# Task should be gone from tasks.org
+assert_file_not_contains "$TEST_DIR/tasks.org" "Buy new router" "removed from tasks.org"
+# Task should be in archive file
+assert_file_contains "$TEST_DIR/tasks.org_archive" "Buy new router" "present in tasks.org_archive"
+
+echo "test: archive dry-run"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive "research dentists" nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" 'Would archive:' "output says would archive"
+# Task should still be in tasks.org
+assert_file_contains "$TEST_DIR/tasks.org" "Research dentists" "still in tasks.org"
+
+echo "test: archive rejects active task (rule 1)"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive "write quarterly report" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "still active" "output mentions still active"
+
+echo "test: archive rejects recent dates (rule 2b)"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive "submit expense claims" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "recent dates" "output mentions recent dates"
+
+echo "test: archive rejects inside active project (rule 3)"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive "pack suitcases" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "inside active project" "output mentions active project"
+
+echo "test: archive no match"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive "xyznonexistent" nil nil)'
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: archive ambiguous match"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive "buy" nil nil)'
+assert_exit 2 "$LAST_RC" "exits 2"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# archive --all (batch)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== archive: batch (--all) ==="
+
+echo "test: archive --all happy path"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive-all nil)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Archived" "output mentions archived"
+# Old DONE tasks should be gone
+assert_file_not_contains "$TEST_DIR/tasks.org" "Buy new router" "Buy new router archived"
+assert_file_not_contains "$TEST_DIR/tasks.org" "Research dentists" "Research dentists archived"
+# Dateless DONE should be skipped
+assert_output_contains "$LAST_OUTPUT" 'Skipped (no dates): "Mystery task"' "Mystery task skipped (no dates)"
+assert_file_contains "$TEST_DIR/tasks.org" "Mystery task" "Mystery task still in tasks.org"
+# Recent DONE tasks should still be there
+assert_file_contains "$TEST_DIR/tasks.org" "Submit expense claims" "recent DONE preserved"
+# Archive file should exist with archived tasks
+assert_file_contains "$TEST_DIR/tasks.org_archive" "Buy new router" "Buy new router in archive"
+assert_file_contains "$TEST_DIR/tasks.org_archive" "Research dentists" "Research dentists in archive"
+
+echo "test: archive --all dry-run"
+reset_fixtures
+run_cmd '(org-gtd-cli/archive-all "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would archive" "output says would archive"
+# Files should be unchanged
+assert_file_contains "$TEST_DIR/tasks.org" "Buy new router" "Buy new router still in tasks.org"
+assert_file_contains "$TEST_DIR/tasks.org" "Research dentists" "Research dentists still in tasks.org"
+
+echo "test: archive --all nothing eligible"
+reset_fixtures
+# First archive everything eligible
+run_cmd '(org-gtd-cli/archive-all nil)'
+assert_exit 0 "$LAST_RC" "first pass exits 0"
+# Run again — nothing should be left
+run_cmd '(org-gtd-cli/archive-all nil)'
+assert_exit 0 "$LAST_RC" "second pass exits 0"
+assert_output_contains "$LAST_OUTPUT" "No archivable tasks found" "reports nothing eligible"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# State-based sibling reordering
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "═══ State-based sibling reordering ═══"
+
+echo "test: done reorders DONE above NEXT"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* Project A
+** DONE Already done
+** NEXT Active task
+** TODO Target task
+** TODO Another task
+ORGEOF
+run_cmd '(org-gtd-cli/done "Target task")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/reorder.org" "DONE Target task" "task marked DONE"
+assert_line_before "$TEST_DIR/reorder.org" "DONE Target task" "NEXT Active task" "DONE Target above NEXT Active"
+assert_line_before "$TEST_DIR/reorder.org" "DONE Already done" "DONE Target task" "DONE Already done above DONE Target (preserves order)"
+
+echo "test: done + auto-progress reorders both"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* TODO Project B
+** DONE Old done
+** NEXT Current task
+** TODO First todo
+** TODO Second todo
+** TODO Third todo
+ORGEOF
+# Complete the NEXT task — auto-progress should promote "First todo" to NEXT
+run_cmd '(org-gtd-cli/done "Current task")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/reorder.org" "DONE Current task" "NEXT marked DONE"
+assert_file_contains "$TEST_DIR/reorder.org" "NEXT First todo" "First todo auto-progressed to NEXT"
+assert_line_before "$TEST_DIR/reorder.org" "DONE Current task" "NEXT First todo" "DONE Current above NEXT First"
+assert_line_before "$TEST_DIR/reorder.org" "NEXT First todo" "TODO Second todo" "NEXT First above TODO Second"
+
+echo "test: set-state reorders correctly"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* Project C
+** DONE Old done
+** NEXT Active
+** TODO Alpha
+** TODO Beta
+ORGEOF
+# Change Beta to NEXT — should sort above TODO Alpha
+run_cmd '(org-gtd-cli/set-state "Beta" "NEXT")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_line_before "$TEST_DIR/reorder.org" "DONE Old done" "NEXT Active" "DONE above NEXT Active"
+assert_line_before "$TEST_DIR/reorder.org" "NEXT Beta" "TODO Alpha" "NEXT Beta above TODO Alpha"
+
+echo "test: set-next reorders promoted task"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* TODO Project D
+** DONE Old done
+** TODO Alpha
+** TODO Beta
+ORGEOF
+run_cmd '(org-gtd-cli/set-next "Project D")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/reorder.org" "NEXT Alpha" "Alpha promoted to NEXT"
+assert_line_before "$TEST_DIR/reorder.org" "DONE Old done" "NEXT Alpha" "DONE above NEXT"
+assert_line_before "$TEST_DIR/reorder.org" "NEXT Alpha" "TODO Beta" "NEXT Alpha above TODO Beta"
+
+echo "test: CANCELLED sorts with DONE"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* Project E
+** TODO Alpha
+** TODO Beta
+ORGEOF
+run_cmd '(org-gtd-cli/set-state "Alpha" "CANCELLED")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_line_before "$TEST_DIR/reorder.org" "CANCELLED Alpha" "TODO Beta" "CANCELLED above TODO"
+
+echo "test: WAITING/DEFER ordering"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* Project F
+** TODO Alpha
+** TODO Beta
+ORGEOF
+run_cmd '(org-gtd-cli/set-state "Alpha" "DEFER")'
+assert_exit 0 "$LAST_RC" "set-state DEFER exits 0"
+run_cmd '(org-gtd-cli/set-state "Beta" "WAITING")'
+assert_exit 0 "$LAST_RC" "set-state WAITING exits 0"
+assert_line_before "$TEST_DIR/reorder.org" "WAITING Beta" "DEFER Alpha" "WAITING above DEFER"
+
+echo "test: non-task siblings skip reorder"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* Computers
+** Agents
+*** TODO Agent task one
+*** TODO Agent task two
+** Emacs
+*** TODO Emacs task one
+ORGEOF
+# "Agents" and "Emacs" are organizational headings without TODO keywords
+# set-state on a child should not disrupt the parent's children order
+run_cmd '(org-gtd-cli/set-state "Agent task one" "DONE")'
+assert_exit 0 "$LAST_RC" "exits 0"
+# Agents heading should still be before Emacs heading (not reordered)
+assert_line_before "$TEST_DIR/reorder.org" "** Agents" "** Emacs" "organizational headings not reordered"
+
+echo "test: top-level task skip reorder (level 1)"
+reset_fixtures
+cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
+* TODO Top level A
+* TODO Top level B
+ORGEOF
+# Level 1 headings have no parent — reorder should be a no-op
+run_cmd '(org-gtd-cli/set-state "Top level A" "DONE")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/reorder.org" "DONE Top level A" "state changed"
+
 echo ""
 echo "All tests completed."
