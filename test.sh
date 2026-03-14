@@ -297,6 +297,24 @@ run_cmd '(org-gtd-cli/show "interesting article" nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "[[https://example.com" "link shown"
 
+echo "test: show --plain shows heading hierarchy without body/drawers/tags"
+reset_fixtures
+run_cmd '(org-gtd-cli/show "Improve agent workflow" nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "TODO Improve agent workflow" "root heading with state"
+assert_output_contains "$LAST_OUTPUT" "  TODO Design CLI tool" "indented child"
+assert_output_contains "$LAST_OUTPUT" "    NEXT Add more test cases" "doubly indented grandchild"
+assert_output_not_contains "$LAST_OUTPUT" "Top pain points" "no body text"
+assert_output_not_contains "$LAST_OUTPUT" ":LOGBOOK:" "no drawers"
+assert_output_not_contains "$LAST_OUTPUT" ":@agent:" "no tags"
+
+echo "test: show --plain on leaf task"
+reset_fixtures
+run_cmd '(org-gtd-cli/show "Pay quarterly taxes" nil "t")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "TODO [#A] Pay quarterly taxes" "heading with priority"
+assert_output_not_contains "$LAST_OUTPUT" "DEADLINE" "no planning line"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # subtasks
 # ══════════════════════════════════════════════════════════════════════════════

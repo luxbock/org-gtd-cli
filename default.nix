@@ -92,21 +92,22 @@ writeShellApplication {
         shift
         SUBSTRING="''${1:-}"
         if [[ "$SUBSTRING" == "--help" || "$SUBSTRING" == "-h" ]]; then
-          echo "Usage: org-gtd-cli show SUBSTR [--index N]"; exit 0
+          echo "Usage: org-gtd-cli show SUBSTR [--index N] [--plain]"; exit 0
         fi
         shift || true
-        INDEX=""
+        INDEX="" PLAIN=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --index) INDEX="$2"; shift 2 ;;
+            --plain) PLAIN="t"; shift ;;
             *)       echo "Unknown option: $1" >&2; exit 1 ;;
           esac
         done
         if [[ -z "$SUBSTRING" ]]; then
-          echo "Usage: org-gtd-cli show SUBSTR [--index N]" >&2
+          echo "Usage: org-gtd-cli show SUBSTR [--index N] [--plain]" >&2
           exit 1
         fi
-        run_elisp "(org-gtd-cli/show $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX"))"
+        run_elisp "(org-gtd-cli/show $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX") $(to_elisp "$PLAIN"))"
         ;;
 
       subtasks)
@@ -591,7 +592,7 @@ writeShellApplication {
       org-timestamp DATE [TIME] [--inactive]
       agenda [--state S1,S2] [--tag TAG] [--from DATE] [--to DATE]
       agenda-view [KEY]
-      show SUBSTR [--index N]
+      show SUBSTR [--index N] [--plain]
       subtasks SUBSTR [--index N]
       process-agent-tasks
       add-task TITLE [--body TEXT] [--tags T1,T2] [--schedule DATE]

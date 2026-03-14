@@ -308,22 +308,36 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
 
 ;; --- show ---
 
-(defun org-gtd-cli/show (substring &optional index)
-  "Show full content of a task."
+(defun org-gtd-cli/show (substring &optional index plain)
+  "Show full content of a task.
+When PLAIN is non-nil, show only the heading hierarchy with TODO
+state and priority — no tags, body, drawers, or planning lines."
   (let* ((idx (org-gtd-cli/parse-index index))
+         (is-plain (and plain (not (equal plain "nil"))
+                        (not (string-empty-p plain))))
          (buf-pos (org-gtd-cli/find-task substring idx t)))
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((file (buffer-file-name))
               (rel-file (org-gtd-cli/relative-filename file))
-              (line (line-number-at-pos))
-              (beg (point))
-              (end (save-excursion (org-end-of-subtree t) (point)))
-              (content (buffer-substring-no-properties beg end)))
+              (line (line-number-at-pos)))
          (princ (format "(%s:%d)\n" rel-file line))
-         (princ content)
-         (princ "\n")))))
+         (if is-plain
+             (let* ((base-level (org-current-level))
+                    (subtree-end (save-excursion (org-end-of-subtree t) (point))))
+               (while (< (point) subtree-end)
+                 (let* ((level (org-current-level))
+                        (indent (make-string (* 2 (- level base-level)) ?\s))
+                        (heading (org-get-heading t nil nil t)))
+                   (princ (format "%s%s\n" indent heading)))
+                 (unless (outline-next-heading)
+                   (goto-char subtree-end))))
+           (let* ((beg (point))
+                  (end (save-excursion (org-end-of-subtree t) (point)))
+                  (content (buffer-substring-no-properties beg end)))
+             (princ content)
+             (princ "\n")))))))
   (kill-emacs 0))
 
 ;; --- subtasks ---
