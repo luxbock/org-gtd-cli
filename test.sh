@@ -19,6 +19,7 @@ run_cmd() {
   LAST_OUTPUT=$(emacs --batch -q \
     --eval "(setq user-emacs-directory \"$EMACS_DIR/\")" \
     --eval "(setenv \"ORG_DIRECTORY\" \"$TEST_DIR/\")" \
+    -l "$SCRIPT_DIR/gtd-core.el" \
     -l "$SCRIPT_DIR/org-gtd-cli.el" \
     --eval "$1" 2>"$stderr_file")
   LAST_RC=$?
@@ -1398,6 +1399,31 @@ ORGEOF
 run_cmd '(org-gtd-cli/set-state "Top level A" "DONE")'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/reorder.org" "DONE Top level A" "state changed"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# agenda-view
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== agenda-view ==="
+
+echo "test: agenda-view default key (full dashboard)"
+reset_fixtures
+run_cmd '(org-gtd-cli/agenda-view " ")'
+assert_exit 0 $LAST_RC "agenda-view default key"
+assert_output_contains "$LAST_OUTPUT" "Next Tasks" "agenda-view shows Next Tasks section"
+assert_output_contains "$LAST_OUTPUT" "Projects" "agenda-view shows Projects section"
+
+echo "test: agenda-view specific key (Next Tasks)"
+reset_fixtures
+run_cmd '(org-gtd-cli/agenda-view "n")'
+assert_exit 0 $LAST_RC "agenda-view n key"
+assert_output_contains "$LAST_OUTPUT" "Next Tasks" "agenda-view n shows Next Tasks"
+
+echo "test: agenda-view invalid key"
+reset_fixtures
+run_cmd '(org-gtd-cli/agenda-view "INVALID")'
+assert_exit 1 $LAST_RC "agenda-view invalid key"
+assert_output_contains "$LAST_OUTPUT" "Unknown agenda view key" "agenda-view invalid key message"
 
 echo ""
 echo "All tests completed."

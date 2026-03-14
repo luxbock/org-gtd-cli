@@ -6,6 +6,7 @@
 }:
 
 let
+  coreFile = ./gtd-core.el;  # symlink to +gtd-core.el in Doom config
   elispFile = ./org-gtd-cli.el;
 in
 writeShellApplication {
@@ -14,6 +15,7 @@ writeShellApplication {
   text = ''
     # --- Config ---
     ORG_DIR="''${ORG_DIRECTORY:-$HOME/Nextcloud/org/}"
+    CORE_FILE="${coreFile}"
     ELISP_FILE="${elispFile}"
     EMACS_TMPDIR=$(mktemp -d)
     trap 'rm -rf "$EMACS_TMPDIR"' EXIT
@@ -24,6 +26,7 @@ writeShellApplication {
       emacs --batch -q \
         --eval "(setq user-emacs-directory \"$EMACS_TMPDIR/\")" \
         --eval "(setenv \"ORG_DIRECTORY\" \"$ORG_DIR\")" \
+        -l "$CORE_FILE" \
         -l "$ELISP_FILE" \
         --eval "$1"
     }
@@ -535,6 +538,18 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/set-tags $(to_elisp "$SUBSTRING") $(to_elisp "$ADD") $(to_elisp "$REMOVE") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
         ;;
 
+      agenda-view)
+        shift
+        KEY="''${1:- }"
+        if [[ "$KEY" == "--help" || "$KEY" == "-h" ]]; then
+          echo "Usage: org-gtd-cli agenda-view [KEY]"
+          echo "  KEY defaults to ' ' (full GTD dashboard)"
+          echo "  Available keys: ' ' g N r d # n t p w u A"
+          exit 0
+        fi
+        run_elisp "(org-gtd-cli/agenda-view $(to_elisp "$KEY"))"
+        ;;
+
       archive)
         shift
         SUBSTRING="" INDEX="" DRY_RUN="" ALL=""
@@ -575,6 +590,7 @@ writeShellApplication {
     Commands:
       org-timestamp DATE [TIME] [--inactive]
       agenda [--state S1,S2] [--tag TAG] [--from DATE] [--to DATE]
+      agenda-view [KEY]
       show SUBSTR [--index N]
       subtasks SUBSTR [--index N]
       process-agent-tasks
@@ -628,6 +644,7 @@ writeShellApplication {
     nativeBuildInputs = [ emacs-nox coreutils ];
   } ''
     cp ${./test.sh} test.sh
+    cp ${coreFile} gtd-core.el
     cp ${./org-gtd-cli.el} org-gtd-cli.el
     cp -r ${./fixtures} fixtures
     chmod +x test.sh

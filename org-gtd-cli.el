@@ -2,6 +2,9 @@
 
 ;; Standalone org-mode GTD tool for batch mode (emacs --batch -q).
 ;; No Doom Emacs, no external packages — pure built-in org-mode + cl-lib.
+;;
+;; Shared GTD config (TODO keywords, tags, project detection, skip functions,
+;; agenda commands) is loaded from gtd-core.el via `-l` before this file.
 
 (require 'org)
 (require 'org-agenda)
@@ -9,7 +12,7 @@
 (require 'cl-lib)
 
 ;; ══════════════════════════════════════════════════════════════════════════════
-;; Configuration (duplicated from Doom +gtd.el for portability)
+;; CLI-specific configuration
 ;; ══════════════════════════════════════════════════════════════════════════════
 
 ;; Prevent lock file conflicts with running Doom instance
@@ -27,110 +30,13 @@
   (setq org-directory (concat org-directory "/")))
 
 (setq org-agenda-files (list org-directory)
-      org-default-notes-file (concat org-directory "inbox.org"))
+      org-default-notes-file (concat org-directory "inbox.org")
+      org-startup-with-inline-images nil)
 
-;; TODO keywords — DEFER drops @ to avoid interactive note prompt in batch
+;; Override DEFER from core: drop @ to avoid interactive note prompt in batch
 (setq org-todo-keywords
       '((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d!/!)")
         (sequence "WAITING(w/!)" "DEFER(f/!)" "|" "CANCELLED(c/!)")))
-
-(setq org-todo-state-tags-triggers
-      '(("CANCELLED" ("CANCELLED" . t) ("WAITING") ("DEFER"))
-        ("WAITING" ("WAITING" . t) ("CANCELLED") ("DEFER"))
-        ("DEFER" ("WAITING" . t) ("DEFER" . t) ("CANCELLED"))
-        (done ("WAITING") ("CANCELLED") ("DEFER"))
-        ("TODO" ("WAITING") ("CANCELLED") ("DEFER"))
-        ("NEXT" ("WAITING") ("CANCELLED") ("DEFER"))
-        ("DONE" ("WAITING") ("CANCELLED") ("DEFER"))))
-
-(setq org-tag-alist '((:startgroup)
-                       ("@errand" . ?e)
-                       ("@agent" . ?a)
-                       ("@phone" . ?h)
-                       ("@computer" . ?c)
-                       ("@home" . ?H)
-                       (:endgroup)
-                       ("buy" . ?b)
-                       ("email" . ?E)
-                       ("url" . ?u)
-                       ("nocal" . ?x)))
-
-(setq org-log-done 'time
-      org-log-into-drawer t
-      org-enforce-todo-dependencies t
-      org-refile-use-outline-path t
-      org-outline-path-complete-in-steps nil
-      org-refile-allow-creating-parent-nodes 'confirm
-      org-archive-location "%s_archive::* Archived Tasks"
-      org-archive-mark-done nil
-      org-tags-column -100
-      org-startup-with-inline-images nil)
-
-(setq org-refile-targets '((org-agenda-files :maxlevel . 9)))
-(setq org-refile-target-verify-function #'org-gtd-cli/verify-refile-target)
-
-;; ══════════════════════════════════════════════════════════════════════════════
-;; Ported GTD functions (from +gtd-functions.el, Doom macros stripped)
-;; ══════════════════════════════════════════════════════════════════════════════
-
-(defun org-gtd-cli/verify-refile-target ()
-  "Exclude headings with done TODO states from refile targets."
-  (not (member (org-get-todo-state) org-done-keywords)))
-
-(defun org-gtd-cli/is-project-p ()
-  "Any task with a todo keyword subtask."
-  (save-restriction
-    (widen)
-    (let ((has-subtask)
-          (subtree-end (save-excursion (org-end-of-subtree t)))
-          (is-a-task (member (org-get-todo-state) org-todo-keywords-1)))
-      (save-excursion
-        (forward-line 1)
-        (while (and (not has-subtask)
-                    (< (point) subtree-end)
-                    (re-search-forward "^\*+ " subtree-end t))
-          (when (member (org-get-todo-state) org-todo-keywords-1)
-            (setq has-subtask t))))
-      (and is-a-task has-subtask))))
-
-(defun org-gtd-cli/is-task-p ()
-  "Any task with a todo keyword and no subtask."
-  (save-restriction
-    (widen)
-    (let ((has-subtask)
-          (subtree-end (save-excursion (org-end-of-subtree t)))
-          (is-a-task (member (org-get-todo-state) org-todo-keywords-1)))
-      (save-excursion
-        (forward-line 1)
-        (while (and (not has-subtask)
-                    (< (point) subtree-end)
-                    (re-search-forward "^\*+ " subtree-end t))
-          (when (member (org-get-todo-state) org-todo-keywords-1)
-            (setq has-subtask t))))
-      (and is-a-task (not has-subtask)))))
-
-(defun org-gtd-cli/is-project-subtree-p ()
-  "Any task with a todo keyword that is in a project subtree."
-  (let ((task (save-excursion
-                (org-back-to-heading 'invisible-ok)
-                (point))))
-    (save-excursion
-      (org-gtd-cli/find-project-task)
-      (not (equal (point) task)))))
-
-(defun org-gtd-cli/find-project-task ()
-  "Move point to the parent (project) task if any."
-  (save-restriction
-    (widen)
-    (let ((parent-task
-           (save-excursion
-             (org-back-to-heading 'invisible-ok)
-             (point))))
-      (while (org-up-heading-safe)
-        (when (member (org-get-todo-state) org-todo-keywords-1)
-          (setq parent-task (point))))
-      (goto-char parent-task)
-      parent-task)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
 ;; Sibling reordering by state
@@ -912,7 +818,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
              (progn
                (princ (format "Would mark done: %s (%s:%d)\n" heading rel-file line))
                ;; Check for auto-progress
-               (when (org-gtd-cli/is-project-subtree-p)
+               (when (gtd/is-project-subtree-p)
                  (let ((next-sibling-heading
                         (save-excursion
                           (when (org-get-next-sibling)
@@ -927,7 +833,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
              (org-todo "DONE"))
            ;; Auto-progress: promote next TODO sibling to NEXT
            (let ((auto-msg nil))
-             (when (org-gtd-cli/is-project-subtree-p)
+             (when (gtd/is-project-subtree-p)
                ;; Check siblings for NEXT
                (let ((sibling-states '()))
                  (save-excursion
@@ -1537,5 +1443,22 @@ a TODO keyword that is NOT in `org-done-keywords'."
                        (if is-dry-run "Would archive" "Archived")
                        archived skipped)))))
   (kill-emacs 0))
+
+;; ══════════════════════════════════════════════════════════════════════════════
+;; Agenda view (uses org-agenda custom commands from gtd-core.el)
+;; ══════════════════════════════════════════════════════════════════════════════
+
+(defun org-gtd-cli/agenda-view (&optional key)
+  "Run an org-agenda custom command in batch mode.
+KEY defaults to \" \" (the full GTD dashboard)."
+  (let ((cmd-key (or key " ")))
+    (unless (assoc cmd-key org-agenda-custom-commands)
+      (princ (format "Unknown agenda view key: \"%s\"\nAvailable views:\n" cmd-key))
+      (dolist (cmd org-agenda-custom-commands)
+        (when (stringp (car cmd))
+          (princ (format "  \"%s\"  %s\n" (car cmd) (or (nth 1 cmd) "")))))
+      (kill-emacs 1))
+    (org--batch-agenda cmd-key nil nil)
+    (kill-emacs 0)))
 
 ;;; org-gtd-cli.el ends here
