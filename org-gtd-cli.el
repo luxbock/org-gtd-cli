@@ -427,8 +427,8 @@ FILE-NAME defaults to \"tasks.org\"."
              (if state
                  (org-end-of-subtree t)
                (setq found t)
-               (let ((indent (make-string (* 2 level) ?\s)))
-                 (princ (format "%s%s (%s:%d)\n" indent heading rel-file line)))))))))
+               (let ((stars (make-string level ?*)))
+                 (princ (format "%s %s (%s:%d)\n" stars heading rel-file line)))))))))
     (unless found
       (princ "No categories found\n")))
   (kill-emacs 0))

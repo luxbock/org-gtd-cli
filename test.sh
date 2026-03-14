@@ -353,8 +353,8 @@ echo "test: shows plain headings as category tree (default: tasks.org)"
 reset_fixtures
 run_cmd '(org-gtd-cli/categories)'
 assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "Work" "top-level category"
-assert_output_contains "$LAST_OUTPUT" "Agents" "nested plain heading"
+assert_output_contains "$LAST_OUTPUT" "* Work" "top-level category with stars"
+assert_output_contains "$LAST_OUTPUT" "** Agents" "nested heading with stars"
 assert_output_contains "$LAST_OUTPUT" "Pet Ants" "nested plain heading under Family"
 assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "includes file:line"
 
