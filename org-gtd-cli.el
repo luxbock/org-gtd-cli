@@ -769,8 +769,12 @@ FILE-NAME defaults to \"tasks.org\"."
               (level (org-current-level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point))))
          ;; Find insertion point: after body text, before creation timestamp,
-         ;; before first child heading
+         ;; before first child heading.
+         ;; Clamp: when there's no body/metadata (e.g. Orgzly-created tasks),
+         ;; org-end-of-meta-data can overshoot past subtree-end.
          (org-end-of-meta-data t)
+         (when (> (point) subtree-end)
+           (goto-char subtree-end))
          (let* ((body-start (point))
                 (body-end (save-excursion
                             (if (re-search-forward
@@ -791,6 +795,8 @@ FILE-NAME defaults to \"tasks.org\"."
                (when last-ts-pos
                  (setq insert-point last-ts-pos))))
            (goto-char insert-point)
+           ;; Ensure we start on a fresh line (no-body headings end without newline)
+           (unless (bolp) (insert "\n"))
            (insert text "\n"))
          (save-buffer)
          (princ (format "Appended to: \"%s\" (%s:%d)\n" heading rel-file line))))))
@@ -816,7 +822,11 @@ FILE-NAME defaults to \"tasks.org\"."
               (line (line-number-at-pos))
               (level (org-current-level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point))))
+         ;; Clamp: when there's no body/metadata (e.g. Orgzly-created tasks),
+         ;; org-end-of-meta-data can overshoot past subtree-end.
          (org-end-of-meta-data t)
+         (when (> (point) subtree-end)
+           (goto-char subtree-end))
          (let* ((body-start (point))
                 (body-end (save-excursion
                             (if (re-search-forward
@@ -843,6 +853,8 @@ FILE-NAME defaults to \"tasks.org\"."
            ;; Insert new text if non-empty
            (when (not (string-empty-p text))
              (goto-char body-start)
+             ;; Ensure we start on a fresh line (no-body headings end without newline)
+             (unless (bolp) (insert "\n"))
              (insert text "\n")))
          (save-buffer)
          (princ (format "Set body: \"%s\" (%s:%d)\n" heading rel-file line))))))
@@ -1491,6 +1503,101 @@ a TODO keyword that is NOT in `org-done-keywords'."
         (princ (format "%s %d tasks, %d skipped\n"
                        (if is-dry-run "Would archive" "Archived")
                        archived skipped)))))
+  (kill-emacs 0))
+
+;; --- fix-timestamps (batch) ---
+
+(defun org-gtd-cli/fix-timestamps (&optional dry-run)
+  "Add missing trailing inactive timestamps to TODO headings across agenda files.
+Scans all headings with a TODO keyword that lack a trailing inactive timestamp
+in their body, and inserts one using the current date/time."
+  (let* ((is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (candidates '())
+         (fixed 0))
+    ;; Collect headings with TODO keywords that lack a trailing timestamp
+    (dolist (file (org-agenda-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (goto-char (point-min))
+           (while (re-search-forward org-heading-regexp nil t)
+             (let ((state (org-get-todo-state)))
+               (when state
+                 (let* ((heading (org-get-heading t t t t))
+                        (pos (line-beginning-position))
+                        (line (line-number-at-pos))
+                        (level (org-current-level))
+                        (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+                        (rel-file (org-gtd-cli/relative-filename file))
+                        (has-timestamp nil))
+                   ;; Check body for trailing inactive timestamp
+                   (save-excursion
+                     (org-end-of-meta-data t)
+                     (when (> (point) subtree-end)
+                       (goto-char subtree-end))
+                     (let ((body-end (save-excursion
+                                       (if (re-search-forward
+                                            (format "^\\*\\{%d,\\} " (1+ level))
+                                            subtree-end t)
+                                           (line-beginning-position)
+                                         subtree-end))))
+                       (while (and (< (point) body-end)
+                                   (not (eobp)))
+                         (when (looking-at "^\\[[-0-9]+ [A-Z][a-z]+\\( [0-9:]+\\)?\\]$")
+                           (setq has-timestamp t))
+                         (forward-line 1))))
+                   ;; If no timestamp found, add to candidates
+                   (unless has-timestamp
+                     (push (list (current-buffer) pos heading rel-file line level subtree-end)
+                           candidates))))))))))
+    (setq candidates (nreverse candidates))
+    (if (null candidates)
+        (progn
+          (princ "All headings have timestamps, nothing to fix\n")
+          (kill-emacs 0))
+      ;; Sort bottom-up within each buffer to avoid position invalidation
+      (let ((by-buffer (make-hash-table :test 'eq)))
+        (dolist (item candidates)
+          (let ((buf (nth 0 item)))
+            (puthash buf (cons item (gethash buf by-buffer)) by-buffer)))
+        (setq candidates '())
+        (maphash (lambda (_buf items) (setq candidates (append items candidates)))
+                 by-buffer))
+      (dolist (item candidates)
+        (cl-destructuring-bind (buf pos heading rel-file line level subtree-end) item
+          (if is-dry-run
+              (progn
+                (princ (format "Would fix: \"%s\" (%s:%d)\n" heading rel-file line))
+                (cl-incf fixed))
+            (with-current-buffer buf
+              (org-with-wide-buffer
+               (goto-char pos)
+               (org-back-to-heading t)
+               (let* ((cur-subtree-end (save-excursion (org-end-of-subtree t) (point))))
+                 (org-end-of-meta-data t)
+                 (when (> (point) cur-subtree-end)
+                   (goto-char cur-subtree-end))
+                 (let ((body-end (save-excursion
+                                   (if (re-search-forward
+                                        (format "^\\*\\{%d,\\} " (1+ level))
+                                        cur-subtree-end t)
+                                       (line-beginning-position)
+                                     cur-subtree-end))))
+                   (goto-char body-end)
+                   (unless (bolp) (insert "\n"))
+                   (insert (org-gtd-cli/current-inactive-timestamp) "\n")))
+               (princ (format "Fixed: \"%s\" (%s:%d)\n" heading rel-file line))
+               (cl-incf fixed))))))
+      ;; Save all modified buffers
+      (unless is-dry-run
+        (dolist (buf (buffer-list))
+          (when (and (buffer-file-name buf)
+                     (buffer-modified-p buf))
+            (with-current-buffer buf (save-buffer)))))
+      (princ (format "%s %d headings\n"
+                     (if is-dry-run "Would fix" "Fixed")
+                     fixed))))
   (kill-emacs 0))
 
 ;; ══════════════════════════════════════════════════════════════════════════════

@@ -651,6 +651,20 @@ run_cmd '(org-gtd-cli/append-body "Reply to dentist" "Call if no reply by Friday
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "Call if no reply by Friday" "text appended"
 
+echo "test: append-body on heading with no body or timestamp"
+reset_fixtures
+run_cmd '(org-gtd-cli/append-body "Bare heading no body" "Appended to bare heading")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Appended to bare heading" "text appended to bare heading"
+# Verify the text is on its own line, not glued to the headline
+BARE_LINE=$(grep -n "Bare heading no body" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+BODY_LINE=$(grep -n "Appended to bare heading" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+if [[ -n "$BARE_LINE" && -n "$BODY_LINE" && "$BODY_LINE" -gt "$BARE_LINE" ]]; then
+  echo "  PASS: body on separate line after heading"; ((PASS++))
+else
+  echo "  FAIL: body on separate line after heading (heading=$BARE_LINE, body=$BODY_LINE)"; ((FAIL++))
+fi
+
 echo "test: rejects body starting with org heading"
 reset_fixtures
 run_cmd '(org-gtd-cli/append-body "Buy a small UPS" "** Test heading" nil)'
@@ -692,6 +706,20 @@ reset_fixtures
 run_cmd '(org-gtd-cli/set-body "Reply to dentist" "Please call them Monday." nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "Please call them Monday." "body inserted"
+
+echo "test: set-body on heading with no body or timestamp"
+reset_fixtures
+run_cmd '(org-gtd-cli/set-body "Bare heading no body" "Set on bare heading")'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Set on bare heading" "body set on bare heading"
+# Verify the text is on its own line, not glued to the headline
+BARE_LINE=$(grep -n "Bare heading no body" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+BODY_LINE=$(grep -n "Set on bare heading" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+if [[ -n "$BARE_LINE" && -n "$BODY_LINE" && "$BODY_LINE" -gt "$BARE_LINE" ]]; then
+  echo "  PASS: body on separate line after heading"; ((PASS++))
+else
+  echo "  FAIL: body on separate line after heading (heading=$BARE_LINE, body=$BODY_LINE)"; ((FAIL++))
+fi
 
 echo "test: rejects body starting with org heading"
 reset_fixtures
@@ -1484,6 +1512,70 @@ reset_fixtures
 run_cmd '(org-gtd-cli/agenda-view "INVALID")'
 assert_exit 1 $LAST_RC "agenda-view invalid key"
 assert_output_contains "$LAST_OUTPUT" "Unknown agenda view key" "agenda-view invalid key message"
+
+echo ""
+echo "=== fix-timestamps ==="
+
+echo "test: fix-timestamps adds missing timestamps"
+reset_fixtures
+run_cmd '(org-gtd-cli/fix-timestamps)'
+assert_exit 0 $LAST_RC "fix-timestamps exits 0"
+assert_output_contains "$LAST_OUTPUT" "Fixed" "fix-timestamps reports Fixed"
+assert_output_contains "$LAST_OUTPUT" "Bare heading no body" "fix-timestamps mentions Bare heading"
+assert_output_contains "$LAST_OUTPUT" "Mystery task" "fix-timestamps mentions Mystery task"
+# Verify timestamp was actually inserted after the bare heading
+assert_file_contains "$TEST_DIR/tasks.org" "Bare heading no body" "bare heading still in file"
+# The timestamp line should be right after the bare heading
+BARE_LINE=$(grep -n "Bare heading no body" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+NEXT_LINE=$((BARE_LINE + 1))
+NEXT_CONTENT=$(sed -n "${NEXT_LINE}p" "$TEST_DIR/tasks.org")
+if echo "$NEXT_CONTENT" | grep -qP '^\[[-0-9]+ [A-Z][a-z]+( [0-9:]+)?\]$'; then
+  echo "  PASS: timestamp inserted after bare heading"; ((PASS++))
+else
+  echo "  FAIL: expected timestamp after bare heading, got: $NEXT_CONTENT"; ((FAIL++))
+fi
+
+echo "test: fix-timestamps dry-run does not modify files"
+reset_fixtures
+cp "$TEST_DIR/tasks.org" "$TEST_DIR/tasks.org.before"
+run_cmd '(org-gtd-cli/fix-timestamps "t")'
+assert_exit 0 $LAST_RC "fix-timestamps --dry-run exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would fix" "fix-timestamps dry-run reports Would fix"
+if diff -q "$TEST_DIR/tasks.org" "$TEST_DIR/tasks.org.before" >/dev/null 2>&1; then
+  echo "  PASS: dry-run did not modify file"; ((PASS++))
+else
+  echo "  FAIL: dry-run modified the file"; ((FAIL++))
+fi
+
+echo "test: fix-timestamps is idempotent"
+reset_fixtures
+run_cmd '(org-gtd-cli/fix-timestamps)'
+assert_exit 0 $LAST_RC "fix-timestamps first run exits 0"
+run_cmd '(org-gtd-cli/fix-timestamps)'
+assert_exit 0 $LAST_RC "fix-timestamps second run exits 0"
+assert_output_contains "$LAST_OUTPUT" "nothing to fix" "second run reports nothing to fix"
+
+echo "test: fix-timestamps preserves body text"
+reset_fixtures
+run_cmd '(org-gtd-cli/fix-timestamps)'
+assert_exit 0 $LAST_RC "fix-timestamps exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Some old task with no dates at all" "Mystery task body preserved"
+# Timestamp should be after the body text — find the timestamp line following "Mystery task"
+MYSTERY_LINE=$(grep -n "Mystery task" "$TEST_DIR/tasks.org" | head -1 | cut -d: -f1)
+BODY_LINE=$((MYSTERY_LINE + 1))
+TS_LINE=$((MYSTERY_LINE + 2))
+TS_CONTENT=$(sed -n "${TS_LINE}p" "$TEST_DIR/tasks.org")
+if echo "$TS_CONTENT" | grep -qP '^\[[-0-9]+ [A-Z][a-z]+( [0-9:]+)?\]$'; then
+  echo "  PASS: timestamp after Mystery task body text"; ((PASS++))
+else
+  echo "  FAIL: expected timestamp after Mystery task body, got: $TS_CONTENT"; ((FAIL++))
+fi
+
+echo "test: fix-timestamps skips non-TODO headings"
+reset_fixtures
+run_cmd '(org-gtd-cli/fix-timestamps)'
+assert_output_not_contains "$LAST_OUTPUT" "Agents" "fix-timestamps skips non-TODO Agents heading"
+assert_output_not_contains "$LAST_OUTPUT" "Pet Ants" "fix-timestamps skips non-TODO Pet Ants heading"
 
 echo ""
 echo "All tests completed."

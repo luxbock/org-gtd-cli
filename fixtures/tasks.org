@@ -156,3 +156,4 @@ CLOSED: [2026-01-20 Tue 14:00]
 - State "DONE"       from "TODO"       [2026-01-20 Tue 14:00]
 :END:
 [2026-01-18 Sun]
+** TODO Bare heading no body

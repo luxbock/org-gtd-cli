@@ -597,6 +597,19 @@ writeShellApplication {
         fi
         ;;
 
+      fix-timestamps)
+        shift || true
+        DRY_RUN=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --dry-run) DRY_RUN="t"; shift ;;
+            -h|--help) echo "Usage: org-gtd-cli fix-timestamps [--dry-run]"; exit 0 ;;
+            *) echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        run_elisp "(org-gtd-cli/fix-timestamps $(to_elisp "$DRY_RUN"))"
+        ;;
+
       -h|--help|help|"")
         cat << 'EOF'
     Usage: org-gtd-cli <command> [options]
@@ -631,6 +644,7 @@ writeShellApplication {
       set-tags SUBSTR --add T1,T2 --remove T3 [--index N] [--dry-run]
       archive SUBSTR [--index N] [--dry-run]
       archive --all [--dry-run]
+      fix-timestamps [--dry-run]
 
     SUBSTR matches task headings case-insensitively. --index N (1-based)
     disambiguates when multiple tasks match.
