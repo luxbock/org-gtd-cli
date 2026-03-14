@@ -6,11 +6,12 @@ set -uo pipefail
 PASS=0 FAIL=0
 TEST_DIR=$(mktemp -d)
 EMACS_DIR=$(mktemp -d)
+RESULTS_DIR=$(mktemp -d)
 
 # Locate elisp + fixtures relative to script
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Run an elisp command in batch Emacs
+# --- Single-expression runner (legacy, used for complex multi-step tests) ---
 LAST_OUTPUT="" LAST_STDERR="" LAST_RC=0
 run_cmd() {
   local stderr_file
@@ -25,6 +26,41 @@ run_cmd() {
   LAST_RC=$?
   LAST_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
+}
+
+# --- Batch runner: multiple tests in one Emacs session ---
+# Write a batch .el file via heredoc, then call run_batch_file.
+# Inside the .el file, use:
+#   (org-gtd-test/reset)           — kill org buffers + re-copy fixtures
+#   (org-gtd-test/run N '(expr))   — run expr, capture output/rc/files as result N
+BATCH_FILE=""
+run_batch_file() {
+  rm -f "$RESULTS_DIR"/*.out "$RESULTS_DIR"/*.rc
+  rm -rf "$RESULTS_DIR"/*.files
+  emacs --batch -q \
+    --eval "(setq user-emacs-directory \"$EMACS_DIR/\")" \
+    --eval "(setenv \"ORG_DIRECTORY\" \"$TEST_DIR/\")" \
+    --eval "(setq org-gtd-test/results-dir \"$RESULTS_DIR\")" \
+    --eval "(setq org-gtd-test/test-dir \"$TEST_DIR/\")" \
+    --eval "(setq org-gtd-test/script-dir \"$SCRIPT_DIR/\")" \
+    -l "$SCRIPT_DIR/gtd-core.el" \
+    -l "$SCRIPT_DIR/org-gtd-cli.el" \
+    -l "$SCRIPT_DIR/test-harness.el" \
+    -l "$BATCH_FILE" 2>/dev/null
+  rm -f "$BATCH_FILE"
+}
+
+# Retrieve result N from a batch run. Sets LAST_OUTPUT, LAST_RC.
+# Restores the file snapshot to TEST_DIR so assert_file_* calls work.
+get_result() {
+  local idx=$1
+  LAST_OUTPUT=$(cat "$RESULTS_DIR/$idx.out" 2>/dev/null || true)
+  LAST_RC=$(cat "$RESULTS_DIR/$idx.rc" 2>/dev/null || echo "999")
+  LAST_STDERR=""
+  if [[ -d "$RESULTS_DIR/$idx.files" ]]; then
+    rm -rf "${TEST_DIR:?}"/*
+    cp -a "$RESULTS_DIR/$idx.files/." "$TEST_DIR/"
+  fi
 }
 
 reset_fixtures() {
@@ -104,26 +140,34 @@ summary() {
   echo "═══════════════════════════════════════"
   [[ $FAIL -eq 0 ]]
 }
-trap 'summary; rm -rf "$TEST_DIR" "$EMACS_DIR"' EXIT
+trap 'summary; rm -rf "$TEST_DIR" "$EMACS_DIR" "$RESULTS_DIR"' EXIT
 
 # ══════════════════════════════════════════════════════════════════════════════
-# org-timestamp
+# org-timestamp (read-only — all calls in one Emacs session)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== org-timestamp ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/run 0 '(org-gtd-cli/org-timestamp "2026-03-15"))
+(org-gtd-test/run 1 '(org-gtd-cli/org-timestamp "2026-03-15" "14:00"))
+(org-gtd-test/run 2 '(org-gtd-cli/org-timestamp "2026-03-15" "14:00-15:30"))
+ELISP
+run_batch_file
+
 echo "test: outputs correct date with day-of-week"
-run_cmd '(org-gtd-cli/org-timestamp "2026-03-15")'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "<2026-03-15 Sun>" "correct timestamp"
 
 echo "test: outputs correct date+time"
-run_cmd '(org-gtd-cli/org-timestamp "2026-03-15" "14:00")'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "<2026-03-15 Sun 14:00>" "correct timestamp with time"
 
 echo "test: outputs time range"
-run_cmd '(org-gtd-cli/org-timestamp "2026-03-15" "14:00-15:30")'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "<2026-03-15 Sun 14:00-15:30>" "correct time range"
 
@@ -133,59 +177,73 @@ assert_output_contains "$LAST_OUTPUT" "<2026-03-15 Sun 14:00-15:30>" "correct ti
 echo ""
 echo "=== add-task ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-task "Test task" nil nil nil nil nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-task "Tagged task" nil "buy,@errand" nil nil nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/add-task "Scheduled task" nil nil "2026-03-20" nil nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/add-task "Deadline task" nil nil nil "2026-03-25" nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/add-task "Body task" "This is the body text" nil nil nil nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/add-task "Priority task" nil nil nil nil "A" nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/add-task "Waiting task" nil nil nil nil nil nil nil "WAITING"))
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/add-task "Category task" nil nil nil nil nil nil "Work" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 8 '(org-gtd-cli/add-task "Missing cat" nil nil nil nil nil nil "Nonexistent" nil))
+ELISP
+run_batch_file
+
 echo "test: adds to inbox by default"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Test task" nil nil nil nil nil nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "TODO Test task" "task in inbox"
 assert_output_contains "$LAST_OUTPUT" "Added: Test task -> inbox.org (inbox.org:" "output message with file:line"
 
 echo "test: with tags"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Tagged task" nil "buy,@errand" nil nil nil nil nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" ":buy:@errand:" "tags formatted"
 
 echo "test: with schedule"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Scheduled task" nil nil "2026-03-20" nil nil nil nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "SCHEDULED: <2026-03-20 Fri>" "scheduled line"
 
 echo "test: with deadline"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Deadline task" nil nil nil "2026-03-25" nil nil nil nil)'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "DEADLINE: <2026-03-25 Wed>" "deadline line"
 
 echo "test: with body"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Body task" "This is the body text" nil nil nil nil nil nil nil)'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "This is the body text" "body text present"
 
 echo "test: with priority"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Priority task" nil nil nil nil "A" nil nil nil)'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "[#A]" "priority cookie"
 
 echo "test: with state WAITING"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Waiting task" nil nil nil nil nil nil nil "WAITING")'
+get_result 6
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "WAITING Waiting task" "state set"
 
 echo "test: with category"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Category task" nil nil nil nil nil nil "Work" nil)'
+get_result 7
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "TODO Category task" "task in tasks.org"
 assert_output_contains "$LAST_OUTPUT" "tasks.org/Work" "output shows category"
 
 echo "test: category not found fails"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-task "Missing cat" nil nil nil nil nil nil "Nonexistent" nil)'
+get_result 8
 assert_exit 1 "$LAST_RC" "exits 1 for missing category"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -194,77 +252,85 @@ assert_exit 1 "$LAST_RC" "exits 1 for missing category"
 echo ""
 echo "=== add-subtask ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-subtask "Write quarterly report" "Draft introduction" nil nil nil nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-subtask "Buy" "New subtask" nil nil nil nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/add-subtask "Buy" "New subtask" nil nil nil nil nil nil "1"))
+ELISP
+run_batch_file
+
 echo "test: adds child heading at correct level"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-subtask "Write quarterly report" "Draft introduction" nil nil nil nil nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "*** TODO Draft introduction" "correct level"
 assert_output_contains "$LAST_OUTPUT" "Added subtask" "output message"
 
 echo "test: disambiguation works"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-subtask "Buy" "New subtask" nil nil nil nil nil nil nil)'
+get_result 1
 assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 
 echo "test: index selects match"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-subtask "Buy" "New subtask" nil nil nil nil nil nil "1")'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0 with index"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# agenda
+# agenda (read-only — single reset at section start)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== agenda ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/agenda nil nil nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/agenda "TODO" nil nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/agenda "WAITING" nil nil nil))
+(org-gtd-test/run 3 '(org-gtd-cli/agenda nil "@agent" nil nil))
+(org-gtd-test/run 4 '(org-gtd-cli/agenda nil nil "2026-03-10" "2026-03-15"))
+ELISP
+run_batch_file
+
 echo "test: returns all non-done tasks"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda nil nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "TODO" "contains TODO tasks"
 assert_output_not_contains "$LAST_OUTPUT" "DONE Submit expense claims" "excludes DONE tasks"
 
+echo "test: deadline shown in output"
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "D:<2026-03-15 Sun>" "deadline shown"
+
+echo "test: priority shown in output"
+assert_output_contains "$LAST_OUTPUT" "[#A]" "priority shown"
+
+echo "test: file:line in output"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "file reference shown"
+
 echo "test: state filter TODO"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda "TODO" nil nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_not_contains "$LAST_OUTPUT" "NEXT " "excludes NEXT tasks"
 assert_output_not_contains "$LAST_OUTPUT" "WAITING " "excludes WAITING tasks"
 
 echo "test: state filter WAITING"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda "WAITING" nil nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Consider buying a new monitor" "finds WAITING task"
 assert_output_contains "$LAST_OUTPUT" "Get travel insurance quote" "finds second WAITING task"
 
 echo "test: tag filter @agent"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda nil "@agent" nil nil)'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Set up automated backups" "finds agent task"
 assert_output_contains "$LAST_OUTPUT" "Buy a formicarium" "finds inherited agent task"
 assert_output_not_contains "$LAST_OUTPUT" "Pay quarterly taxes" "excludes non-agent"
 
-echo "test: deadline shown in output"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda nil nil nil nil)'
-assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "D:<2026-03-15 Sun>" "deadline shown"
-
-echo "test: priority shown in output"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda nil nil nil nil)'
-assert_output_contains "$LAST_OUTPUT" "[#A]" "priority shown"
-
-echo "test: file:line in output"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda nil nil nil nil)'
-assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "file reference shown"
-
 echo "test: date range filter"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda nil nil "2026-03-10" "2026-03-15")'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Pay quarterly taxes" "task with deadline in range"
 assert_output_contains "$LAST_OUTPUT" "Choose a formicarium" "task with deadline in range"
@@ -272,34 +338,41 @@ assert_output_not_contains "$LAST_OUTPUT" "Write quarterly report" "task with de
 assert_output_not_contains "$LAST_OUTPUT" "Buy groceries" "task without date excluded"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# show
+# show (read-only — single reset at section start)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== show ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/show "Buy a formicarium" nil))
+(org-gtd-test/run 1 '(org-gtd-cli/show "Fix org-capture workspace" nil))
+(org-gtd-test/run 2 '(org-gtd-cli/show "interesting article" nil))
+(org-gtd-test/run 3 '(org-gtd-cli/show "Improve agent workflow" nil "t"))
+(org-gtd-test/run 4 '(org-gtd-cli/show "Pay quarterly taxes" nil "t"))
+ELISP
+run_batch_file
+
 echo "test: shows full subtree"
-reset_fixtures
-run_cmd '(org-gtd-cli/show "Buy a formicarium" nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Messor Barbarus" "body text shown"
 assert_output_contains "$LAST_OUTPUT" "Research formicarium options" "subtask shown"
 assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "file:line header"
 
 echo "test: shows LOGBOOK drawers"
-reset_fixtures
-run_cmd '(org-gtd-cli/show "Fix org-capture workspace" nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" ":LOGBOOK:" "logbook shown"
 
 echo "test: task with org link"
-reset_fixtures
-run_cmd '(org-gtd-cli/show "interesting article" nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "[[https://example.com" "link shown"
 
 echo "test: show --plain shows heading hierarchy without body/drawers/tags"
-reset_fixtures
-run_cmd '(org-gtd-cli/show "Improve agent workflow" nil "t")'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "TODO Improve agent workflow" "root heading with state"
 assert_output_contains "$LAST_OUTPUT" "  TODO Design CLI tool" "indented child"
@@ -309,21 +382,28 @@ assert_output_not_contains "$LAST_OUTPUT" ":LOGBOOK:" "no drawers"
 assert_output_not_contains "$LAST_OUTPUT" ":@agent:" "no tags"
 
 echo "test: show --plain on leaf task"
-reset_fixtures
-run_cmd '(org-gtd-cli/show "Pay quarterly taxes" nil "t")'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "TODO [#A] Pay quarterly taxes" "heading with priority"
 assert_output_not_contains "$LAST_OUTPUT" "DEADLINE" "no planning line"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# subtasks
+# subtasks (read-only — single reset at section start)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== subtasks ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/subtasks "Improve agent workflow" nil))
+(org-gtd-test/run 1 '(org-gtd-cli/subtasks "Pay quarterly taxes" nil))
+(org-gtd-test/run 2 '(org-gtd-cli/subtasks "Holiday pre-trip tasks" nil))
+ELISP
+run_batch_file
+
 echo "test: lists children with states and progress"
-reset_fixtures
-run_cmd '(org-gtd-cli/subtasks "Improve agent workflow" nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points" "DONE child"
 assert_output_contains "$LAST_OUTPUT" "TODO Design CLI tool" "TODO child (subproject)"
@@ -331,27 +411,33 @@ assert_output_contains "$LAST_OUTPUT" "2/4 done" "progress count"
 assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "child has file:line"
 
 echo "test: exits 1 if no subtasks"
-reset_fixtures
-run_cmd '(org-gtd-cli/subtasks "Pay quarterly taxes" nil)'
+get_result 1
 assert_exit 1 "$LAST_RC" "exits 1 for leaf task"
 
 echo "test: nested project subtasks"
-reset_fixtures
-run_cmd '(org-gtd-cli/subtasks "Holiday pre-trip tasks" nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "DONE Book flights" "done subtask"
 assert_output_contains "$LAST_OUTPUT" "NEXT Book a rental car" "next subtask"
 assert_output_contains "$LAST_OUTPUT" "WAITING Get travel insurance" "waiting subtask"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# categories
+# categories (read-only — single reset at section start)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== categories ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/categories))
+(org-gtd-test/run 1 '(org-gtd-cli/categories "inbox.org"))
+(org-gtd-test/run 2 '(org-gtd-cli/categories "nonexistent.org"))
+ELISP
+run_batch_file
+
 echo "test: shows plain headings as category tree (default: tasks.org)"
-reset_fixtures
-run_cmd '(org-gtd-cli/categories)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "* Work" "top-level category with stars"
 assert_output_contains "$LAST_OUTPUT" "** Agents" "nested heading with stars"
@@ -372,44 +458,37 @@ assert_output_not_contains "$LAST_OUTPUT" "(inbox.org:" "no inbox.org headings"
 assert_output_not_contains "$LAST_OUTPUT" "(calendar.org:" "no calendar.org headings"
 
 echo "test: categories --file for a different file"
-reset_fixtures
-run_cmd '(org-gtd-cli/categories "inbox.org")'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0 for inbox.org"
 assert_output_not_contains "$LAST_OUTPUT" "(tasks.org:" "no tasks.org headings"
 
 echo "test: categories --file for nonexistent file"
-run_cmd '(org-gtd-cli/categories "nonexistent.org")'
+get_result 2
 assert_exit 1 "$LAST_RC" "exits 1 for missing file"
 assert_output_contains "$LAST_OUTPUT" "File not found" "shows error message"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# process-agent-tasks
+# process-agent-tasks (read-only — single call, all assertions together)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== process-agent-tasks ==="
 
-echo "test: finds agent tasks"
-reset_fixtures
-run_cmd '(org-gtd-cli/process-agent-tasks)'
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/process-agent-tasks))
+ELISP
+run_batch_file
+
+echo "test: finds agent tasks / includes AGENT instruction / shows subtask progress / includes project context"
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Set up automated backups" "finds backup task"
 assert_output_contains "$LAST_OUTPUT" "Improve agent workflow" "finds workflow task"
 assert_output_contains "$LAST_OUTPUT" "Buy a formicarium" "finds formicarium task"
 assert_output_contains "$LAST_OUTPUT" "Found 3 agent tasks" "correct count"
-
-echo "test: includes AGENT instruction"
-reset_fixtures
-run_cmd '(org-gtd-cli/process-agent-tasks)'
 assert_output_contains "$LAST_OUTPUT" "research backup strategies" "AGENT instruction shown"
-
-echo "test: shows subtask progress"
-reset_fixtures
-run_cmd '(org-gtd-cli/process-agent-tasks)'
 assert_output_contains "$LAST_OUTPUT" "2/4 done" "subtask progress"
-
-echo "test: includes project context (skips non-TODO ancestors)"
-reset_fixtures
-run_cmd '(org-gtd-cli/process-agent-tasks)'
 # "Set up automated backups" is under "Agents" (no TODO keyword) → no project
 assert_output_not_contains "$LAST_OUTPUT" "Project: Agents" "skips non-TODO ancestor"
 # "Buy a formicarium" is under "Pet Ants" (no TODO keyword) → no project
@@ -421,42 +500,53 @@ assert_output_not_contains "$LAST_OUTPUT" "Project: Pet Ants" "skips non-TODO an
 echo ""
 echo "=== done ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-done "Book a rental car" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-done "Buy" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-done "Buy" "1" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-done "Book a rental car" nil "t"))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-done "Add more test cases" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-done "Get travel insurance quote" nil nil))
+ELISP
+run_batch_file
+
 echo "test: marks single match as DONE"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-done "Book a rental car" nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Done: Book a rental car (tasks.org:" "done message with file:line"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Book a rental car" "state changed in file"
 
 echo "test: exit 2 on ambiguous"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-done "Buy" nil nil)'
+get_result 1
 assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 assert_output_contains "$LAST_OUTPUT" "[1]" "shows indexed matches"
 assert_output_contains "$LAST_OUTPUT" "[2]" "shows second match"
 
 echo "test: index selects match"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-done "Buy" "1" nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0 with index"
 
 echo "test: dry-run doesn't modify"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-done "Book a rental car" nil "t")'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would mark done" "dry-run message"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Book a rental car" "file unchanged"
 
 echo "test: auto-progress promotes next TODO to NEXT"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-done "Add more test cases" nil nil)'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Auto-progressed" "auto-progress message"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Test on actual project" "next sibling promoted"
 
 echo "test: done removes WAITING tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-done "Get travel insurance quote" nil nil)'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Get travel insurance quote" "marked done"
 
@@ -466,57 +556,72 @@ assert_file_contains "$TEST_DIR/tasks.org" "DONE Get travel insurance quote" "ma
 echo ""
 echo "=== set-state ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-state "Consider buying a new monitor" "TODO" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-state "Book a rental car" "TODO" nil "t"))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-state "Pay quarterly taxes" "NEXT" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-state "Book a rental car" "INVALID" nil nil))
+;; Multi-step: DEFER → WAITING (no reset between)
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/set-state "Book a rental car" "DEFER" nil nil))
+(org-gtd-test/run 7 '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil))
+;; Multi-step: WAITING → TODO (no reset between)
+(org-gtd-test/reset)
+(org-gtd-test/run 8 '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil))
+(org-gtd-test/run 9 '(org-gtd-cli/set-state "Book a rental car" "TODO" nil nil))
+ELISP
+run_batch_file
+
 echo "test: changes state"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "NEXT -> WAITING (tasks.org:" "state change message with file:line"
 assert_file_contains "$TEST_DIR/tasks.org" "WAITING Book a rental car" "state in file"
 
 echo "test: WAITING adds tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" ":WAITING:" "WAITING tag added"
 
 echo "test: removing WAITING removes tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Consider buying a new monitor" "TODO" nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "TODO Consider buying a new monitor" "state changed"
 
 echo "test: dry-run doesn't modify"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "TODO" nil "t")'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would change" "dry-run message"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Book a rental car" "file unchanged"
 
 echo "test: preserves priority cookie"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Pay quarterly taxes" "NEXT" nil nil)'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT [#A] Pay quarterly taxes" "priority preserved"
 
 echo "test: invalid state gives clean error"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "INVALID" nil nil)'
+get_result 5
 assert_exit 1 "$LAST_RC" "exits 1"
 assert_output_contains "$LAST_OUTPUT" "not a valid state" "clean error message"
 assert_output_contains "$LAST_OUTPUT" "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" "lists valid states"
 
 echo "test: DEFER → WAITING cleans DEFER tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "DEFER" nil nil)'
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil)'
+get_result 7
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" ":WAITING:" "WAITING tag present"
 assert_file_not_contains "$TEST_DIR/tasks.org" ":DEFER:" "DEFER tag removed"
 
 echo "test: WAITING → TODO cleans WAITING tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "WAITING" nil nil)'
-run_cmd '(org-gtd-cli/set-state "Book a rental car" "TODO" nil nil)'
+get_result 9
 assert_exit 0 "$LAST_RC" "exits 0"
 # The fixture already has a WAITING task, so check specifically on this task's line
 assert_file_contains "$TEST_DIR/tasks.org" "TODO Book a rental car" "state is TODO"
@@ -527,9 +632,19 @@ assert_file_contains "$TEST_DIR/tasks.org" "TODO Book a rental car" "state is TO
 echo ""
 echo "=== refile ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Shopping" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/refile "Buy groceries" "Nonexistent" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy groceries" "Shopping" nil "t"))
+ELISP
+run_batch_file
+
 echo "test: moves task to target heading"
-reset_fixtures
-run_cmd '(org-gtd-cli/refile "Buy groceries" "Shopping" nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
 assert_file_contains "$TEST_DIR/tasks.org" "Buy groceries" "added to tasks.org"
@@ -537,13 +652,11 @@ assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
 assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "refile shows file:line"
 
 echo "test: target not found fails"
-reset_fixtures
-run_cmd '(org-gtd-cli/refile "Buy groceries" "Nonexistent" nil nil)'
+get_result 1
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: dry-run doesn't modify"
-reset_fixtures
-run_cmd '(org-gtd-cli/refile "Buy groceries" "Shopping" nil "t")'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would refile" "dry-run message"
 assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "still in inbox"
@@ -554,23 +667,31 @@ assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "still in inbox"
 echo ""
 echo "=== add-event ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-event "Team dinner" "2026-03-20" nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-event "Lunch" "2026-03-21" "12:00-13:00" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/add-event "Family BBQ" "2026-03-22" nil "calfamily" nil))
+ELISP
+run_batch_file
+
 echo "test: appends to calendar.org"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-event "Team dinner" "2026-03-20" nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/calendar.org" "Team dinner" "event added"
 assert_file_contains "$TEST_DIR/calendar.org" ":calpersonal:" "default tag"
 assert_file_contains "$TEST_DIR/calendar.org" "<2026-03-20 Fri>" "timestamp"
 
 echo "test: with time"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-event "Lunch" "2026-03-21" "12:00-13:00" nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/calendar.org" "<2026-03-21 Sat 12:00-13:00>" "time range"
 
 echo "test: custom tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-event "Family BBQ" "2026-03-22" nil "calfamily" nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/calendar.org" ":calfamily:" "custom tag"
 
@@ -580,9 +701,19 @@ assert_file_contains "$TEST_DIR/calendar.org" ":calfamily:" "custom tag"
 echo ""
 echo "=== add-note ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-note "Test research topic" nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-note "Custom note" nil nil "Background,Analysis,Recommendations"))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/add-note "Formicarium research" "Buy a formicarium" nil nil))
+ELISP
+run_batch_file
+
 echo "test: creates note file"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-note "Test research topic" nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Created:" "creation message"
 local_note_file="$TEST_DIR/agent-notes/test-research-topic.org"
@@ -596,8 +727,7 @@ else
 fi
 
 echo "test: custom sections"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-note "Custom note" nil nil "Background,Analysis,Recommendations")'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 local_note_file="$TEST_DIR/agent-notes/custom-note.org"
 if [[ -f "$local_note_file" ]]; then
@@ -609,8 +739,7 @@ else
 fi
 
 echo "test: link-task adds link"
-reset_fixtures
-run_cmd '(org-gtd-cli/add-note "Formicarium research" "Buy a formicarium" nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/formicarium-research.org]]" "link added to task"
 
@@ -620,17 +749,30 @@ assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/formicarium-resea
 echo ""
 echo "=== append-body ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/append-body "Buy a small UPS" "Check APC models" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/append-body "Buy anti-escape coating" "Also check Fluon PTFE spray" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/append-body "Reply to dentist" "Call if no reply by Friday" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/append-body "Bare heading no body" "Appended to bare heading"))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/append-body "Buy a small UPS" "** Test heading" nil))
+ELISP
+run_batch_file
+
 echo "test: appends to task with existing body (before timestamp with time)"
-reset_fixtures
-run_cmd '(org-gtd-cli/append-body "Buy a small UPS" "Check APC models" nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Check APC models" "text appended"
 assert_output_contains "$LAST_OUTPUT" "Appended to" "append message"
 assert_line_before "$TEST_DIR/tasks.org" "Check APC models" "[2026-03-11 Wed 13:35]" "text before timestamp"
 
 echo "test: appends before date-only timestamp"
-reset_fixtures
-run_cmd '(org-gtd-cli/append-body "Buy anti-escape coating" "Also check Fluon PTFE spray" nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Also check Fluon PTFE spray" "text appended"
 # Verify ordering: new text appears after existing body but before the timestamp.
@@ -646,14 +788,12 @@ else
 fi
 
 echo "test: appends to task with no body"
-reset_fixtures
-run_cmd '(org-gtd-cli/append-body "Reply to dentist" "Call if no reply by Friday" nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "Call if no reply by Friday" "text appended"
 
 echo "test: append-body on heading with no body or timestamp"
-reset_fixtures
-run_cmd '(org-gtd-cli/append-body "Bare heading no body" "Appended to bare heading")'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Appended to bare heading" "text appended to bare heading"
 # Verify the text is on its own line, not glued to the headline
@@ -666,8 +806,7 @@ else
 fi
 
 echo "test: rejects body starting with org heading"
-reset_fixtures
-run_cmd '(org-gtd-cli/append-body "Buy a small UPS" "** Test heading" nil)'
+get_result 4
 assert_exit 1 "$LAST_RC" "exits 1 for heading body"
 assert_output_contains "$LAST_OUTPUT" "Error" "error message"
 
@@ -677,10 +816,27 @@ assert_output_contains "$LAST_OUTPUT" "Error" "error message"
 echo ""
 echo "=== set-body ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-body "Buy a small UPS" "Brand new body text here." nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-body "Buy anti-escape coating" "" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-body "Reply to dentist" "Please call them Monday." nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-body "Bare heading no body" "Set on bare heading"))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-body "Buy a small UPS" "** Sneaky heading" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-body "Fix org-capture" "Replaced body." nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/set-body "Buy a" "Index test body." "2"))
+ELISP
+run_batch_file
+
 echo "test: replaces existing body"
-reset_fixtures
-# "Buy a small UPS" has body lines about power outage + USB UPS, plus a timestamp
-run_cmd '(org-gtd-cli/set-body "Buy a small UPS" "Brand new body text here." nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Set body" "set-body message"
 assert_file_contains "$TEST_DIR/tasks.org" "Brand new body text here." "new body present"
@@ -691,9 +847,7 @@ assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-11 Wed 13:35]" "timestamp p
 assert_line_before "$TEST_DIR/tasks.org" "Brand new body text here." "[2026-03-11 Wed 13:35]" "new body before timestamp"
 
 echo "test: empty text removes body"
-reset_fixtures
-# "Buy anti-escape coating" has body text + a date-only timestamp
-run_cmd '(org-gtd-cli/set-body "Buy anti-escape coating" "" nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_not_contains "$TEST_DIR/tasks.org" "Messor barbarus can climb" "body text removed"
 assert_file_not_contains "$TEST_DIR/tasks.org" "PTFE anti-escape" "body text line 2 removed"
@@ -701,15 +855,12 @@ assert_file_not_contains "$TEST_DIR/tasks.org" "PTFE anti-escape" "body text lin
 assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-12 Thu]" "timestamp preserved"
 
 echo "test: set-body on task with no body"
-reset_fixtures
-# "Reply to dentist" in inbox.org has no body, just a timestamp
-run_cmd '(org-gtd-cli/set-body "Reply to dentist" "Please call them Monday." nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "Please call them Monday." "body inserted"
 
 echo "test: set-body on heading with no body or timestamp"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-body "Bare heading no body" "Set on bare heading")'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Set on bare heading" "body set on bare heading"
 # Verify the text is on its own line, not glued to the headline
@@ -722,15 +873,12 @@ else
 fi
 
 echo "test: rejects body starting with org heading"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-body "Buy a small UPS" "** Sneaky heading" nil)'
+get_result 4
 assert_exit 1 "$LAST_RC" "exits 1 for heading body"
 assert_output_contains "$LAST_OUTPUT" "Error" "error message"
 
 echo "test: preserves metadata (PROPERTIES, LOGBOOK, SCHEDULED/DEADLINE)"
-reset_fixtures
-# "Fix org-capture workspace issue" has PROPERTIES, LOGBOOK, body, and timestamp
-run_cmd '(org-gtd-cli/set-body "Fix org-capture" "Replaced body." nil)'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Replaced body." "new body present"
 assert_file_not_contains "$TEST_DIR/tasks.org" "It appears in the existing Emacs instance" "old body removed"
@@ -739,9 +887,7 @@ assert_file_contains "$TEST_DIR/tasks.org" "State \"DONE\"       from \"TODO\"" 
 assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-06 Fri 14:33]" "timestamp preserved"
 
 echo "test: index disambiguation"
-reset_fixtures
-# "Buy a" matches multiple tasks — use --index to pick the second one
-run_cmd '(org-gtd-cli/set-body "Buy a" "Index test body." "2")'
+get_result 6
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Index test body." "body set with index"
 
@@ -751,38 +897,53 @@ assert_file_contains "$TEST_DIR/tasks.org" "Index test body." "body set with ind
 echo ""
 echo "=== move ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/move "Implement CLI tool" "up" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/move "Design CLI tool" "down" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/move "Buy anti-escape coating" "after" "Research formicarium" nil))
+ELISP
+run_batch_file
+
 echo "test: move up"
-reset_fixtures
-run_cmd '(org-gtd-cli/move "Implement CLI tool" "up" nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Moved:" "move message"
 assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "move shows file:line"
 
 echo "test: move down"
-reset_fixtures
-run_cmd '(org-gtd-cli/move "Design CLI tool" "down" nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Moved:" "move message"
 
 echo "test: move after sibling"
-reset_fixtures
-run_cmd '(org-gtd-cli/move "Buy anti-escape coating" "after" "Research formicarium" nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Moved:" "move message"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# org-timestamp --inactive
+# org-timestamp --inactive (read-only — no reset needed)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== org-timestamp --inactive ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/run 0 '(org-gtd-cli/org-timestamp "2026-03-15" nil "t"))
+(org-gtd-test/run 1 '(org-gtd-cli/org-timestamp "2026-03-15" "14:00" "t"))
+ELISP
+run_batch_file
+
 echo "test: inactive timestamp uses square brackets"
-run_cmd '(org-gtd-cli/org-timestamp "2026-03-15" nil "t")'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "[2026-03-15 Sun]" "inactive timestamp"
 
 echo "test: inactive timestamp with time"
-run_cmd '(org-gtd-cli/org-timestamp "2026-03-15" "14:00" "t")'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "[2026-03-15 Sun 14:00]" "inactive timestamp with time"
 
@@ -792,56 +953,77 @@ assert_output_contains "$LAST_OUTPUT" "[2026-03-15 Sun 14:00]" "inactive timesta
 echo ""
 echo "=== set-next ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil))
+;; Multi-step: complete NEXT child, set-state WAITING→TODO, then set-next
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-done "Book a rental car" nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/set-state "Get travel insurance" "TODO" nil nil))
+(org-gtd-test/run 3 '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil))
+;; Buy a formicarium — has NEXT child already
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-next "Buy a formicarium" nil))
+;; Leaf task: set to NEXT, then again (no-op)
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-next "Pay quarterly taxes" nil))
+(org-gtd-test/run 6 '(org-gtd-cli/set-next "Pay quarterly taxes" nil))
+;; Subproject set-next
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/set-next "Design CLI tool" nil))
+ELISP
+run_batch_file
+
 echo "test: already has NEXT → no-op"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "already has NEXT message"
 
 echo "test: promotes first TODO child"
-reset_fixtures
-# First complete the NEXT child so there's no NEXT
-run_cmd '(org-gtd-cli/set-done "Book a rental car" nil nil)'
-# Now the WAITING child remains but no TODO — set-state it first
-run_cmd '(org-gtd-cli/set-state "Get travel insurance" "TODO" nil nil)'
-run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Set NEXT" "set next message"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Get travel insurance" "child promoted"
 
 echo "test: no TODO children → exit 1"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-next "Buy a formicarium" nil)'
+get_result 4
 # This has DONE, NEXT, TODO children — it has NEXT, so it should say "Already has NEXT"
 assert_exit 0 "$LAST_RC" "exits 0 (already has NEXT)"
 
 echo "test: leaf task (no children) → sets task itself to NEXT"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-next "Pay quarterly taxes" nil)'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0 for leaf task"
 assert_output_contains "$LAST_OUTPUT" "Set NEXT" "set next on leaf task"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT [#A] Pay quarterly taxes" "leaf task promoted to NEXT"
 
 echo "test: leaf task already NEXT → no-op"
-run_cmd '(org-gtd-cli/set-next "Pay quarterly taxes" nil)'
+get_result 6
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Already NEXT" "already NEXT message for leaf"
 
 echo "test: subproject set-next"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-next "Design CLI tool" nil)'
+get_result 7
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "Design CLI tool already has NEXT child"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Subproject tests
+# Subproject tests (read-only — single reset at section start)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== subproject ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/subtasks "Design CLI tool" nil))
+(org-gtd-test/run 1 '(org-gtd-cli/subtasks "Improve agent workflow" nil))
+(org-gtd-test/run 2 '(org-gtd-cli/process-agent-tasks))
+ELISP
+run_batch_file
+
 echo "test: subtasks of subproject"
-reset_fixtures
-run_cmd '(org-gtd-cli/subtasks "Design CLI tool" nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "NEXT Add more test cases" "first child"
 assert_output_contains "$LAST_OUTPUT" "TODO Test on actual project" "second child"
@@ -849,20 +1031,14 @@ assert_output_contains "$LAST_OUTPUT" "TODO Start using it" "third child"
 assert_output_contains "$LAST_OUTPUT" "0/3 done" "progress"
 
 echo "test: parent project includes subproject as child"
-reset_fixtures
-run_cmd '(org-gtd-cli/subtasks "Improve agent workflow" nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "TODO Design CLI tool" "subproject shown as child"
 assert_output_contains "$LAST_OUTPUT" "TODO Implement CLI tool" "sibling shown"
 
-echo "test: process-agent-tasks shows correct direct-child subtask count"
-reset_fixtures
-run_cmd '(org-gtd-cli/process-agent-tasks)'
+echo "test: process-agent-tasks shows correct direct-child subtask count and file:line"
+get_result 2
 assert_output_contains "$LAST_OUTPUT" "2/4 done" "correct subtask count for improved workflow"
-
-echo "test: process-agent-tasks subtasks have file:line"
-reset_fixtures
-run_cmd '(org-gtd-cli/process-agent-tasks)'
 assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points? (tasks.org:" "child has file:line"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -882,47 +1058,56 @@ assert_file_unchanged() {
   fi
 }
 
-echo "test: done with out-of-bounds index"
+# Compute BEFORE checksum from fresh fixtures
 reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/set-done "Buy" "999" nil)'
+BEFORE_TASKS=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-done "Buy" "999" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-state "Buy" "NEXT" "999" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy" "Shopping" "999" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/append-body "Buy" "text" "999"))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/move "Buy" "up" nil "999"))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/add-subtask "Buy" "child" nil nil nil nil nil nil "999"))
+ELISP
+run_batch_file
+
+echo "test: done with out-of-bounds index"
+get_result 0
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: set-state with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/set-state "Buy" "NEXT" "999" nil)'
+get_result 1
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: refile with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/refile "Buy" "Shopping" "999" nil)'
+get_result 2
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: append-body with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/append-body "Buy" "text" "999")'
+get_result 3
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: move with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/move "Buy" "up" nil "999")'
+get_result 4
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: add-subtask with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/add-subtask "Buy" "child" nil nil nil nil nil nil "999")'
+get_result 5
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Edge case tests: no match found
@@ -930,29 +1115,35 @@ assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
 echo ""
 echo "=== edge cases: no match ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-done "xyznonexistent" nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/set-state "xyznonexistent" "NEXT" nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/refile "xyznonexistent" "Shopping" nil nil))
+(org-gtd-test/run 3 '(org-gtd-cli/append-body "xyznonexistent" "text" nil))
+(org-gtd-test/run 4 '(org-gtd-cli/move "xyznonexistent" "up" nil nil))
+ELISP
+run_batch_file
+
 echo "test: done nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-done "xyznonexistent" nil nil)'
+get_result 0
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: set-state nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-state "xyznonexistent" "NEXT" nil nil)'
+get_result 1
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: refile nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/refile "xyznonexistent" "Shopping" nil nil)'
+get_result 2
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: append-body nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/append-body "xyznonexistent" "text" nil)'
+get_result 3
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: move nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/move "xyznonexistent" "up" nil nil)'
+get_result 4
 assert_exit 1 "$LAST_RC" "exits 1"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -961,12 +1152,21 @@ assert_exit 1 "$LAST_RC" "exits 1"
 echo ""
 echo "=== edge cases: invalid refile target ==="
 
-echo "test: refile to nonexistent heading"
+# Compute BEFORE checksum from fresh fixtures
 reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/inbox.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/refile "Buy groceries" "Nonexistent Heading" nil nil)'
+BEFORE_INBOX=$(md5sum "$TEST_DIR/inbox.org" | cut -d' ' -f1)
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Nonexistent Heading" nil nil))
+ELISP
+run_batch_file
+
+echo "test: refile to nonexistent heading"
+get_result 0
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/inbox.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/inbox.org" "$BEFORE_INBOX" "file unchanged"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Integration test: add-subtask → set-next → done chain
@@ -974,46 +1174,58 @@ assert_file_unchanged "$TEST_DIR/inbox.org" "$BEFORE" "file unchanged"
 echo ""
 echo "=== integration: add-subtask → set-next → done chain ==="
 
-reset_fixtures
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil))
+(org-gtd-test/run 1 '(org-gtd-cli/set-done "Book a rental car" nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/subtasks "Holiday pre-trip tasks" nil))
+(org-gtd-test/run 3 '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil))
+(org-gtd-test/run 4 '(org-gtd-cli/set-state "Get travel insurance" "TODO" nil nil))
+(org-gtd-test/run 5 '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil))
+(org-gtd-test/run 6 '(org-gtd-cli/add-subtask "Get travel insurance" "Compare providers" nil nil nil nil nil nil nil))
+(org-gtd-test/run 7 '(org-gtd-cli/show "Get travel insurance" nil))
+ELISP
+run_batch_file
 
 echo "test: step 1 - set-next on project with existing NEXT → no-op"
-run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "already has NEXT"
 
 echo "test: step 2 - done Book a rental car → auto-progress"
-run_cmd '(org-gtd-cli/set-done "Book a rental car" nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Book a rental car" "done"
 
 echo "test: step 3 - verify via subtasks"
-run_cmd '(org-gtd-cli/subtasks "Holiday pre-trip tasks" nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "DONE Book a rental car" "done shown"
 assert_output_contains "$LAST_OUTPUT" "WAITING Get travel insurance" "waiting shown"
 
 echo "test: step 4 - set-next with no TODO children → exit 1"
-run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+get_result 3
 assert_exit 1 "$LAST_RC" "exits 1 (no TODO to promote)"
 
 echo "test: step 5 - set-state WAITING → TODO"
-run_cmd '(org-gtd-cli/set-state "Get travel insurance" "TODO" nil nil)'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 
 echo "test: step 6 - set-next promotes to NEXT"
-run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Set NEXT" "promoted"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Get travel insurance" "promoted in file"
 
 echo "test: step 7 - add-subtask to NEXT task demotes parent to TODO"
-run_cmd '(org-gtd-cli/add-subtask "Get travel insurance" "Compare providers" nil nil nil nil nil nil nil)'
+get_result 6
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "TODO Get travel insurance" "demoted to TODO"
 assert_file_contains "$TEST_DIR/tasks.org" "TODO Compare providers" "subtask added"
 
 echo "test: step 8 - verify demotion via show"
-run_cmd '(org-gtd-cli/show "Get travel insurance" nil)'
+get_result 7
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "TODO Get travel insurance" "state is TODO"
 assert_output_contains "$LAST_OUTPUT" "Compare providers" "has child"
@@ -1024,9 +1236,23 @@ assert_output_contains "$LAST_OUTPUT" "Compare providers" "has child"
 echo ""
 echo "=== rename ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/rename "Buy groceries" "Buy organic groceries" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/rename "Pay quarterly taxes" "Pay quarterly income taxes" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/rename "Get travel insurance" "Get travel insurance from Allianz" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/rename "Buy groceries" "Buy organic groceries" nil "t"))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/rename "Buy" "Something" nil nil))
+ELISP
+run_batch_file
+
 echo "test: basic rename"
-reset_fixtures
-run_cmd '(org-gtd-cli/rename "Buy groceries" "Buy organic groceries" nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Renamed:" "rename message"
 assert_output_contains "$LAST_OUTPUT" "\"Buy groceries\" -> \"Buy organic groceries\"" "old and new in output"
@@ -1034,29 +1260,25 @@ assert_file_contains "$TEST_DIR/inbox.org" "Buy organic groceries" "new heading 
 assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "old heading removed"
 
 echo "test: rename preserves state, priority, and tags"
-reset_fixtures
-run_cmd '(org-gtd-cli/rename "Pay quarterly taxes" "Pay quarterly income taxes" nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "TODO [#A] Pay quarterly income taxes" "state and priority preserved"
 
 echo "test: rename preserves tags"
-reset_fixtures
-run_cmd '(org-gtd-cli/rename "Get travel insurance" "Get travel insurance from Allianz" nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Get travel insurance from Allianz" "renamed"
 assert_file_contains "$TEST_DIR/tasks.org" ":WAITING:" "WAITING tag preserved"
 assert_file_contains "$TEST_DIR/tasks.org" ":email:" "email tag preserved"
 
 echo "test: rename dry-run"
-reset_fixtures
-run_cmd '(org-gtd-cli/rename "Buy groceries" "Buy organic groceries" nil "t")'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would rename" "dry-run message"
 assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "file unchanged"
 
 echo "test: rename ambiguous"
-reset_fixtures
-run_cmd '(org-gtd-cli/rename "Buy" "Something" nil nil)'
+get_result 4
 assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1065,49 +1287,61 @@ assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 echo ""
 echo "=== set-schedule ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" "14:00" nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-schedule "Consider buying a new monitor" "2026-04-01" nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-schedule "Consider buying a new monitor" nil nil "t" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-schedule "Buy groceries" nil nil "t" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" nil nil nil "t"))
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/set-schedule "Buy" "2026-03-20" nil nil nil nil))
+ELISP
+run_batch_file
+
 echo "test: set schedule on unscheduled task"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" nil nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Scheduled:" "schedule message"
 assert_file_contains "$TEST_DIR/inbox.org" "SCHEDULED: <2026-03-20 Fri>" "schedule in file"
 
 echo "test: set schedule with time"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" "14:00" nil nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "SCHEDULED: <2026-03-20 Fri 14:00>" "schedule with time in file"
 
 echo "test: overwrite existing schedule"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "Consider buying a new monitor" "2026-04-01" nil nil nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "SCHEDULED: <2026-04-01 Wed>" "new schedule in file"
 assert_file_not_contains "$TEST_DIR/tasks.org" "SCHEDULED: <2026-03-09 Mon>" "old schedule gone"
 
 echo "test: clear existing schedule"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "Consider buying a new monitor" nil nil "t" nil nil)'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Cleared schedule" "clear message"
 assert_file_not_contains "$TEST_DIR/tasks.org" "SCHEDULED: <2026-03-09 Mon>" "schedule removed"
 
 echo "test: clear when no schedule (no-op)"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "Buy groceries" nil nil "t" nil nil)'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Cleared schedule" "clear message even when none existed"
 
 echo "test: set-schedule dry-run"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "Buy groceries" "2026-03-20" nil nil nil "t")'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would schedule" "dry-run message"
 assert_file_not_contains "$TEST_DIR/inbox.org" "SCHEDULED:" "file unchanged"
 
 echo "test: set-schedule ambiguous"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "Buy" "2026-03-20" nil nil nil nil)'
+get_result 6
 assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1116,42 +1350,53 @@ assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 echo ""
 echo "=== set-deadline ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" "17:00" nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-deadline "Pay quarterly taxes" "2026-03-30" nil nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-deadline "Pay quarterly taxes" nil nil "t" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-deadline "Buy groceries" nil nil "t" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" nil nil nil "t"))
+ELISP
+run_batch_file
+
 echo "test: set deadline on task without one"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" nil nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Deadline:" "deadline message"
 assert_file_contains "$TEST_DIR/inbox.org" "DEADLINE: <2026-03-25 Wed>" "deadline in file"
 
 echo "test: set deadline with time"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" "17:00" nil nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "DEADLINE: <2026-03-25 Wed 17:00>" "deadline with time in file"
 
 echo "test: overwrite existing deadline"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-deadline "Pay quarterly taxes" "2026-03-30" nil nil nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "DEADLINE: <2026-03-30 Mon>" "new deadline"
 assert_file_not_contains "$TEST_DIR/tasks.org" "DEADLINE: <2026-03-15 Sun>" "old deadline gone"
 
 echo "test: clear existing deadline"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-deadline "Pay quarterly taxes" nil nil "t" nil nil)'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Cleared deadline" "clear message"
 assert_file_not_contains "$TEST_DIR/tasks.org" "DEADLINE: <2026-03-15 Sun>" "deadline removed"
 
 echo "test: clear when no deadline (no-op)"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-deadline "Buy groceries" nil nil "t" nil nil)'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Cleared deadline" "clear message even when none existed"
 
 echo "test: set-deadline dry-run"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-deadline "Buy groceries" "2026-03-25" nil nil nil "t")'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would set deadline" "dry-run message"
 assert_file_not_contains "$TEST_DIR/inbox.org" "DEADLINE:" "file unchanged"
@@ -1162,9 +1407,27 @@ assert_file_not_contains "$TEST_DIR/inbox.org" "DEADLINE:" "file unchanged"
 echo ""
 echo "=== set-tags ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-tags "Buy groceries" "urgent" nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-tags "Buy groceries" nil "@errand" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-tags "Buy groceries" "urgent,@home" "@errand" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-tags "Buy groceries" nil "nonexistent" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-tags "Buy groceries" "buy" nil nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-tags "Buy groceries" "urgent" nil nil "t"))
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/set-tags "Buy" "urgent" nil nil nil))
+ELISP
+run_batch_file
+
 echo "test: add tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "Buy groceries" "urgent" nil nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Tags:" "tags message"
 assert_file_contains "$TEST_DIR/inbox.org" ":urgent:" "tag added"
@@ -1173,42 +1436,36 @@ assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag preserved"
 assert_file_contains "$TEST_DIR/inbox.org" ":@errand:" "errand tag preserved"
 
 echo "test: remove tag"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "Buy groceries" nil "@errand" nil nil)'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag preserved"
 
 echo "test: add and remove in one call"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "Buy groceries" "urgent,@home" "@errand" nil nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" ":urgent:" "urgent added"
 assert_file_contains "$TEST_DIR/inbox.org" ":@home:" "home added"
 
 echo "test: remove nonexistent tag (no-op)"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "Buy groceries" nil "nonexistent" nil nil)'
+get_result 3
 assert_exit 0 "$LAST_RC" "exits 0"
 # Original tags still there
 assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag preserved"
 assert_file_contains "$TEST_DIR/inbox.org" ":@errand:" "errand tag preserved"
 
 echo "test: add tag that already exists (no-op)"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "Buy groceries" "buy" nil nil nil)'
+get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" ":buy:" "buy tag still there"
 
 echo "test: set-tags dry-run"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "Buy groceries" "urgent" nil nil "t")'
+get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would set tags" "dry-run message"
 assert_file_not_contains "$TEST_DIR/inbox.org" ":urgent:" "file unchanged"
 
 echo "test: set-tags ambiguous"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "Buy" "urgent" nil nil nil)'
+get_result 6
 assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1217,33 +1474,42 @@ assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 echo ""
 echo "=== edge cases: new commands out-of-bounds index ==="
 
-echo "test: rename with out-of-bounds index"
+# Compute BEFORE checksum from fresh fixtures
 reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/rename "Buy" "Something" "999" nil)'
+BEFORE_TASKS=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/rename "Buy" "Something" "999" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-schedule "Buy" "2026-03-20" nil nil "999" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-deadline "Buy" "2026-03-25" nil nil "999" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-tags "Buy" "urgent" nil "999" nil))
+ELISP
+run_batch_file
+
+echo "test: rename with out-of-bounds index"
+get_result 0
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: set-schedule with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/set-schedule "Buy" "2026-03-20" nil nil "999" nil)'
+get_result 1
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: set-deadline with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/set-deadline "Buy" "2026-03-25" nil nil "999" nil)'
+get_result 2
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 echo "test: set-tags with out-of-bounds index"
-reset_fixtures
-BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/set-tags "Buy" "urgent" nil "999" nil)'
+get_result 3
 assert_exit 1 "$LAST_RC" "exits 1"
-assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
+assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE_TASKS" "file unchanged"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Edge cases for new commands: no match
@@ -1251,24 +1517,30 @@ assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
 echo ""
 echo "=== edge cases: new commands no match ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/rename "xyznonexistent" "Something" nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/set-schedule "xyznonexistent" "2026-03-20" nil nil nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/set-deadline "xyznonexistent" "2026-03-25" nil nil nil nil))
+(org-gtd-test/run 3 '(org-gtd-cli/set-tags "xyznonexistent" "urgent" nil nil nil))
+ELISP
+run_batch_file
+
 echo "test: rename nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/rename "xyznonexistent" "Something" nil nil)'
+get_result 0
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: set-schedule nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-schedule "xyznonexistent" "2026-03-20" nil nil nil nil)'
+get_result 1
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: set-deadline nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-deadline "xyznonexistent" "2026-03-25" nil nil nil nil)'
+get_result 2
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: set-tags nonexistent"
-reset_fixtures
-run_cmd '(org-gtd-cli/set-tags "xyznonexistent" "urgent" nil nil nil)'
+get_result 3
 assert_exit 1 "$LAST_RC" "exits 1"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1277,9 +1549,27 @@ assert_exit 1 "$LAST_RC" "exits 1"
 echo ""
 echo "=== archive: single task ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/archive "buy new router" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/archive "research dentists" nil "t"))
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/archive "write quarterly report" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/archive "submit expense claims" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/archive "pack suitcases" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/archive "xyznonexistent" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/archive "buy" nil nil))
+ELISP
+run_batch_file
+
 echo "test: archive happy path"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive "buy new router" nil nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" 'Archived: "Buy new router"' "output confirms archive"
 # Task should be gone from tasks.org
@@ -1288,39 +1578,33 @@ assert_file_not_contains "$TEST_DIR/tasks.org" "Buy new router" "removed from ta
 assert_file_contains "$TEST_DIR/tasks.org_archive" "Buy new router" "present in tasks.org_archive"
 
 echo "test: archive dry-run"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive "research dentists" nil "t")'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" 'Would archive:' "output says would archive"
 # Task should still be in tasks.org
 assert_file_contains "$TEST_DIR/tasks.org" "Research dentists" "still in tasks.org"
 
 echo "test: archive rejects active task (rule 1)"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive "write quarterly report" nil nil)'
+get_result 2
 assert_exit 1 "$LAST_RC" "exits 1"
 assert_output_contains "$LAST_OUTPUT" "still active" "output mentions still active"
 
 echo "test: archive rejects recent dates (rule 2b)"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive "submit expense claims" nil nil)'
+get_result 3
 assert_exit 1 "$LAST_RC" "exits 1"
 assert_output_contains "$LAST_OUTPUT" "recent dates" "output mentions recent dates"
 
 echo "test: archive rejects inside active project (rule 3)"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive "pack suitcases" nil nil)'
+get_result 4
 assert_exit 1 "$LAST_RC" "exits 1"
 assert_output_contains "$LAST_OUTPUT" "inside active project" "output mentions active project"
 
 echo "test: archive no match"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive "xyznonexistent" nil nil)'
+get_result 5
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: archive ambiguous match"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive "buy" nil nil)'
+get_result 6
 assert_exit 2 "$LAST_RC" "exits 2"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1329,9 +1613,21 @@ assert_exit 2 "$LAST_RC" "exits 2"
 echo ""
 echo "=== archive: batch (--all) ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/archive-all nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/archive-all "t"))
+;; Multi-step: archive all, then archive all again (idempotent)
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/archive-all nil))
+(org-gtd-test/run 3 '(org-gtd-cli/archive-all nil))
+ELISP
+run_batch_file
+
 echo "test: archive --all happy path"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive-all nil)'
+get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Archived" "output mentions archived"
 # Old DONE tasks should be gone
@@ -1347,8 +1643,7 @@ assert_file_contains "$TEST_DIR/tasks.org_archive" "Buy new router" "Buy new rou
 assert_file_contains "$TEST_DIR/tasks.org_archive" "Research dentists" "Research dentists in archive"
 
 echo "test: archive --all dry-run"
-reset_fixtures
-run_cmd '(org-gtd-cli/archive-all "t")'
+get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would archive" "output says would archive"
 # Files should be unchanged
@@ -1356,12 +1651,10 @@ assert_file_contains "$TEST_DIR/tasks.org" "Buy new router" "Buy new router stil
 assert_file_contains "$TEST_DIR/tasks.org" "Research dentists" "Research dentists still in tasks.org"
 
 echo "test: archive --all nothing eligible"
-reset_fixtures
-# First archive everything eligible
-run_cmd '(org-gtd-cli/archive-all nil)'
+get_result 2
 assert_exit 0 "$LAST_RC" "first pass exits 0"
 # Run again — nothing should be left
-run_cmd '(org-gtd-cli/archive-all nil)'
+get_result 3
 assert_exit 0 "$LAST_RC" "second pass exits 0"
 assert_output_contains "$LAST_OUTPUT" "No archivable tasks found" "reports nothing eligible"
 
@@ -1486,14 +1779,22 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/reorder.org" "DONE Top level A" "state changed"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# agenda-view
+# agenda-view (read-only — single reset at section start)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== agenda-view ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/agenda-view " "))
+(org-gtd-test/run 1 '(org-gtd-cli/agenda-view "n"))
+(org-gtd-test/run 2 '(org-gtd-cli/agenda-view "INVALID"))
+ELISP
+run_batch_file
+
 echo "test: agenda-view default key (full dashboard)"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda-view " ")'
+get_result 0
 assert_exit 0 $LAST_RC "agenda-view default key"
 assert_output_contains "$LAST_OUTPUT" "Next Tasks" "agenda-view shows Next Tasks section"
 assert_output_contains "$LAST_OUTPUT" "Projects" "agenda-view shows Projects section"
@@ -1502,23 +1803,39 @@ echo "test: agenda-view includes (file:line) on task lines"
 assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "agenda-view task lines have (file:line)"
 
 echo "test: agenda-view specific key (Next Tasks)"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda-view "n")'
+get_result 1
 assert_exit 0 $LAST_RC "agenda-view n key"
 assert_output_contains "$LAST_OUTPUT" "Next Tasks" "agenda-view n shows Next Tasks"
 
 echo "test: agenda-view invalid key"
-reset_fixtures
-run_cmd '(org-gtd-cli/agenda-view "INVALID")'
+get_result 2
 assert_exit 1 $LAST_RC "agenda-view invalid key"
 assert_output_contains "$LAST_OUTPUT" "Unknown agenda view key" "agenda-view invalid key message"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# fix-timestamps
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "=== fix-timestamps ==="
 
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/fix-timestamps))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/fix-timestamps "t"))
+;; Multi-step: fix-timestamps twice for idempotency
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/fix-timestamps))
+(org-gtd-test/run 3 '(org-gtd-cli/fix-timestamps))
+;; Separate run for body preservation + skip non-TODO checks
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/fix-timestamps))
+ELISP
+run_batch_file
+
 echo "test: fix-timestamps adds missing timestamps"
-reset_fixtures
-run_cmd '(org-gtd-cli/fix-timestamps)'
+get_result 0
 assert_exit 0 $LAST_RC "fix-timestamps exits 0"
 assert_output_contains "$LAST_OUTPUT" "Fixed" "fix-timestamps reports Fixed"
 assert_output_contains "$LAST_OUTPUT" "Bare heading no body" "fix-timestamps mentions Bare heading"
@@ -1536,11 +1853,11 @@ else
 fi
 
 echo "test: fix-timestamps dry-run does not modify files"
-reset_fixtures
-cp "$TEST_DIR/tasks.org" "$TEST_DIR/tasks.org.before"
-run_cmd '(org-gtd-cli/fix-timestamps "t")'
+get_result 1
 assert_exit 0 $LAST_RC "fix-timestamps --dry-run exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would fix" "fix-timestamps dry-run reports Would fix"
+# get_result restores snapshot — dry-run should not have modified files, so compare to fresh fixtures
+cp "$SCRIPT_DIR/fixtures/tasks.org" "$TEST_DIR/tasks.org.before"
 if diff -q "$TEST_DIR/tasks.org" "$TEST_DIR/tasks.org.before" >/dev/null 2>&1; then
   echo "  PASS: dry-run did not modify file"; ((PASS++))
 else
@@ -1548,16 +1865,14 @@ else
 fi
 
 echo "test: fix-timestamps is idempotent"
-reset_fixtures
-run_cmd '(org-gtd-cli/fix-timestamps)'
+get_result 2
 assert_exit 0 $LAST_RC "fix-timestamps first run exits 0"
-run_cmd '(org-gtd-cli/fix-timestamps)'
+get_result 3
 assert_exit 0 $LAST_RC "fix-timestamps second run exits 0"
 assert_output_contains "$LAST_OUTPUT" "nothing to fix" "second run reports nothing to fix"
 
 echo "test: fix-timestamps preserves body text"
-reset_fixtures
-run_cmd '(org-gtd-cli/fix-timestamps)'
+get_result 4
 assert_exit 0 $LAST_RC "fix-timestamps exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Some old task with no dates at all" "Mystery task body preserved"
 # Timestamp should be after the body text — find the timestamp line following "Mystery task"
@@ -1572,8 +1887,6 @@ else
 fi
 
 echo "test: fix-timestamps skips non-TODO headings"
-reset_fixtures
-run_cmd '(org-gtd-cli/fix-timestamps)'
 assert_output_not_contains "$LAST_OUTPUT" "Agents" "fix-timestamps skips non-TODO Agents heading"
 assert_output_not_contains "$LAST_OUTPUT" "Pet Ants" "fix-timestamps skips non-TODO Pet Ants heading"
 
