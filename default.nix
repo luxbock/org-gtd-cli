@@ -6,7 +6,7 @@
 }:
 
 let
-  coreFile = ./gtd-core.el;  # symlink to +gtd-core.el in Doom config
+  coreFile = ../../home/olli/features/editors/emacs/doom/modules/config/private/+gtd-core.el;
   elispFile = ./org-gtd-cli.el;
 in
 writeShellApplication {
