@@ -300,11 +300,11 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/set-body $(to_elisp "$SUBSTRING") $(to_elisp "$TEXT") $(to_elisp "$INDEX"))"
         ;;
 
-      done)
+      set-done)
         shift
         SUBSTRING="" INDEX="" DRY_RUN=""
         if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
-          echo "Usage: org-gtd-cli done SUBSTR [--index N] [--dry-run]"; exit 0
+          echo "Usage: org-gtd-cli set-done SUBSTR [--index N] [--dry-run]"; exit 0
         fi
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           SUBSTRING="$1"; shift
@@ -317,10 +317,10 @@ writeShellApplication {
           esac
         done
         if [[ -z "$SUBSTRING" ]]; then
-          echo "Usage: org-gtd-cli done SUBSTRING [--index N] [--dry-run]" >&2
+          echo "Usage: org-gtd-cli set-done SUBSTRING [--index N] [--dry-run]" >&2
           exit 1
         fi
-        run_elisp "(org-gtd-cli/done $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        run_elisp "(org-gtd-cli/set-done $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
         ;;
 
       set-state)
@@ -606,7 +606,7 @@ writeShellApplication {
         [--sections S1,S2]
       append-body SUBSTR TEXT [--index N]
       set-body SUBSTR TEXT [--index N]
-      done SUBSTR [--index N] [--dry-run]
+      set-done SUBSTR [--index N] [--dry-run]
       set-state SUBSTR STATE [--index N] [--dry-run]
       set-next SUBSTR [--index N]
       refile SUBSTR --to TARGET [--index N] [--dry-run]

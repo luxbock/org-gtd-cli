@@ -384,40 +384,40 @@ echo "=== done ==="
 
 echo "test: marks single match as DONE"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "Book a rental car" nil nil)'
+run_cmd '(org-gtd-cli/set-done "Book a rental car" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Done: Book a rental car (tasks.org:" "done message with file:line"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Book a rental car" "state changed in file"
 
 echo "test: exit 2 on ambiguous"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "Buy" nil nil)'
+run_cmd '(org-gtd-cli/set-done "Buy" nil nil)'
 assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 assert_output_contains "$LAST_OUTPUT" "[1]" "shows indexed matches"
 assert_output_contains "$LAST_OUTPUT" "[2]" "shows second match"
 
 echo "test: index selects match"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "Buy" "1" nil)'
+run_cmd '(org-gtd-cli/set-done "Buy" "1" nil)'
 assert_exit 0 "$LAST_RC" "exits 0 with index"
 
 echo "test: dry-run doesn't modify"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "Book a rental car" nil "t")'
+run_cmd '(org-gtd-cli/set-done "Book a rental car" nil "t")'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would mark done" "dry-run message"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Book a rental car" "file unchanged"
 
 echo "test: auto-progress promotes next TODO to NEXT"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "Add more test cases" nil nil)'
+run_cmd '(org-gtd-cli/set-done "Add more test cases" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Auto-progressed" "auto-progress message"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Test on actual project" "next sibling promoted"
 
 echo "test: done removes WAITING tag"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "Get travel insurance quote" nil nil)'
+run_cmd '(org-gtd-cli/set-done "Get travel insurance quote" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Get travel insurance quote" "marked done"
 
@@ -734,7 +734,7 @@ assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "already has NEXT messa
 echo "test: promotes first TODO child"
 reset_fixtures
 # First complete the NEXT child so there's no NEXT
-run_cmd '(org-gtd-cli/done "Book a rental car" nil nil)'
+run_cmd '(org-gtd-cli/set-done "Book a rental car" nil nil)'
 # Now the WAITING child remains but no TODO — set-state it first
 run_cmd '(org-gtd-cli/set-state "Get travel insurance" "TODO" nil nil)'
 run_cmd '(org-gtd-cli/set-next "Holiday pre-trip tasks" nil)'
@@ -818,7 +818,7 @@ assert_file_unchanged() {
 echo "test: done with out-of-bounds index"
 reset_fixtures
 BEFORE=$(md5sum "$TEST_DIR/tasks.org" | cut -d' ' -f1)
-run_cmd '(org-gtd-cli/done "Buy" "999" nil)'
+run_cmd '(org-gtd-cli/set-done "Buy" "999" nil)'
 assert_exit 1 "$LAST_RC" "exits 1"
 assert_file_unchanged "$TEST_DIR/tasks.org" "$BEFORE" "file unchanged"
 
@@ -865,7 +865,7 @@ echo "=== edge cases: no match ==="
 
 echo "test: done nonexistent"
 reset_fixtures
-run_cmd '(org-gtd-cli/done "xyznonexistent" nil nil)'
+run_cmd '(org-gtd-cli/set-done "xyznonexistent" nil nil)'
 assert_exit 1 "$LAST_RC" "exits 1"
 
 echo "test: set-state nonexistent"
@@ -915,7 +915,7 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Already has NEXT" "already has NEXT"
 
 echo "test: step 2 - done Book a rental car → auto-progress"
-run_cmd '(org-gtd-cli/done "Book a rental car" nil nil)'
+run_cmd '(org-gtd-cli/set-done "Book a rental car" nil nil)'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Book a rental car" "done"
 
@@ -1313,7 +1313,7 @@ cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
 ** TODO Target task
 ** TODO Another task
 ORGEOF
-run_cmd '(org-gtd-cli/done "Target task")'
+run_cmd '(org-gtd-cli/set-done "Target task")'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/reorder.org" "DONE Target task" "task marked DONE"
 assert_line_before "$TEST_DIR/reorder.org" "DONE Target task" "NEXT Active task" "DONE Target above NEXT Active"
@@ -1330,7 +1330,7 @@ cat > "$TEST_DIR/reorder.org" << 'ORGEOF'
 ** TODO Third todo
 ORGEOF
 # Complete the NEXT task — auto-progress should promote "First todo" to NEXT
-run_cmd '(org-gtd-cli/done "Current task")'
+run_cmd '(org-gtd-cli/set-done "Current task")'
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/reorder.org" "DONE Current task" "NEXT marked DONE"
 assert_file_contains "$TEST_DIR/reorder.org" "NEXT First todo" "First todo auto-progressed to NEXT"

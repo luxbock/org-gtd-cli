@@ -815,7 +815,7 @@ state and priority — no tags, body, drawers, or planning lines."
 
 ;; --- done ---
 
-(defun org-gtd-cli/done (substring &optional index dry-run)
+(defun org-gtd-cli/set-done (substring &optional index dry-run)
   "Mark a task as DONE."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
