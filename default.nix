@@ -133,10 +133,15 @@ writeShellApplication {
 
       categories)
         shift || true
-        if [[ "''${1:-}" == "--help" || "''${1:-}" == "-h" ]]; then
-          echo "Usage: org-gtd-cli categories"; exit 0
-        fi
-        run_elisp "(org-gtd-cli/categories)"
+        FILE=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --help|-h) echo "Usage: org-gtd-cli categories [--file FILE]"; exit 0 ;;
+            --file) FILE="$2"; shift 2 ;;
+            *)      echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        run_elisp "(org-gtd-cli/categories $(to_elisp "$FILE"))"
         ;;
 
       process-agent-tasks)

@@ -349,7 +349,7 @@ assert_output_contains "$LAST_OUTPUT" "WAITING Get travel insurance" "waiting su
 echo ""
 echo "=== categories ==="
 
-echo "test: shows plain headings as category tree"
+echo "test: shows plain headings as category tree (default: tasks.org)"
 reset_fixtures
 run_cmd '(org-gtd-cli/categories)'
 assert_exit 0 "$LAST_RC" "exits 0"
@@ -366,6 +366,21 @@ assert_output_not_contains "$LAST_OUTPUT" "Buy a formicarium" "no TODO subtask"
 echo "test: does not show children of TODO headings"
 assert_output_not_contains "$LAST_OUTPUT" "Add more test cases" "no child of TODO heading"
 assert_output_not_contains "$LAST_OUTPUT" "Research formicarium options" "no child of TODO project"
+
+echo "test: does not show headings from other files"
+assert_output_not_contains "$LAST_OUTPUT" "(inbox.org:" "no inbox.org headings"
+assert_output_not_contains "$LAST_OUTPUT" "(calendar.org:" "no calendar.org headings"
+
+echo "test: categories --file for a different file"
+reset_fixtures
+run_cmd '(org-gtd-cli/categories "inbox.org")'
+assert_exit 0 "$LAST_RC" "exits 0 for inbox.org"
+assert_output_not_contains "$LAST_OUTPUT" "(tasks.org:" "no tasks.org headings"
+
+echo "test: categories --file for nonexistent file"
+run_cmd '(org-gtd-cli/categories "nonexistent.org")'
+assert_exit 1 "$LAST_RC" "exits 1 for missing file"
+assert_output_contains "$LAST_OUTPUT" "File not found" "shows error message"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # process-agent-tasks

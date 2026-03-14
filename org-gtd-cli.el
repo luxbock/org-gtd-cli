@@ -400,33 +400,35 @@ state and priority — no tags, body, drawers, or planning lines."
 
 ;; --- categories ---
 
-(defun org-gtd-cli/categories ()
-  "Show the category tree across all agenda files.
+(defun org-gtd-cli/categories (&optional file-name)
+  "Show the category tree for an org file.
 Displays plain (non-TODO) headings as an indented tree, stopping at the
-first TODO heading in each branch. Useful for finding refile targets."
-  (let ((found nil))
-    (dolist (file (org-agenda-files))
-      (when (file-exists-p file)
-        (with-current-buffer (find-file-noselect file)
-          (org-with-wide-buffer
-           (let ((rel-file (org-gtd-cli/relative-filename file))
-                 (file-has-output nil))
-             (goto-char (point-min))
-             (while (re-search-forward org-heading-regexp nil t)
-               (let ((state (org-get-todo-state))
-                     (level (org-current-level))
-                     (heading (org-get-heading t t t t))
-                     (line (line-number-at-pos)))
-                 (if state
-                     ;; TODO heading: skip entire subtree
-                     (org-end-of-subtree t)
-                   ;; Plain heading: print it
-                   (unless file-has-output
-                     (princ (format "%s:\n" rel-file))
-                     (setq file-has-output t
-                           found t))
-                   (let ((indent (make-string (* 2 level) ?\s)))
-                     (princ (format "%s%s (%s:%d)\n" indent heading rel-file line)))))))))))
+first TODO heading in each branch. Useful for finding refile targets.
+FILE-NAME defaults to \"tasks.org\"."
+  (let* ((target (or (and file-name
+                          (not (equal file-name "nil"))
+                          (not (string-empty-p file-name))
+                          file-name)
+                     "tasks.org"))
+         (file (expand-file-name target org-directory))
+         (found nil))
+    (unless (file-exists-p file)
+      (princ (format "File not found: %s\n" target))
+      (kill-emacs 1))
+    (with-current-buffer (find-file-noselect file)
+      (org-with-wide-buffer
+       (let ((rel-file (org-gtd-cli/relative-filename file)))
+         (goto-char (point-min))
+         (while (re-search-forward org-heading-regexp nil t)
+           (let ((state (org-get-todo-state))
+                 (level (org-current-level))
+                 (heading (org-get-heading t t t t))
+                 (line (line-number-at-pos)))
+             (if state
+                 (org-end-of-subtree t)
+               (setq found t)
+               (let ((indent (make-string (* 2 level) ?\s)))
+                 (princ (format "%s%s (%s:%d)\n" indent heading rel-file line)))))))))
     (unless found
       (princ "No categories found\n")))
   (kill-emacs 0))
