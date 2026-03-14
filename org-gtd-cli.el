@@ -398,6 +398,39 @@ state and priority — no tags, body, drawers, or planning lines."
            (princ (format "\nProgress: %d/%d done\n" done-count total-count)))))))
   (kill-emacs 0))
 
+;; --- categories ---
+
+(defun org-gtd-cli/categories ()
+  "Show the category tree across all agenda files.
+Displays plain (non-TODO) headings as an indented tree, stopping at the
+first TODO heading in each branch. Useful for finding refile targets."
+  (let ((found nil))
+    (dolist (file (org-agenda-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (let ((rel-file (org-gtd-cli/relative-filename file))
+                 (file-has-output nil))
+             (goto-char (point-min))
+             (while (re-search-forward org-heading-regexp nil t)
+               (let ((state (org-get-todo-state))
+                     (level (org-current-level))
+                     (heading (org-get-heading t t t t))
+                     (line (line-number-at-pos)))
+                 (if state
+                     ;; TODO heading: skip entire subtree
+                     (org-end-of-subtree t)
+                   ;; Plain heading: print it
+                   (unless file-has-output
+                     (princ (format "%s:\n" rel-file))
+                     (setq file-has-output t
+                           found t))
+                   (let ((indent (make-string (* 2 level) ?\s)))
+                     (princ (format "%s%s (%s:%d)\n" indent heading rel-file line)))))))))))
+    (unless found
+      (princ "No categories found\n")))
+  (kill-emacs 0))
+
 ;; --- process-agent-tasks ---
 
 (defun org-gtd-cli/process-agent-tasks ()

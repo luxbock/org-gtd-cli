@@ -344,6 +344,30 @@ assert_output_contains "$LAST_OUTPUT" "NEXT Book a rental car" "next subtask"
 assert_output_contains "$LAST_OUTPUT" "WAITING Get travel insurance" "waiting subtask"
 
 # ══════════════════════════════════════════════════════════════════════════════
+# categories
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== categories ==="
+
+echo "test: shows plain headings as category tree"
+reset_fixtures
+run_cmd '(org-gtd-cli/categories)'
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Work" "top-level category"
+assert_output_contains "$LAST_OUTPUT" "Agents" "nested plain heading"
+assert_output_contains "$LAST_OUTPUT" "Pet Ants" "nested plain heading under Family"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "includes file:line"
+
+echo "test: does not show TODO headings"
+assert_output_not_contains "$LAST_OUTPUT" "Write quarterly report" "no TODO heading"
+assert_output_not_contains "$LAST_OUTPUT" "Pay quarterly taxes" "no TODO task"
+assert_output_not_contains "$LAST_OUTPUT" "Buy a formicarium" "no TODO subtask"
+
+echo "test: does not show children of TODO headings"
+assert_output_not_contains "$LAST_OUTPUT" "Add more test cases" "no child of TODO heading"
+assert_output_not_contains "$LAST_OUTPUT" "Research formicarium options" "no child of TODO project"
+
+# ══════════════════════════════════════════════════════════════════════════════
 # process-agent-tasks
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""

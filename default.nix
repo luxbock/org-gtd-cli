@@ -131,6 +131,14 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/subtasks $(to_elisp "$SUBSTRING") $(to_elisp "$INDEX"))"
         ;;
 
+      categories)
+        shift || true
+        if [[ "''${1:-}" == "--help" || "''${1:-}" == "-h" ]]; then
+          echo "Usage: org-gtd-cli categories"; exit 0
+        fi
+        run_elisp "(org-gtd-cli/categories)"
+        ;;
+
       process-agent-tasks)
         shift || true
         if [[ "''${1:-}" == "--help" || "''${1:-}" == "-h" ]]; then
@@ -594,6 +602,7 @@ writeShellApplication {
       agenda-view [KEY]
       show SUBSTR [--index N] [--plain]
       subtasks SUBSTR [--index N]
+      categories
       process-agent-tasks
       add-task TITLE [--body TEXT] [--tags T1,T2] [--schedule DATE]
         [--deadline DATE] [--priority A|B|C] [--file FILE]
