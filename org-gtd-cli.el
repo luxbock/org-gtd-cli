@@ -1450,7 +1450,8 @@ a TODO keyword that is NOT in `org-done-keywords'."
 
 (defun org-gtd-cli/agenda-view (&optional key)
   "Run an org-agenda custom command in batch mode.
-KEY defaults to \" \" (the full GTD dashboard)."
+KEY defaults to \" \" (the full GTD dashboard).
+Task lines include (file:line) for editor navigation."
   (let ((cmd-key (or key " ")))
     (unless (assoc cmd-key org-agenda-custom-commands)
       (princ (format "Unknown agenda view key: \"%s\"\nAvailable views:\n" cmd-key))
@@ -1458,7 +1459,33 @@ KEY defaults to \" \" (the full GTD dashboard)."
         (when (stringp (car cmd))
           (princ (format "  \"%s\"  %s\n" (car cmd) (or (nth 1 cmd) "")))))
       (kill-emacs 1))
-    (org--batch-agenda cmd-key nil nil)
+    ;; Build the agenda buffer
+    (let ((org-agenda-window-setup 'current-window))
+      (org-agenda nil cmd-key))
+    ;; Walk the buffer and print with (file:line) suffixes on task lines
+    (with-current-buffer org-agenda-buffer
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let* ((marker (or (get-text-property (point) 'org-hd-marker)
+                           (get-text-property (point) 'org-marker)))
+               (line-text (buffer-substring-no-properties
+                           (line-beginning-position) (line-end-position))))
+          (if marker
+              (let* ((src-buf (marker-buffer marker))
+                     (src-file (and src-buf (buffer-file-name src-buf)))
+                     (src-line (and src-buf
+                                    (with-current-buffer src-buf
+                                      (save-excursion
+                                        (goto-char (marker-position marker))
+                                        (line-number-at-pos))))))
+                (princ (format "%s (%s:%d)\n"
+                               line-text
+                               (if src-file
+                                   (org-gtd-cli/relative-filename src-file)
+                                 "?")
+                               (or src-line 0))))
+            (princ (format "%s\n" line-text))))
+        (forward-line 1)))
     (kill-emacs 0)))
 
 ;;; org-gtd-cli.el ends here

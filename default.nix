@@ -544,7 +544,7 @@ writeShellApplication {
         if [[ "$KEY" == "--help" || "$KEY" == "-h" ]]; then
           echo "Usage: org-gtd-cli agenda-view [KEY]"
           echo "  KEY defaults to ' ' (full GTD dashboard)"
-          echo "  Available keys: ' ' g N r d # n t p w u A"
+          echo "  Available keys: ' ' g N r d S n t p w u A"
           exit 0
         fi
         run_elisp "(org-gtd-cli/agenda-view $(to_elisp "$KEY"))"

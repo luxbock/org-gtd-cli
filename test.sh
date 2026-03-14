@@ -1413,6 +1413,9 @@ assert_exit 0 $LAST_RC "agenda-view default key"
 assert_output_contains "$LAST_OUTPUT" "Next Tasks" "agenda-view shows Next Tasks section"
 assert_output_contains "$LAST_OUTPUT" "Projects" "agenda-view shows Projects section"
 
+echo "test: agenda-view includes (file:line) on task lines"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "agenda-view task lines have (file:line)"
+
 echo "test: agenda-view specific key (Next Tasks)"
 reset_fixtures
 run_cmd '(org-gtd-cli/agenda-view "n")'
