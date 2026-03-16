@@ -105,7 +105,7 @@ assert_output_not_contains() {
 
 assert_file_contains() {
   local file="$1" pattern="$2" desc="$3"
-  if grep -qF "$pattern" "$file" 2>/dev/null; then
+  if grep -qF -- "$pattern" "$file" 2>/dev/null; then
     echo "  PASS: $desc"; ((PASS++))
   else
     echo "  FAIL: $desc (file does not contain '$pattern')"; ((FAIL++))
@@ -114,7 +114,7 @@ assert_file_contains() {
 
 assert_file_not_contains() {
   local file="$1" pattern="$2" desc="$3"
-  if ! grep -qF "$pattern" "$file" 2>/dev/null; then
+  if ! grep -qF -- "$pattern" "$file" 2>/dev/null; then
     echo "  PASS: $desc"; ((PASS++))
   else
     echo "  FAIL: $desc (file unexpectedly contains '$pattern')"; ((FAIL++))
@@ -130,6 +130,29 @@ assert_line_before() {
     echo "  PASS: $desc"; ((PASS++))
   else
     echo "  FAIL: $desc ('$first' at line ${line_a:-?} not before '$second' at line ${line_b:-?})"; ((FAIL++))
+  fi
+}
+
+assert_no_long_lines() {
+  local file="$1" start_pat="$2" end_pat="$3" max_width="$4" desc="$5"
+  local in_range=0 bad_lines=""
+  while IFS= read -r line; do
+    if [[ $in_range -eq 0 ]]; then
+      [[ "$line" == *"$start_pat"* ]] && in_range=1
+    else
+      if [[ -n "$end_pat" && "$line" == *"$end_pat"* ]]; then
+        break
+      fi
+      if [[ ${#line} -gt $max_width ]]; then
+        bad_lines+="  (${#line} chars) $line"$'\n'
+      fi
+    fi
+  done < "$file"
+  if [[ -z "$bad_lines" ]]; then
+    echo "  PASS: $desc"; ((PASS++))
+  else
+    echo "  FAIL: $desc (lines exceed $max_width chars)"; ((FAIL++))
+    echo "$bad_lines" | head -3
   fi
 }
 
@@ -2085,6 +2108,147 @@ fi
 echo "test: fix-timestamps skips non-TODO headings"
 assert_output_not_contains "$LAST_OUTPUT" "Agents" "fix-timestamps skips non-TODO Agents heading"
 assert_output_not_contains "$LAST_OUTPUT" "Pet Ants" "fix-timestamps skips non-TODO Pet Ants heading"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# fill-text (line wrapping)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== fill-text (line wrapping) ==="
+
+LONG_TEXT="This is a very long line of text that should definitely be wrapped because it exceeds the eighty column limit that we have set for body text in our GTD system"
+LONG_TEXT2="Another extremely long line of text that also exceeds the eighty column limit and should be wrapped properly by the fill-text function when processing"
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << ELISP
+;; 0: append-body with long text
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/append-body "Bare heading" "$LONG_TEXT"))
+
+;; 1: set-body with long text
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-body "Bare heading" "$LONG_TEXT"))
+
+;; 2: add-task with long body
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/add-task "Wrap test task" "$LONG_TEXT" nil nil nil nil nil nil nil))
+
+;; 3: add-subtask with long body
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/add-subtask "Holiday pre-trip" "Wrap sub" "$LONG_TEXT" nil nil nil nil nil nil))
+
+;; 4: body with src block containing long line
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-body "Bare heading" "Here is code:\n#+begin_src bash\necho this is a very long command that should not be wrapped because it is inside a source code block and wrapping would break it\n#+end_src"))
+
+;; 5: body with two long list items
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-body "Bare heading" "- First item that is quite long and exceeds the eighty column limit so it should be wrapped onto the next line properly\n- Second item that is also quite long and exceeds the eighty column limit so it should also be wrapped onto the next line"))
+
+;; 6: short text unchanged
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/set-body "Bare heading" "Short text here"))
+
+;; 7: body followed by inactive timestamp on own line
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/append-body "Bare heading" "Some text that is fairly long and might want to merge with the following line but should not.\n[2026-03-16 Mon 14:00]"))
+
+;; 8: body followed by time-range timestamp
+(org-gtd-test/reset)
+(org-gtd-test/run 8 '(org-gtd-cli/append-body "Bare heading" "Some important notes here.\n[2026-03-16 Mon 09:00-10:30]"))
+
+;; 9: two paragraphs separated by blank line
+(org-gtd-test/reset)
+(org-gtd-test/run 9 '(org-gtd-cli/set-body "Bare heading" "$LONG_TEXT\n\n$LONG_TEXT2"))
+
+;; 10: short append-body
+(org-gtd-test/reset)
+(org-gtd-test/run 10 '(org-gtd-cli/append-body "Bare heading" "OK"))
+
+;; 11: body with quote block containing long line
+(org-gtd-test/reset)
+(org-gtd-test/run 11 '(org-gtd-cli/set-body "Bare heading" "A quote:\n#+begin_quote\nThis is a very long quotation that should be preserved verbatim because it is inside a quote block and should not be reflowed by the fill function\n#+end_quote"))
+ELISP
+run_batch_file
+
+echo "test: append-body wraps long text"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_no_long_lines "$TEST_DIR/tasks.org" "Bare heading" "Research" 80 "no lines exceed 80 chars"
+
+echo "test: set-body wraps long text"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_no_long_lines "$TEST_DIR/tasks.org" "Bare heading" "Research" 80 "no lines exceed 80 chars"
+
+echo "test: add-task wraps long body"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" "Wrap test task" "task added"
+assert_no_long_lines "$TEST_DIR/inbox.org" "Wrap test task" "" 80 "no lines exceed 80 chars"
+
+echo "test: add-subtask wraps long body"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Wrap sub" "subtask added"
+assert_no_long_lines "$TEST_DIR/tasks.org" "Wrap sub" "Finance" 80 "no lines exceed 80 chars"
+
+echo "test: src block content preserved verbatim"
+get_result 4
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "echo this is a very long command" "long line inside src block preserved"
+
+echo "test: list items wrapped independently"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "- First item" "first list item present"
+assert_file_contains "$TEST_DIR/tasks.org" "- Second item" "second list item present"
+
+echo "test: short text unchanged"
+get_result 6
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "Short text here" "short text preserved"
+
+echo "test: inactive timestamp stays on own line"
+get_result 7
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-16 Mon 14:00]" "timestamp present"
+# Timestamp must be on its own line — grep for it at start of line
+if grep -qP '^\[2026-03-16 Mon 14:00\]' "$TEST_DIR/tasks.org"; then
+  echo "  PASS: timestamp on its own line"; ((PASS++))
+else
+  echo "  FAIL: timestamp not on its own line"; ((FAIL++))
+fi
+
+echo "test: time-range timestamp not merged"
+get_result 8
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-16 Mon 09:00-10:30]" "time-range timestamp present"
+if grep -qP '^\[2026-03-16 Mon 09:00-10:30\]' "$TEST_DIR/tasks.org"; then
+  echo "  PASS: time-range timestamp on its own line"; ((PASS++))
+else
+  echo "  FAIL: time-range timestamp not on its own line"; ((FAIL++))
+fi
+
+echo "test: two paragraphs both wrapped, blank line preserved"
+get_result 9
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_no_long_lines "$TEST_DIR/tasks.org" "Bare heading" "Research" 80 "no lines exceed 80 chars"
+# Check blank line preserved between paragraphs — look for empty line in body
+if awk '/Bare heading/,/Research/' "$TEST_DIR/tasks.org" | grep -q '^$'; then
+  echo "  PASS: blank line between paragraphs preserved"; ((PASS++))
+else
+  echo "  FAIL: blank line between paragraphs not preserved"; ((FAIL++))
+fi
+
+echo "test: short append-body not mangled"
+get_result 10
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "OK" "short body preserved"
+
+echo "test: quote block content preserved"
+get_result 11
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "This is a very long quotation" "long line inside quote block preserved"
 
 echo ""
 echo "All tests completed."

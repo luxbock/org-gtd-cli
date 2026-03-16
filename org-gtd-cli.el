@@ -162,6 +162,54 @@ If ACTIVE is non-nil, use angle brackets; otherwise square brackets."
   "Return current date/time as an inactive org timestamp."
   (format-time-string "[%Y-%m-%d %a %H:%M]"))
 
+(defun org-gtd-cli/fill-text (text)
+  "Fill TEXT to 80 columns, respecting org syntax (blocks, lists, timestamps)."
+  (if (or (null text) (string-empty-p text))
+      text
+    (with-temp-buffer
+      (org-mode)
+      (insert text)
+      (let ((fill-column 80))
+        ;; Phase 1: Insert blank line before standalone timestamps so
+        ;; org-element treats them as separate elements.  Mark inserted
+        ;; newlines with a text property for precise removal later.
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when (and (looking-at "\\[[-0-9]+ [A-Z][a-z]+[^]\n]*\\][ \t]*$")
+                     (not (bobp))
+                     (save-excursion
+                       (forward-line -1)
+                       (not (looking-at "[ \t]*$"))))
+            (beginning-of-line)
+            (insert "\n")
+            (put-text-property (1- (point)) (point) 'fill-sep t))
+          (forward-line 1))
+        ;; Phase 2: Fill non-block content with org-fill-paragraph
+        ;; (handles lists, adaptive fill, etc.)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (cond
+           ;; Skip blocks verbatim
+           ((looking-at "[ \t]*#\\+begin_")
+            (forward-line 1)
+            (while (and (not (eobp))
+                        (not (looking-at "[ \t]*#\\+end_")))
+              (forward-line 1))
+            (when (not (eobp)) (forward-line 1)))
+           ;; Skip block end markers, standalone timestamps, empty lines
+           ((or (looking-at "[ \t]*#\\+end_")
+                (looking-at "\\[[-0-9]+ [A-Z][a-z]+")
+                (looking-at "[ \t]*$"))
+            (forward-line 1))
+           (t
+            (org-fill-paragraph)
+            (forward-line 1))))
+        ;; Phase 3: Remove the blank lines we inserted (by text property)
+        (let ((pos (point-min)))
+          (while (setq pos (text-property-any pos (point-max) 'fill-sep t))
+            (delete-region pos (1+ pos)))))
+      (string-trim-right (buffer-string)))))
+
 (defun org-gtd-cli/slugify (title)
   "Convert TITLE to a filename slug."
   (let ((slug (downcase title)))
@@ -635,6 +683,7 @@ FILE-NAME defaults to \"tasks.org\"."
          (priority (when (and priority (not (string-empty-p priority))
                               (not (equal priority "nil")))
                      priority)))
+    (when body (setq body (org-gtd-cli/fill-text body)))
     (unless (file-exists-p target-file)
       (princ (format "Error: file not found: %s\n" target-file))
       (kill-emacs 1))
@@ -748,6 +797,7 @@ FILE-NAME defaults to \"tasks.org\"."
                               (not (equal priority "nil")))
                      priority))
          (buf-pos (org-gtd-cli/find-task parent-substring idx t)))
+    (when body (setq body (org-gtd-cli/fill-text body)))
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
@@ -898,6 +948,7 @@ FILE-NAME defaults to \"tasks.org\"."
                  (forward-line 1))
                (when last-ts-pos
                  (setq insert-point last-ts-pos))))
+           (setq text (org-gtd-cli/fill-text text))
            (goto-char insert-point)
            ;; Ensure we start on a fresh line (no-body headings end without newline)
            (unless (bolp) (insert "\n"))
@@ -956,6 +1007,7 @@ FILE-NAME defaults to \"tasks.org\"."
                (delete-region body-start delete-end)))
            ;; Insert new text if non-empty
            (when (not (string-empty-p text))
+             (setq text (org-gtd-cli/fill-text text))
              (goto-char body-start)
              ;; Ensure we start on a fresh line (no-body headings end without newline)
              (unless (bolp) (insert "\n"))
