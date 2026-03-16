@@ -700,6 +700,7 @@ writeShellApplication {
     cp ${./test.sh} test.sh
     cp ${coreFile} gtd-core.el
     cp ${./org-gtd-cli.el} org-gtd-cli.el
+    cp ${./test-harness.el} test-harness.el
     cp -r ${./fixtures} fixtures
     chmod +x test.sh
     bash test.sh

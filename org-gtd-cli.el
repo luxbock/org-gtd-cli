@@ -87,6 +87,15 @@ siblings have TODO keywords (skips if organizational headings are mixed in)."
   "Return FILEPATH relative to org-directory."
   (file-relative-name filepath org-directory))
 
+(defun org-gtd-cli/heading-path-at-point ()
+  "Return the full slash-separated path for the heading at point.
+Walks up the org tree to build a path like \"Computers/NixOS/epiphyte\"."
+  (let ((path (list (org-get-heading t t t t))))
+    (save-excursion
+      (while (org-up-heading-safe)
+        (push (org-get-heading t t t t) path)))
+    (mapconcat #'identity path "/")))
+
 (defun org-gtd-cli/find-task (substring &optional index include-done)
   "Find a task by SUBSTRING match across all agenda files.
 Returns a cons (buffer . position) or exits with appropriate code.
@@ -465,7 +474,7 @@ state and priority — no tags, body, drawers, or planning lines."
 
 (defun org-gtd-cli/categories (&optional file-name)
   "Show the category tree for an org file.
-Displays plain (non-TODO) headings as an indented tree, stopping at the
+Displays plain (non-TODO) headings as full paths, stopping at the
 first TODO heading in each branch. Useful for finding refile targets.
 FILE-NAME defaults to \"tasks.org\"."
   (let* ((target (or (and file-name
@@ -484,14 +493,13 @@ FILE-NAME defaults to \"tasks.org\"."
          (goto-char (point-min))
          (while (re-search-forward org-heading-regexp nil t)
            (let ((state (org-get-todo-state))
-                 (level (org-current-level))
-                 (heading (org-get-heading t t t t))
                  (line (line-number-at-pos)))
              (if state
                  (org-end-of-subtree t)
                (setq found t)
-               (let ((stars (make-string level ?*)))
-                 (princ (format "%s %s (%s:%d)\n" stars heading rel-file line)))))))))
+               (princ (format "%s (%s:%d)\n"
+                              (org-gtd-cli/heading-path-at-point)
+                              rel-file line))))))))
     (unless found
       (princ "No categories found\n")))
   (kill-emacs 0))
@@ -630,35 +638,68 @@ FILE-NAME defaults to \"tasks.org\"."
     (unless (file-exists-p target-file)
       (princ (format "Error: file not found: %s\n" target-file))
       (kill-emacs 1))
-    (let (inserted-line)
+    (let (inserted-line matched-path)
       (with-current-buffer (find-file-noselect target-file)
         (org-with-wide-buffer
          (if use-category
              ;; Find the category heading and insert under it
-             (progn
+             (let* ((cat-parts (split-string category "/" t))
+                    (matches '()))
                (goto-char (point-min))
-               (let ((found nil)
-                     (target-level nil))
-                 (while (and (not found)
-                             (re-search-forward org-heading-regexp nil t))
-                   (when (string-match-p (regexp-quote category)
-                                         (org-get-heading t t t t))
-                     (setq found t
-                           target-level (1+ (org-current-level)))))
-                 (unless found
-                   (princ (format "Error: category heading \"%s\" not found in %s\n"
-                                  category (org-gtd-cli/relative-filename target-file)))
-                   (kill-emacs 1))
-                 ;; Go to end of this subtree
-                 (org-end-of-subtree t)
-                 (insert "\n" (org-gtd-cli/build-entry
-                               target-level todo-state title
-                               priority tags-csv schedule deadline body))
-                 (insert "\n")
-                 ;; Find the heading we just inserted
-                 (forward-line -1)
-                 (re-search-backward org-heading-regexp nil t)
-                 (setq inserted-line (line-number-at-pos))))
+               (while (re-search-forward org-heading-regexp nil t)
+                 (let ((heading (org-get-heading t t t t)))
+                   (if (= (length cat-parts) 1)
+                       ;; Single segment: substring match
+                       (when (string-match-p (regexp-quote (car cat-parts)) heading)
+                         (push (list (point) (org-current-level)
+                                     (org-gtd-cli/heading-path-at-point)
+                                     (line-number-at-pos))
+                               matches))
+                     ;; Multi-segment path: match last segment, verify ancestors
+                     (when (string-match-p (regexp-quote (car (last cat-parts))) heading)
+                       (let ((path-match t)
+                             (parts (butlast cat-parts)))
+                         (save-excursion
+                           (dolist (part (reverse parts))
+                             (unless (and (org-up-heading-safe)
+                                          (string-match-p (regexp-quote part)
+                                                          (org-get-heading t t t t)))
+                               (setq path-match nil))))
+                         (when path-match
+                           (push (list (point) (org-current-level)
+                                       (org-gtd-cli/heading-path-at-point)
+                                       (line-number-at-pos))
+                                 matches)))))))
+               (setq matches (nreverse matches))
+               (cond
+                ((null matches)
+                 (princ (format "Error: category heading \"%s\" not found in %s\n"
+                                category (org-gtd-cli/relative-filename target-file)))
+                 (kill-emacs 1))
+                ((> (length matches) 1)
+                 (princ (format "Multiple category matches for \"%s\":\n" category))
+                 (let ((idx 1))
+                   (dolist (m matches)
+                     (princ (format "[%d] %s (%s:%d)\n"
+                                    idx (nth 2 m)
+                                    (org-gtd-cli/relative-filename target-file)
+                                    (nth 3 m)))
+                     (cl-incf idx)))
+                 (princ "Use a more specific path (e.g. --category \"Parent/Child\").\n")
+                 (kill-emacs 2)))
+               ;; Single match — go to it and insert
+               (let ((match (car matches)))
+                 (setq matched-path (nth 2 match))
+                 (goto-char (car match))
+                 (let ((target-level (1+ (nth 1 match))))
+                   (org-end-of-subtree t)
+                   (insert "\n" (org-gtd-cli/build-entry
+                                 target-level todo-state title
+                                 priority tags-csv schedule deadline body))
+                   (insert "\n")
+                   (forward-line -1)
+                   (re-search-backward org-heading-regexp nil t)
+                   (setq inserted-line (line-number-at-pos)))))
            ;; Append to end of file
            (goto-char (point-max))
            (unless (bolp) (insert "\n"))
@@ -674,7 +715,7 @@ FILE-NAME defaults to \"tasks.org\"."
              (if use-category
                  (format "%s/%s"
                          (org-gtd-cli/relative-filename target-file)
-                         category)
+                         matched-path)
                (org-gtd-cli/relative-filename target-file))))
         (princ (format "Added: %s -> %s (%s:%d)\n" title display-target
                        (org-gtd-cli/relative-filename target-file)

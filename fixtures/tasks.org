@@ -70,6 +70,7 @@ It appears in the existing Emacs instance instead.
 ** NixOS                                                                  :nixos:
 *** TODO [#B] Add aliases to common systemctl commands
 [2026-03-11 Wed 13:21]
+** Tools
 * Family                                                                  :family:
 :PROPERTIES:
 :ID:       test-id-family
@@ -156,4 +157,5 @@ CLOSED: [2026-01-20 Tue 14:00]
 - State "DONE"       from "TODO"       [2026-01-20 Tue 14:00]
 :END:
 [2026-01-18 Sun]
+** Tools
 ** TODO Bare heading no body

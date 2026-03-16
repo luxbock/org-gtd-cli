@@ -40,9 +40,10 @@
   (let ((td org-gtd-test/test-dir)
         (sd org-gtd-test/script-dir))
     (shell-command-to-string
-     (format "find %s -mindepth 1 -delete 2>/dev/null; cp %s/fixtures/*.org %s/; mkdir -p %s/agent-notes"
+     (format "find %s -mindepth 1 -delete 2>/dev/null; cp %s/fixtures/*.org %s/; chmod u+w %s/*.org; mkdir -p %s/agent-notes"
              (shell-quote-argument td)
              (shell-quote-argument sd)
+             (shell-quote-argument td)
              (shell-quote-argument td)
              (shell-quote-argument td)))))
 

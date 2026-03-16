@@ -194,7 +194,7 @@ cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/reset)
 (org-gtd-test/run 6 '(org-gtd-cli/add-task "Waiting task" nil nil nil nil nil nil nil "WAITING"))
 (org-gtd-test/reset)
-(org-gtd-test/run 7 '(org-gtd-cli/add-task "Category task" nil nil nil nil nil nil "Work" nil))
+(org-gtd-test/run 7 '(org-gtd-cli/add-task "Category task" nil nil nil nil nil nil "Finance" nil))
 (org-gtd-test/reset)
 (org-gtd-test/run 8 '(org-gtd-cli/add-task "Missing cat" nil nil nil nil nil nil "Nonexistent" nil))
 ELISP
@@ -236,15 +236,58 @@ get_result 6
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "WAITING Waiting task" "state set"
 
-echo "test: with category"
+echo "test: with category (single segment, unique)"
 get_result 7
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "TODO Category task" "task in tasks.org"
-assert_output_contains "$LAST_OUTPUT" "tasks.org/Work" "output shows category"
+assert_output_contains "$LAST_OUTPUT" "tasks.org/Finance" "output shows full path"
 
 echo "test: category not found fails"
 get_result 8
 assert_exit 1 "$LAST_RC" "exits 1 for missing category"
+
+# --- add-task --category path + ambiguity tests ---
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: path match (multi-segment)
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-task "Path task" nil nil nil nil nil nil "Computers/Agents" nil))
+;; Test 1: ambiguous single-segment (Tools exists under both Computers and Research)
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-task "Ambig task" nil nil nil nil nil nil "Tools" nil))
+;; Test 2: path disambiguates ambiguity
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/add-task "Disambig task" nil nil nil nil nil nil "Research/Tools" nil))
+;; Test 3: wrong path (Agents is under Computers, not Work)
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/add-task "Wrong path" nil nil nil nil nil nil "Work/Agents" nil))
+ELISP
+run_batch_file
+
+echo "test: category with path match"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "TODO Path task" "task in tasks.org"
+assert_output_contains "$LAST_OUTPUT" "Computers/Agents" "output shows full path"
+
+echo "test: ambiguous category exits 2"
+get_result 1
+assert_exit 2 "$LAST_RC" "exits 2 for ambiguous match"
+assert_output_contains "$LAST_OUTPUT" "Multiple category matches" "shows ambiguity message"
+assert_output_contains "$LAST_OUTPUT" "Computers/Tools" "lists first match path"
+assert_output_contains "$LAST_OUTPUT" "Research/Tools" "lists second match path"
+
+echo "test: path disambiguates ambiguity"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "TODO Disambig task" "task in tasks.org"
+assert_output_contains "$LAST_OUTPUT" "Research/Tools" "placed under Research/Tools"
+
+echo "test: wrong path not found"
+get_result 3
+assert_exit 1 "$LAST_RC" "exits 1 for wrong path"
+assert_output_contains "$LAST_OUTPUT" "not found" "shows not found error"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # add-subtask
@@ -538,13 +581,16 @@ cat > "$BATCH_FILE" << 'ELISP'
 ELISP
 run_batch_file
 
-echo "test: shows plain headings as category tree (default: tasks.org)"
+echo "test: shows plain headings as full paths (default: tasks.org)"
 get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "* Work" "top-level category with stars"
-assert_output_contains "$LAST_OUTPUT" "** Agents" "nested heading with stars"
-assert_output_contains "$LAST_OUTPUT" "Pet Ants" "nested plain heading under Family"
+assert_output_contains "$LAST_OUTPUT" "Work (tasks.org:" "top-level category path"
+assert_output_contains "$LAST_OUTPUT" "Computers/Agents (tasks.org:" "nested path with slash"
+assert_output_contains "$LAST_OUTPUT" "Family/Pet Ants (tasks.org:" "full path to nested heading"
+assert_output_contains "$LAST_OUTPUT" "Computers/Tools (tasks.org:" "Tools under Computers"
+assert_output_contains "$LAST_OUTPUT" "Research/Tools (tasks.org:" "Tools under Research"
 assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "includes file:line"
+assert_output_not_contains "$LAST_OUTPUT" "* " "no star prefix in output"
 
 echo "test: does not show TODO headings"
 assert_output_not_contains "$LAST_OUTPUT" "Write quarterly report" "no TODO heading"
