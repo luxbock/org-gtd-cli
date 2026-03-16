@@ -696,29 +696,31 @@ FILE-NAME defaults to \"tasks.org\"."
                     (matches '()))
                (goto-char (point-min))
                (while (re-search-forward org-heading-regexp nil t)
-                 (let ((heading (org-get-heading t t t t)))
-                   (if (= (length cat-parts) 1)
-                       ;; Single segment: substring match
-                       (when (string-match-p (regexp-quote (car cat-parts)) heading)
-                         (push (list (point) (org-current-level)
-                                     (org-gtd-cli/heading-path-at-point)
-                                     (line-number-at-pos))
-                               matches))
-                     ;; Multi-segment path: match last segment, verify ancestors
-                     (when (string-match-p (regexp-quote (car (last cat-parts))) heading)
-                       (let ((path-match t)
-                             (parts (butlast cat-parts)))
-                         (save-excursion
-                           (dolist (part (reverse parts))
-                             (unless (and (org-up-heading-safe)
-                                          (string-match-p (regexp-quote part)
-                                                          (org-get-heading t t t t)))
-                               (setq path-match nil))))
-                         (when path-match
+                 (if (org-get-todo-state)
+                     (org-end-of-subtree t)
+                   (let ((heading (org-get-heading t t t t)))
+                     (if (= (length cat-parts) 1)
+                         ;; Single segment: substring match
+                         (when (string-match-p (regexp-quote (car cat-parts)) heading)
                            (push (list (point) (org-current-level)
                                        (org-gtd-cli/heading-path-at-point)
                                        (line-number-at-pos))
-                                 matches)))))))
+                                 matches))
+                       ;; Multi-segment path: match last segment, verify ancestors
+                       (when (string-match-p (regexp-quote (car (last cat-parts))) heading)
+                         (let ((path-match t)
+                               (parts (butlast cat-parts)))
+                           (save-excursion
+                             (dolist (part (reverse parts))
+                               (unless (and (org-up-heading-safe)
+                                            (string-match-p (regexp-quote part)
+                                                            (org-get-heading t t t t)))
+                                 (setq path-match nil))))
+                           (when path-match
+                             (push (list (point) (org-current-level)
+                                         (org-gtd-cli/heading-path-at-point)
+                                         (line-number-at-pos))
+                                   matches))))))))
                (setq matches (nreverse matches))
                (cond
                 ((null matches)

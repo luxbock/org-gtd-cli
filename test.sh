@@ -312,6 +312,30 @@ get_result 3
 assert_exit 1 "$LAST_RC" "exits 1 for wrong path"
 assert_output_contains "$LAST_OUTPUT" "not found" "shows not found error"
 
+# --- add-task --category skips TODO headings ---
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: "Holiday" matches category "Holiday Trip" but not TODO "Holiday pre-trip tasks"
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-task "Holiday test task" nil nil nil nil nil nil "Holiday" nil))
+;; Test 1: "Design" only matches TODO "Design CLI tool" — no category matches
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-task "Design test task" nil nil nil nil nil nil "Design" nil))
+ELISP
+run_batch_file
+
+echo "test: --category skips TODO headings (Holiday matches only category)"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "TODO Holiday test task" "task in tasks.org"
+assert_output_contains "$LAST_OUTPUT" "Travel/Holiday Trip" "placed under Holiday Trip"
+
+echo "test: --category with only TODO matches returns not found"
+get_result 1
+assert_exit 1 "$LAST_RC" "exits 1 when all matches are TODO headings"
+assert_output_contains "$LAST_OUTPUT" "not found" "shows not found error"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # add-subtask
 # ══════════════════════════════════════════════════════════════════════════════
