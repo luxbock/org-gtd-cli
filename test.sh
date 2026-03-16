@@ -2191,6 +2191,14 @@ cat > "$BATCH_FILE" << ELISP
 ;; 11: body with quote block containing long line
 (org-gtd-test/reset)
 (org-gtd-test/run 11 '(org-gtd-cli/set-body "Bare heading" "A quote:\n#+begin_quote\nThis is a very long quotation that should be preserved verbatim because it is inside a quote block and should not be reflowed by the fill function\n#+end_quote"))
+
+;; 12: body with org link longer than 80 chars (must not be broken)
+(org-gtd-test/reset)
+(org-gtd-test/run 12 '(org-gtd-cli/set-body "Bare heading" "Research file: [[file:agent-notes/service-phone-number-requirements-for-agent-accounts.org][Service Phone Number Requirements]]"))
+
+;; 13: body with long text paragraph + separate org link paragraph
+(org-gtd-test/reset)
+(org-gtd-test/run 13 '(org-gtd-cli/set-body "Bare heading" "This is a very long paragraph that exceeds the eighty column limit and should be wrapped properly by the fill function when processing the body text.\n\nResearch file: [[file:agent-notes/service-phone-number-requirements-for-agent-accounts.org][Service Phone Number Requirements]]"))
 ELISP
 run_batch_file
 
@@ -2273,6 +2281,20 @@ echo "test: quote block content preserved"
 get_result 11
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "This is a very long quotation" "long line inside quote block preserved"
+
+echo "test: org link not broken by wrapping"
+get_result 12
+assert_exit 0 "$LAST_RC" "exits 0"
+# The full link must appear intact on a single line
+assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/service-phone-number-requirements-for-agent-accounts.org][Service Phone Number Requirements]]" "org link preserved intact"
+
+echo "test: long text wrapped but org link in separate paragraph preserved"
+get_result 13
+assert_exit 0 "$LAST_RC" "exits 0"
+# Text paragraph should be wrapped
+assert_no_long_lines "$TEST_DIR/tasks.org" "Bare heading" "[[file:" 80 "text paragraph wrapped"
+# Link must be intact
+assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/service-phone-number-requirements-for-agent-accounts.org][Service Phone Number Requirements]]" "org link preserved intact"
 
 echo ""
 echo "All tests completed."

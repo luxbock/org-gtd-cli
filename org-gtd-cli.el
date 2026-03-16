@@ -202,8 +202,28 @@ If ACTIVE is non-nil, use angle brackets; otherwise square brackets."
                 (looking-at "[ \t]*$"))
             (forward-line 1))
            (t
-            (org-fill-paragraph)
-            (forward-line 1))))
+            ;; Check if the paragraph contains an org link — filling a
+            ;; paragraph with [[...][...]] links can break link syntax
+            ;; when the link exceeds fill-column.
+            (if (save-excursion
+                  (catch 'found
+                    (while (and (not (eobp))
+                                (not (looking-at "[ \t]*$"))
+                                (not (looking-at "[ \t]*#\\+begin_"))
+                                (not (looking-at "\\[[-0-9]+ [A-Z][a-z]+")))
+                      (when (looking-at ".*\\[\\[")
+                        (throw 'found t))
+                      (forward-line 1))
+                    nil))
+                ;; Paragraph has org link — skip without filling
+                (while (and (not (eobp))
+                            (not (looking-at "[ \t]*$"))
+                            (not (looking-at "[ \t]*#\\+begin_"))
+                            (not (looking-at "\\[[-0-9]+ [A-Z][a-z]+")))
+                  (forward-line 1))
+              ;; No link — fill normally
+              (org-fill-paragraph)
+              (forward-line 1)))))
         ;; Phase 3: Remove the blank lines we inserted (by text property)
         (let ((pos (point-min)))
           (while (setq pos (text-property-any pos (point-max) 'fill-sep t))
