@@ -110,7 +110,6 @@ If INCLUDE-DONE is non-nil, also match done tasks."
            (while (re-search-forward org-heading-regexp nil t)
              (let* ((state (org-get-todo-state))
                     (heading (org-get-heading t t t t))
-                    (line (line-number-at-pos))
                     (pos (line-beginning-position)))
                (when (and state
                           (or include-done
@@ -119,7 +118,7 @@ If INCLUDE-DONE is non-nil, also match done tasks."
                                           (downcase heading)))
                  (push (list (current-buffer) pos
                              state heading
-                             (org-gtd-cli/relative-filename file) line)
+                             (org-gtd-cli/relative-filename file))
                        matches))))))))
     (setq matches (nreverse matches))
     (cond
@@ -138,8 +137,8 @@ If INCLUDE-DONE is non-nil, also match done tasks."
       (princ "Multiple matches:\n")
       (let ((i 1))
         (dolist (m matches)
-          (princ (format "[%d] %s %s (%s:%d)\n"
-                         i (nth 2 m) (nth 3 m) (nth 4 m) (nth 5 m)))
+          (princ (format "[%d] %s %s (%s)\n"
+                         i (nth 2 m) (nth 3 m) (nth 4 m)))
           (cl-incf i)))
       (princ "\nUse --index N to select one.\n")
       (kill-emacs 2)))))
@@ -333,7 +332,6 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                       (tags-str (when tags (concat ":" (mapconcat #'identity tags ":") ":")))
                       (scheduled (org-entry-get nil "SCHEDULED"))
                       (deadline (org-entry-get nil "DEADLINE"))
-                      (line (line-number-at-pos))
                       (rel-file (org-gtd-cli/relative-filename file)))
                  ;; Filter: must have a TODO state
                  (when (and state
@@ -375,7 +373,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                                     (concat " [#" priority-char "]"))
                                   " " heading
                                   (when tags-str (concat " " tags-str))
-                                  " (" rel-file ":" (number-to-string line) ")"
+                                  " (" rel-file ")"
                                   (when scheduled (concat " S:" scheduled))
                                   (when deadline (concat " D:" deadline)))))
                      (push line-str results))))))))))
@@ -423,7 +421,6 @@ FILE-NAME restricts search to a single file in org-directory."
              (let* ((state (org-get-todo-state))
                     (heading (org-get-heading t t t t))
                     (tags (org-get-tags))
-                    (line (line-number-at-pos))
                     (rel-file (org-gtd-cli/relative-filename file)))
                (when (and state
                           (or (null state-filter)
@@ -435,14 +432,14 @@ FILE-NAME restricts search to a single file in org-directory."
                                 (cl-every (lambda (tag)
                                             (member tag tags))
                                           tag-list))))
-                 (push (list state heading rel-file line) matches))))))))
+                 (push (list state heading rel-file) matches))))))))
     (setq matches (nreverse matches))
     (if (null matches)
         (princ "No matches.\n")
       (let ((i 1))
         (dolist (m matches)
-          (princ (format "[%d] %s %s (%s:%d)\n"
-                         i (nth 0 m) (nth 1 m) (nth 2 m) (nth 3 m)))
+          (princ (format "[%d] %s %s (%s)\n"
+                         i (nth 0 m) (nth 1 m) (nth 2 m)))
           (cl-incf i)))))
   (kill-emacs 0))
 
@@ -460,9 +457,8 @@ state and priority — no tags, body, drawers, or planning lines."
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((file (buffer-file-name))
-              (rel-file (org-gtd-cli/relative-filename file))
-              (line (line-number-at-pos)))
-         (princ (format "(%s:%d)\n" rel-file line))
+              (rel-file (org-gtd-cli/relative-filename file)))
+         (princ (format "(%s)\n" rel-file))
          (if is-plain
              (let* ((base-level (org-current-level))
                     (subtree-end (save-excursion (org-end-of-subtree t) (point))))
@@ -492,7 +488,6 @@ state and priority — no tags, body, drawers, or planning lines."
        (let* ((heading (org-get-heading t t t t))
               (file (buffer-file-name))
               (rel-file (org-gtd-cli/relative-filename file))
-              (line (line-number-at-pos))
               (level (org-current-level))
               (child-level (1+ level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point)))
@@ -506,7 +501,6 @@ state and priority — no tags, body, drawers, or planning lines."
              (when (= (org-current-level) child-level)
                (let* ((child-state (org-get-todo-state))
                       (child-heading (org-get-heading t t t t))
-                      (child-line (line-number-at-pos))
                       (child-scheduled (org-entry-get nil "SCHEDULED"))
                       (child-deadline (org-entry-get nil "DEADLINE"))
                       (child-priority (org-entry-get nil "PRIORITY")))
@@ -517,17 +511,16 @@ state and priority — no tags, body, drawers, or planning lines."
                              child-heading
                              child-scheduled
                              child-deadline
-                             child-priority
-                             child-line)
+                             child-priority)
                        children)))))
          (if (= total-count 0)
              (progn
                (princ (format "Task \"%s\" has no subtasks\n" heading))
                (kill-emacs 1))
-           (princ (format "Project: %s (%s:%d)\n" heading rel-file line))
+           (princ (format "Project: %s (%s)\n" heading rel-file))
            (dolist (child (nreverse children))
              (let ((line-str (concat "  " (nth 0 child) " " (nth 1 child)
-                                     " (" rel-file ":" (number-to-string (nth 5 child)) ")")))
+                                     " (" rel-file ")")))
                (when (and (nth 4 child) (not (string= (nth 4 child) "B")))
                  (setq line-str (concat line-str " [#" (nth 4 child) "]")))
                (when (nth 3 child)
@@ -560,14 +553,13 @@ FILE-NAME defaults to \"tasks.org\"."
        (let ((rel-file (org-gtd-cli/relative-filename file)))
          (goto-char (point-min))
          (while (re-search-forward org-heading-regexp nil t)
-           (let ((state (org-get-todo-state))
-                 (line (line-number-at-pos)))
+           (let ((state (org-get-todo-state)))
              (if state
                  (org-end-of-subtree t)
                (setq found t)
-               (princ (format "%s (%s:%d)\n"
+               (princ (format "%s (%s)\n"
                               (org-gtd-cli/heading-path-at-point)
-                              rel-file line))))))))
+                              rel-file))))))))
     (unless found
       (princ "No categories found\n")))
   (kill-emacs 0))
@@ -591,8 +583,7 @@ FILE-NAME defaults to \"tasks.org\"."
                (when (and state
                           (not (member state org-done-keywords))
                           (member "@agent" local-tags))
-                 (let* ((line (line-number-at-pos))
-                        (rel-file (org-gtd-cli/relative-filename file))
+                 (let* ((rel-file (org-gtd-cli/relative-filename file))
                         (level (org-current-level))
                         (subtree-end (save-excursion (org-end-of-subtree t) (point)))
                         ;; Get parent heading for project context (skip non-TODO headings)
@@ -628,22 +619,21 @@ FILE-NAME defaults to \"tasks.org\"."
                        (when (= (org-current-level) child-level)
                          (let ((child-state (or (org-get-todo-state) ""))
                                (child-heading (org-get-heading t t t t))
-                               (child-deadline (org-entry-get nil "DEADLINE"))
-                               (child-line (line-number-at-pos)))
+                               (child-deadline (org-entry-get nil "DEADLINE")))
                            (cl-incf total-count)
                            (when (member child-state org-done-keywords)
                              (cl-incf done-count))
-                           (push (list child-state child-heading child-deadline child-line)
+                           (push (list child-state child-heading child-deadline)
                                  children)))))
                    (cl-incf task-num)
                    (push (list task-num state heading project
                                (mapconcat #'identity all-tags ",")
-                               rel-file line body
+                               rel-file body
                                (nreverse children) done-count total-count)
                          results)))))))))
     (dolist (r (nreverse results))
       (cl-destructuring-bind (num state heading project tags-str
-                                  rel-file line body children
+                                  rel-file body children
                                   done-count total-count)
           r
         (princ (format "--- Task %d ---\n" num))
@@ -652,15 +642,15 @@ FILE-NAME defaults to \"tasks.org\"."
         (when project
           (princ (format "Project: %s\n" project)))
         (princ (format "Tags: %s\n" tags-str))
-        (princ (format "File: %s:%d\n" rel-file line))
+        (princ (format "File: %s\n" rel-file))
         (when (and body (not (string-empty-p body)))
           (princ (format "Body: %s\n" body)))
         (when (> total-count 0)
           (princ (format "Subtasks: %d/%d done\n" done-count total-count))
           (dolist (child children)
-            (let ((child-str (format "  %s %s (%s:%d)"
+            (let ((child-str (format "  %s %s (%s)"
                                      (nth 0 child) (nth 1 child)
-                                     rel-file (nth 3 child))))
+                                     rel-file)))
               (when (nth 2 child)
                 (setq child-str (concat child-str "  D:" (nth 2 child))))
               (princ (concat child-str "\n")))))
@@ -707,7 +697,7 @@ FILE-NAME defaults to \"tasks.org\"."
     (unless (file-exists-p target-file)
       (princ (format "Error: file not found: %s\n" target-file))
       (kill-emacs 1))
-    (let (inserted-line matched-path)
+    (let (matched-path)
       (with-current-buffer (find-file-noselect target-file)
         (org-with-wide-buffer
          (if use-category
@@ -723,8 +713,7 @@ FILE-NAME defaults to \"tasks.org\"."
                          ;; Single segment: substring match
                          (when (string-match-p (regexp-quote (car cat-parts)) heading)
                            (push (list (point) (org-current-level)
-                                       (org-gtd-cli/heading-path-at-point)
-                                       (line-number-at-pos))
+                                       (org-gtd-cli/heading-path-at-point))
                                  matches))
                        ;; Multi-segment path: match last segment, verify ancestors
                        (when (string-match-p (regexp-quote (car (last cat-parts))) heading)
@@ -738,8 +727,7 @@ FILE-NAME defaults to \"tasks.org\"."
                                  (setq path-match nil))))
                            (when path-match
                              (push (list (point) (org-current-level)
-                                         (org-gtd-cli/heading-path-at-point)
-                                         (line-number-at-pos))
+                                         (org-gtd-cli/heading-path-at-point))
                                    matches))))))))
                (setq matches (nreverse matches))
                (cond
@@ -751,10 +739,9 @@ FILE-NAME defaults to \"tasks.org\"."
                  (princ (format "Multiple category matches for \"%s\":\n" category))
                  (let ((idx 1))
                    (dolist (m matches)
-                     (princ (format "[%d] %s (%s:%d)\n"
+                     (princ (format "[%d] %s (%s)\n"
                                     idx (nth 2 m)
-                                    (org-gtd-cli/relative-filename target-file)
-                                    (nth 3 m)))
+                                    (org-gtd-cli/relative-filename target-file)))
                      (cl-incf idx)))
                  (princ "Use a more specific path (e.g. --category \"Parent/Child\").\n")
                  (kill-emacs 2)))
@@ -767,20 +754,14 @@ FILE-NAME defaults to \"tasks.org\"."
                    (insert "\n" (org-gtd-cli/build-entry
                                  target-level todo-state title
                                  priority tags-csv schedule deadline body))
-                   (insert "\n")
-                   (forward-line -1)
-                   (re-search-backward org-heading-regexp nil t)
-                   (setq inserted-line (line-number-at-pos)))))
+                   (insert "\n"))))
            ;; Append to end of file
            (goto-char (point-max))
            (unless (bolp) (insert "\n"))
            (insert "\n" (org-gtd-cli/build-entry
                          1 todo-state title
                          priority tags-csv schedule deadline body))
-           (insert "\n")
-           (forward-line -1)
-           (re-search-backward org-heading-regexp nil t)
-           (setq inserted-line (line-number-at-pos))))
+           (insert "\n")))
         (save-buffer))
       (let ((display-target
              (if use-category
@@ -788,9 +769,8 @@ FILE-NAME defaults to \"tasks.org\"."
                          (org-gtd-cli/relative-filename target-file)
                          matched-path)
                (org-gtd-cli/relative-filename target-file))))
-        (princ (format "Added: %s -> %s (%s:%d)\n" title display-target
-                       (org-gtd-cli/relative-filename target-file)
-                       inserted-line)))))
+        (princ (format "Added: %s -> %s (%s)\n" title display-target
+                       (org-gtd-cli/relative-filename target-file))))))
   (kill-emacs 0))
 
 ;; --- add-subtask ---
@@ -826,8 +806,7 @@ FILE-NAME defaults to \"tasks.org\"."
        (let* ((parent-heading (org-get-heading t t t t))
               (parent-level (org-current-level))
               (child-level (1+ parent-level))
-              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (parent-line (line-number-at-pos)))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          ;; Demote NEXT parent to TODO (a NEXT task becoming a project should be TODO)
          (when (string= (org-get-todo-state) "NEXT")
            (let ((org-inhibit-logging nil))
@@ -838,13 +817,9 @@ FILE-NAME defaults to \"tasks.org\"."
                        child-level todo-state title
                        priority tags-csv schedule deadline body))
          (insert "\n")
-         ;; Find the heading we just inserted for its line number
-         (forward-line -1)
-         (re-search-backward org-heading-regexp nil t)
-         (let ((child-line (line-number-at-pos)))
-           (save-buffer)
-           (princ (format "Added subtask: \"%s\" under \"%s\" (%s:%d)\n"
-                          title parent-heading rel-file child-line)))))))
+         (save-buffer)
+         (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
+                        title parent-heading rel-file))))))
   (kill-emacs 0))
 
 ;; --- add-event ---
@@ -941,7 +916,6 @@ FILE-NAME defaults to \"tasks.org\"."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos))
               (level (org-current-level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point))))
          ;; Find insertion point: after body text, before creation timestamp,
@@ -976,7 +950,7 @@ FILE-NAME defaults to \"tasks.org\"."
            (unless (bolp) (insert "\n"))
            (insert text "\n"))
          (save-buffer)
-         (princ (format "Appended to: \"%s\" (%s:%d)\n" heading rel-file line))))))
+         (princ (format "Appended to: \"%s\" (%s)\n" heading rel-file))))))
   (kill-emacs 0))
 
 ;; --- set-body ---
@@ -996,7 +970,6 @@ FILE-NAME defaults to \"tasks.org\"."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos))
               (level (org-current-level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point))))
          ;; Clamp: when there's no body/metadata (e.g. Orgzly-created tasks),
@@ -1035,7 +1008,7 @@ FILE-NAME defaults to \"tasks.org\"."
              (unless (bolp) (insert "\n"))
              (insert text "\n")))
          (save-buffer)
-         (princ (format "Set body: \"%s\" (%s:%d)\n" heading rel-file line))))))
+         (princ (format "Set body: \"%s\" (%s)\n" heading rel-file))))))
   (kill-emacs 0))
 
 ;; --- done ---
@@ -1051,11 +1024,10 @@ FILE-NAME defaults to \"tasks.org\"."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos))
               (old-state (org-get-todo-state)))
          (if is-dry-run
              (progn
-               (princ (format "Would mark done: %s (%s:%d)\n" heading rel-file line))
+               (princ (format "Would mark done: %s (%s)\n" heading rel-file))
                ;; Check for auto-progress
                (when (gtd/is-project-subtree-p)
                  (let ((next-sibling-heading
@@ -1086,18 +1058,17 @@ FILE-NAME defaults to \"tasks.org\"."
                      (when (org-get-next-sibling)
                        (when (and (org-get-todo-state)
                                   (string= (org-get-todo-state) "TODO"))
-                         (let ((next-heading (org-get-heading t t t t))
-                               (next-line (line-number-at-pos)))
+                         (let ((next-heading (org-get-heading t t t t)))
                            (org-todo "NEXT")
                            (setq auto-msg
-                                 (format "  Auto-progressed: \"%s\" -> NEXT (%s:%d)\n"
-                                         next-heading rel-file next-line)))))))))
+                                 (format "  Auto-progressed: \"%s\" -> NEXT (%s)\n"
+                                         next-heading rel-file)))))))))
              ;; Reorder siblings by state (DONE first, then NEXT, TODO, etc.)
              (save-excursion
                (goto-char (cdr buf-pos))
                (org-gtd-cli/reorder-siblings-by-state))
              (save-buffer)
-             (princ (format "Done: %s (%s:%d)\n" heading rel-file line))
+             (princ (format "Done: %s (%s)\n" heading rel-file))
              (when auto-msg (princ auto-msg))))))))
   (kill-emacs 0))
 
@@ -1127,17 +1098,16 @@ FILE-NAME defaults to \"tasks.org\"."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (old-state (org-get-todo-state))
-              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos)))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (if is-dry-run
-             (princ (format "Would change: \"%s\" %s -> %s (%s:%d)\n"
-                            heading old-state new-state rel-file line))
+             (princ (format "Would change: \"%s\" %s -> %s (%s)\n"
+                            heading old-state new-state rel-file))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
            (org-gtd-cli/reorder-siblings-by-state)
            (save-buffer)
-           (princ (format "State change: \"%s\" %s -> %s (%s:%d)\n"
-                          heading old-state new-state rel-file line)))))))
+           (princ (format "State change: \"%s\" %s -> %s (%s)\n"
+                          heading old-state new-state rel-file)))))))
   (kill-emacs 0))
 
 ;; --- refile ---
@@ -1210,19 +1180,18 @@ FILE-NAME defaults to \"tasks.org\"."
          (goto-char (cdr buf-pos))
          (let* ((heading (org-get-heading t t t t))
                 (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-                (line (line-number-at-pos))
                 (rel-target (org-gtd-cli/relative-filename target-file)))
            (if is-dry-run
-               (princ (format "Would refile: \"%s\" -> %s/%s (%s:%d)\n"
-                              heading rel-target target rel-file line))
+               (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
+                              heading rel-target target rel-file))
              ;; Perform the refile
              (let ((rfloc (list (org-get-heading t t t t)
                                 target-file nil target-pos)))
                (org-refile nil nil rfloc))
              (save-buffer)
              (with-current-buffer target-buf (save-buffer))
-             (princ (format "Refiled: \"%s\" -> %s/%s (%s:%d)\n"
-                            heading rel-target target rel-file line)))))))
+             (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
+                            heading rel-target target rel-file)))))))
     (kill-emacs 0)))
 
 ;; --- set-next ---
@@ -1239,7 +1208,6 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos))
               (level (org-current-level))
               (child-level (1+ level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point)))
@@ -1255,8 +1223,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                (setq has-children t)
                (let ((child-state (org-get-todo-state)))
                  (when (and child-state (string= child-state "NEXT") (not existing-next))
-                   (setq existing-next
-                         (list (org-get-heading t t t t) (line-number-at-pos))))
+                   (setq existing-next (org-get-heading t t t t)))
                  (when (and child-state (string= child-state "TODO") (not first-todo-pos))
                    (setq first-todo-pos (point)))))))
          (cond
@@ -1265,7 +1232,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
            (let ((current-state (org-get-todo-state)))
              (cond
               ((string= current-state "NEXT")
-               (princ (format "Already NEXT: \"%s\" (%s:%d)\n" heading rel-file line)))
+               (princ (format "Already NEXT: \"%s\" (%s)\n" heading rel-file)))
               ((not (member current-state org-not-done-keywords))
                (princ (format "Error: \"%s\" is in done state %s\n" heading current-state))
                (kill-emacs 1))
@@ -1273,24 +1240,23 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                (let ((org-inhibit-logging nil))
                  (org-todo "NEXT"))
                (save-buffer)
-               (princ (format "Set NEXT: \"%s\" (%s:%d)\n" heading rel-file line))))))
+               (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file))))))
           (existing-next
-           (princ (format "Already has NEXT: \"%s\" (%s:%d)\n"
-                          (nth 0 existing-next) rel-file (nth 1 existing-next)))
+           (princ (format "Already has NEXT: \"%s\" (%s)\n"
+                          existing-next rel-file))
            (kill-emacs 0))
           ((not first-todo-pos)
            (princ (format "Error: \"%s\" has no TODO children to promote\n" heading))
            (kill-emacs 1))
           (t
            (goto-char first-todo-pos)
-           (let ((child-heading (org-get-heading t t t t))
-                 (child-line (line-number-at-pos)))
+           (let ((child-heading (org-get-heading t t t t)))
              (let ((org-inhibit-logging nil))
                (org-todo "NEXT"))
              (org-gtd-cli/reorder-siblings-by-state)
              (save-buffer)
-             (princ (format "Set NEXT: \"%s\" (%s:%d)\n"
-                            child-heading rel-file child-line)))))))))
+             (princ (format "Set NEXT: \"%s\" (%s)\n"
+                            child-heading rel-file)))))))))
   (kill-emacs 0))
 
 ;; --- move ---
@@ -1307,10 +1273,10 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
          (cond
           ((string= direction "up")
            (org-move-subtree-up)
-           (princ (format "Moved: \"%s\" up (%s:%d)\n" heading rel-file (line-number-at-pos))))
+           (princ (format "Moved: \"%s\" up (%s)\n" heading rel-file)))
           ((string= direction "down")
            (org-move-subtree-down)
-           (princ (format "Moved: \"%s\" down (%s:%d)\n" heading rel-file (line-number-at-pos))))
+           (princ (format "Moved: \"%s\" down (%s)\n" heading rel-file)))
           ((or (string= direction "before") (string= direction "after"))
            ;; Find sibling
            (unless (and sibling-substring
@@ -1368,8 +1334,8 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                  (org-end-of-subtree t)
                  (unless (eobp) (forward-char))
                  (insert task-text "\n"))))
-           (princ (format "Moved: \"%s\" %s \"%s\" (%s:%d)\n"
-                          heading direction sibling-substring rel-file (line-number-at-pos))))
+           (princ (format "Moved: \"%s\" %s \"%s\" (%s)\n"
+                          heading direction sibling-substring rel-file)))
           (t
            (princ (format "Error: unknown direction \"%s\"\n" direction))
            (kill-emacs 1)))
@@ -1389,15 +1355,14 @@ Preserves TODO state, priority, and tags."
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((old-heading (org-get-heading t t t t))
-              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos)))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (if is-dry-run
-             (princ (format "Would rename: \"%s\" -> \"%s\" (%s:%d)\n"
-                            old-heading new-title rel-file line))
+             (princ (format "Would rename: \"%s\" -> \"%s\" (%s)\n"
+                            old-heading new-title rel-file))
            (org-edit-headline new-title)
            (save-buffer)
-           (princ (format "Renamed: \"%s\" -> \"%s\" (%s:%d)\n"
-                          old-heading new-title rel-file line)))))))
+           (princ (format "Renamed: \"%s\" -> \"%s\" (%s)\n"
+                          old-heading new-title rel-file)))))))
   (kill-emacs 0))
 
 ;; --- set-schedule ---
@@ -1420,26 +1385,25 @@ Preserves TODO state, priority, and tags."
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
-              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos)))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (cond
           (is-clear
            (if is-dry-run
-               (princ (format "Would clear schedule: \"%s\" (%s:%d)\n"
-                              heading rel-file line))
+               (princ (format "Would clear schedule: \"%s\" (%s)\n"
+                              heading rel-file))
              (org-schedule '(4))
              (save-buffer)
-             (princ (format "Cleared schedule: \"%s\" (%s:%d)\n"
-                            heading rel-file line))))
+             (princ (format "Cleared schedule: \"%s\" (%s)\n"
+                            heading rel-file))))
           (date-str
            (let ((ts (org-gtd-cli/make-timestamp date-str time-str t)))
              (if is-dry-run
-                 (princ (format "Would schedule: \"%s\" %s (%s:%d)\n"
-                                heading ts rel-file line))
+                 (princ (format "Would schedule: \"%s\" %s (%s)\n"
+                                heading ts rel-file))
                (org-schedule nil ts)
                (save-buffer)
-               (princ (format "Scheduled: \"%s\" %s (%s:%d)\n"
-                              heading ts rel-file line)))))
+               (princ (format "Scheduled: \"%s\" %s (%s)\n"
+                              heading ts rel-file)))))
           (t
            (princ "Error: provide a DATE or --clear\n")
            (kill-emacs 1)))))))
@@ -1465,26 +1429,25 @@ Preserves TODO state, priority, and tags."
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
-              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos)))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (cond
           (is-clear
            (if is-dry-run
-               (princ (format "Would clear deadline: \"%s\" (%s:%d)\n"
-                              heading rel-file line))
+               (princ (format "Would clear deadline: \"%s\" (%s)\n"
+                              heading rel-file))
              (org-deadline '(4))
              (save-buffer)
-             (princ (format "Cleared deadline: \"%s\" (%s:%d)\n"
-                            heading rel-file line))))
+             (princ (format "Cleared deadline: \"%s\" (%s)\n"
+                            heading rel-file))))
           (date-str
            (let ((ts (org-gtd-cli/make-timestamp date-str time-str t)))
              (if is-dry-run
-                 (princ (format "Would set deadline: \"%s\" %s (%s:%d)\n"
-                                heading ts rel-file line))
+                 (princ (format "Would set deadline: \"%s\" %s (%s)\n"
+                                heading ts rel-file))
                (org-deadline nil ts)
                (save-buffer)
-               (princ (format "Deadline: \"%s\" %s (%s:%d)\n"
-                              heading ts rel-file line)))))
+               (princ (format "Deadline: \"%s\" %s (%s)\n"
+                              heading ts rel-file)))))
           (t
            (princ "Error: provide a DATE or --clear\n")
            (kill-emacs 1)))))))
@@ -1510,7 +1473,6 @@ ADD-CSV and REMOVE-CSV are comma-separated tag strings."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos))
               (old-tags (org-get-tags nil t))
               (new-tags (copy-sequence old-tags)))
          ;; Add tags (skip duplicates)
@@ -1523,12 +1485,12 @@ ADD-CSV and REMOVE-CSV are comma-separated tag strings."
          (let ((old-str (if old-tags (concat ":" (mapconcat #'identity old-tags ":") ":") ""))
                (new-str (if new-tags (concat ":" (mapconcat #'identity new-tags ":") ":") "")))
            (if is-dry-run
-               (princ (format "Would set tags: \"%s\" %s -> %s (%s:%d)\n"
-                              heading old-str new-str rel-file line))
+               (princ (format "Would set tags: \"%s\" %s -> %s (%s)\n"
+                              heading old-str new-str rel-file))
              (org-set-tags new-tags)
              (save-buffer)
-             (princ (format "Tags: \"%s\" %s -> %s (%s:%d)\n"
-                            heading old-str new-str rel-file line))))))))
+             (princ (format "Tags: \"%s\" %s -> %s (%s)\n"
+                            heading old-str new-str rel-file))))))))
   (kill-emacs 0))
 
 ;; --- archive helpers ---
@@ -1579,28 +1541,27 @@ a TODO keyword that is NOT in `org-done-keywords'."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (line (line-number-at-pos))
               (state (org-get-todo-state)))
          ;; Rule 1: must be done
          (unless (member state org-done-keywords)
-           (princ (format "Not archivable: \"%s\" is still active (%s) (%s:%d)\n"
-                          heading state rel-file line))
+           (princ (format "Not archivable: \"%s\" is still active (%s) (%s)\n"
+                          heading state rel-file))
            (kill-emacs 1))
          ;; Rule 2b: no recent dates
          (when (org-gtd-cli/subtree-has-recent-dates-p)
-           (princ (format "Not archivable: \"%s\" has recent dates (%s:%d)\n"
-                          heading rel-file line))
+           (princ (format "Not archivable: \"%s\" has recent dates (%s)\n"
+                          heading rel-file))
            (kill-emacs 1))
          ;; Rule 3: not inside active project
          (let ((active-parent (org-gtd-cli/inside-active-project-p)))
            (when active-parent
-             (princ (format "Not archivable: \"%s\" is inside active project \"%s\" (%s:%d)\n"
-                            heading active-parent rel-file line))
+             (princ (format "Not archivable: \"%s\" is inside active project \"%s\" (%s)\n"
+                            heading active-parent rel-file))
              (kill-emacs 1)))
          ;; All checks passed
          (if is-dry-run
              (progn
-               (princ (format "Would archive: \"%s\" (%s:%d)\n" heading rel-file line))
+               (princ (format "Would archive: \"%s\" (%s)\n" heading rel-file))
                (kill-emacs 0))
            ;; Archive
            (org-archive-subtree)
@@ -1609,7 +1570,7 @@ a TODO keyword that is NOT in `org-done-keywords'."
              (when (and (buffer-file-name buf)
                         (buffer-modified-p buf))
                (with-current-buffer buf (save-buffer))))
-           (princ (format "Archived: \"%s\" (%s:%d)\n" heading rel-file line)))))))
+           (princ (format "Archived: \"%s\" (%s)\n" heading rel-file)))))))
   (kill-emacs 0))
 
 ;; --- archive-all (batch) ---
@@ -1632,15 +1593,14 @@ a TODO keyword that is NOT in `org-done-keywords'."
                (when (and state (member state org-done-keywords))
                  (let* ((heading (org-get-heading t t t t))
                         (pos (line-beginning-position))
-                        (line (line-number-at-pos))
                         (rel-file (org-gtd-cli/relative-filename file)))
-                   (push (list (current-buffer) pos heading rel-file line)
+                   (push (list (current-buffer) pos heading rel-file)
                          candidates)))))))))
     (setq candidates (nreverse candidates))
     ;; Filter candidates
     (let ((archivable '()))
       (dolist (cand candidates)
-        (cl-destructuring-bind (buf pos heading rel-file line) cand
+        (cl-destructuring-bind (buf pos heading rel-file) cand
           (with-current-buffer buf
             (org-with-wide-buffer
              (goto-char pos)
@@ -1654,11 +1614,11 @@ a TODO keyword that is NOT in `org-done-keywords'."
               ;; Rule 2a: no dates at all → skip with message
               ((not (org-gtd-cli/subtree-has-any-dates-p))
                (cl-incf skipped)
-               (princ (format "Skipped (no dates): \"%s\" (%s:%d)\n"
-                              heading rel-file line)))
+               (princ (format "Skipped (no dates): \"%s\" (%s)\n"
+                              heading rel-file)))
               ;; All rules pass
               (t
-               (push (list buf pos heading rel-file line) archivable)))))))
+               (push (list buf pos heading rel-file) archivable)))))))
       (setq archivable (nreverse archivable))
       (if (null archivable)
           (progn
@@ -1678,11 +1638,11 @@ a TODO keyword that is NOT in `org-done-keywords'."
           (maphash (lambda (_buf items) (setq archivable (append items archivable)))
                    by-buffer))
         (dolist (item archivable)
-          (cl-destructuring-bind (buf pos heading rel-file line) item
+          (cl-destructuring-bind (buf pos heading rel-file) item
             (if is-dry-run
                 (progn
-                  (princ (format "Would archive: \"%s\" (%s:%d)\n"
-                                 heading rel-file line))
+                  (princ (format "Would archive: \"%s\" (%s)\n"
+                                 heading rel-file))
                   (cl-incf archived))
               (with-current-buffer buf
                 (org-with-wide-buffer
@@ -1723,7 +1683,6 @@ in their body, and inserts one using the current date/time."
                (when state
                  (let* ((heading (org-get-heading t t t t))
                         (pos (line-beginning-position))
-                        (line (line-number-at-pos))
                         (level (org-current-level))
                         (subtree-end (save-excursion (org-end-of-subtree t) (point)))
                         (rel-file (org-gtd-cli/relative-filename file))
@@ -1746,7 +1705,7 @@ in their body, and inserts one using the current date/time."
                          (forward-line 1))))
                    ;; If no timestamp found, add to candidates
                    (unless has-timestamp
-                     (push (list (current-buffer) pos heading rel-file line level subtree-end)
+                     (push (list (current-buffer) pos heading rel-file level subtree-end)
                            candidates))))))))))
     (setq candidates (nreverse candidates))
     (if (null candidates)
@@ -1762,10 +1721,10 @@ in their body, and inserts one using the current date/time."
         (maphash (lambda (_buf items) (setq candidates (append items candidates)))
                  by-buffer))
       (dolist (item candidates)
-        (cl-destructuring-bind (buf pos heading rel-file line level subtree-end) item
+        (cl-destructuring-bind (buf pos heading rel-file level subtree-end) item
           (if is-dry-run
               (progn
-                (princ (format "Would fix: \"%s\" (%s:%d)\n" heading rel-file line))
+                (princ (format "Would fix: \"%s\" (%s)\n" heading rel-file))
                 (cl-incf fixed))
             (with-current-buffer buf
               (org-with-wide-buffer
@@ -1784,7 +1743,7 @@ in their body, and inserts one using the current date/time."
                    (goto-char body-end)
                    (unless (bolp) (insert "\n"))
                    (insert (org-gtd-cli/current-inactive-timestamp) "\n")))
-               (princ (format "Fixed: \"%s\" (%s:%d)\n" heading rel-file line))
+               (princ (format "Fixed: \"%s\" (%s)\n" heading rel-file))
                (cl-incf fixed))))))
       ;; Save all modified buffers
       (unless is-dry-run
@@ -1804,7 +1763,7 @@ in their body, and inserts one using the current date/time."
 (defun org-gtd-cli/agenda-view (&optional key)
   "Run an org-agenda custom command in batch mode.
 KEY defaults to \" \" (the full GTD dashboard).
-Task lines include (file:line) for editor navigation."
+Task lines include (file) for source identification."
   (let ((cmd-key (or key " ")))
     (unless (assoc cmd-key org-agenda-custom-commands)
       (princ (format "Unknown agenda view key: \"%s\"\nAvailable views:\n" cmd-key))
@@ -1815,7 +1774,7 @@ Task lines include (file:line) for editor navigation."
     ;; Build the agenda buffer
     (let ((org-agenda-window-setup 'current-window))
       (org-agenda nil cmd-key))
-    ;; Walk the buffer and print with (file:line) suffixes on task lines
+    ;; Walk the buffer and print with (file) suffixes on task lines
     (with-current-buffer org-agenda-buffer
       (goto-char (point-min))
       (while (not (eobp))
@@ -1825,18 +1784,12 @@ Task lines include (file:line) for editor navigation."
                            (line-beginning-position) (line-end-position))))
           (if marker
               (let* ((src-buf (marker-buffer marker))
-                     (src-file (and src-buf (buffer-file-name src-buf)))
-                     (src-line (and src-buf
-                                    (with-current-buffer src-buf
-                                      (save-excursion
-                                        (goto-char (marker-position marker))
-                                        (line-number-at-pos))))))
-                (princ (format "%s (%s:%d)\n"
+                     (src-file (and src-buf (buffer-file-name src-buf))))
+                (princ (format "%s (%s)\n"
                                line-text
                                (if src-file
                                    (org-gtd-cli/relative-filename src-file)
-                                 "?")
-                               (or src-line 0))))
+                                 "?"))))
             (princ (format "%s\n" line-text))))
         (forward-line 1)))
     (kill-emacs 0)))

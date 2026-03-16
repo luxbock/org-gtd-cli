@@ -227,7 +227,7 @@ echo "test: adds to inbox by default"
 get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/inbox.org" "TODO Test task" "task in inbox"
-assert_output_contains "$LAST_OUTPUT" "Added: Test task -> inbox.org (inbox.org:" "output message with file:line"
+assert_output_contains "$LAST_OUTPUT" "Added: Test task -> inbox.org (inbox.org)" "output message with file ref"
 
 echo "test: with tags"
 get_result 1
@@ -397,8 +397,8 @@ assert_output_contains "$LAST_OUTPUT" "D:<2026-03-15 Sun>" "deadline shown"
 echo "test: priority shown in output"
 assert_output_contains "$LAST_OUTPUT" "[#A]" "priority shown"
 
-echo "test: file:line in output"
-assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "file reference shown"
+echo "test: file ref in output"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org)" "file reference shown"
 
 echo "test: state filter TODO"
 get_result 1
@@ -473,7 +473,7 @@ get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Buy groceries" "finds task in inbox.org"
 assert_output_not_contains "$LAST_OUTPUT" "Buy a formicarium" "excludes tasks.org task"
-assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "correct file reference"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org)" "correct file reference"
 
 echo "test: no matches returns exit 0"
 get_result 3
@@ -522,7 +522,7 @@ echo "test: cross-file match from inbox"
 get_result 11
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "interesting" "finds task with link in heading"
-assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "correct file reference for inbox task"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org)" "correct file reference for inbox task"
 
 echo "test: valid state with no matches"
 get_result 12
@@ -551,7 +551,7 @@ get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Messor Barbarus" "body text shown"
 assert_output_contains "$LAST_OUTPUT" "Research formicarium options" "subtask shown"
-assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "file:line header"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org)" "file ref header"
 
 echo "test: shows LOGBOOK drawers"
 get_result 1
@@ -600,7 +600,7 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points" "DONE child"
 assert_output_contains "$LAST_OUTPUT" "TODO Design CLI tool" "TODO child (subproject)"
 assert_output_contains "$LAST_OUTPUT" "2/4 done" "progress count"
-assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "child has file:line"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org)" "child has file ref"
 
 echo "test: exits 1 if no subtasks"
 get_result 1
@@ -631,12 +631,12 @@ run_batch_file
 echo "test: shows plain headings as full paths (default: tasks.org)"
 get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "Work (tasks.org:" "top-level category path"
-assert_output_contains "$LAST_OUTPUT" "Computers/Agents (tasks.org:" "nested path with slash"
-assert_output_contains "$LAST_OUTPUT" "Family/Pet Ants (tasks.org:" "full path to nested heading"
-assert_output_contains "$LAST_OUTPUT" "Computers/Tools (tasks.org:" "Tools under Computers"
-assert_output_contains "$LAST_OUTPUT" "Research/Tools (tasks.org:" "Tools under Research"
-assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "includes file:line"
+assert_output_contains "$LAST_OUTPUT" "Work (tasks.org)" "top-level category path"
+assert_output_contains "$LAST_OUTPUT" "Computers/Agents (tasks.org)" "nested path with slash"
+assert_output_contains "$LAST_OUTPUT" "Family/Pet Ants (tasks.org)" "full path to nested heading"
+assert_output_contains "$LAST_OUTPUT" "Computers/Tools (tasks.org)" "Tools under Computers"
+assert_output_contains "$LAST_OUTPUT" "Research/Tools (tasks.org)" "Tools under Research"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org)" "includes file ref"
 assert_output_not_contains "$LAST_OUTPUT" "* " "no star prefix in output"
 
 echo "test: does not show TODO headings"
@@ -649,13 +649,13 @@ assert_output_not_contains "$LAST_OUTPUT" "Add more test cases" "no child of TOD
 assert_output_not_contains "$LAST_OUTPUT" "Research formicarium options" "no child of TODO project"
 
 echo "test: does not show headings from other files"
-assert_output_not_contains "$LAST_OUTPUT" "(inbox.org:" "no inbox.org headings"
-assert_output_not_contains "$LAST_OUTPUT" "(calendar.org:" "no calendar.org headings"
+assert_output_not_contains "$LAST_OUTPUT" "(inbox.org)" "no inbox.org headings"
+assert_output_not_contains "$LAST_OUTPUT" "(calendar.org)" "no calendar.org headings"
 
 echo "test: categories --file for a different file"
 get_result 1
 assert_exit 0 "$LAST_RC" "exits 0 for inbox.org"
-assert_output_not_contains "$LAST_OUTPUT" "(tasks.org:" "no tasks.org headings"
+assert_output_not_contains "$LAST_OUTPUT" "(tasks.org)" "no tasks.org headings"
 
 echo "test: categories --file for nonexistent file"
 get_result 2
@@ -715,7 +715,7 @@ run_batch_file
 echo "test: marks single match as DONE"
 get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "Done: Book a rental car (tasks.org:" "done message with file:line"
+assert_output_contains "$LAST_OUTPUT" "Done: Book a rental car (tasks.org)" "done message with file ref"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Book a rental car" "state changed in file"
 
 echo "test: exit 2 on ambiguous"
@@ -779,7 +779,7 @@ run_batch_file
 echo "test: changes state"
 get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
-assert_output_contains "$LAST_OUTPUT" "NEXT -> WAITING (tasks.org:" "state change message with file:line"
+assert_output_contains "$LAST_OUTPUT" "NEXT -> WAITING (tasks.org)" "state change message with file ref"
 assert_file_contains "$TEST_DIR/tasks.org" "WAITING Book a rental car" "state in file"
 
 echo "test: WAITING adds tag"
@@ -844,7 +844,7 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
 assert_file_contains "$TEST_DIR/tasks.org" "Buy groceries" "added to tasks.org"
 assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
-assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "refile shows file:line"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org)" "refile shows file ref"
 
 echo "test: target not found fails"
 get_result 1
@@ -1155,7 +1155,7 @@ echo "test: move up"
 get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Moved:" "move message"
-assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "move shows file:line"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org)" "move shows file ref"
 
 echo "test: move down"
 get_result 1
@@ -1279,10 +1279,10 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "TODO Design CLI tool" "subproject shown as child"
 assert_output_contains "$LAST_OUTPUT" "TODO Implement CLI tool" "sibling shown"
 
-echo "test: process-agent-tasks shows correct direct-child subtask count and file:line"
+echo "test: process-agent-tasks shows correct direct-child subtask count and file ref"
 get_result 2
 assert_output_contains "$LAST_OUTPUT" "2/4 done" "correct subtask count for improved workflow"
-assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points? (tasks.org:" "child has file:line"
+assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points? (tasks.org)" "child has file ref"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Edge case tests: out-of-bounds index
@@ -2042,8 +2042,8 @@ assert_exit 0 $LAST_RC "agenda-view default key"
 assert_output_contains "$LAST_OUTPUT" "Next Tasks" "agenda-view shows Next Tasks section"
 assert_output_contains "$LAST_OUTPUT" "Projects" "agenda-view shows Projects section"
 
-echo "test: agenda-view includes (file:line) on task lines"
-assert_output_contains "$LAST_OUTPUT" "(tasks.org:" "agenda-view task lines have (file:line)"
+echo "test: agenda-view includes (file) on task lines"
+assert_output_contains "$LAST_OUTPUT" "(tasks.org)" "agenda-view task lines have (file)"
 
 echo "test: agenda-view specific key (Next Tasks)"
 get_result 1
