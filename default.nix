@@ -88,6 +88,30 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/agenda $(to_elisp "$STATES") $(to_elisp "$TAG") $(to_elisp "$FROM") $(to_elisp "$TO"))"
         ;;
 
+      search)
+        shift
+        SUBSTRING="" STATES="" TAG="" FILE=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli search SUBSTR [--state S1,S2|all] [--tag TAG] [--file FILE]"; exit 0
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          SUBSTRING="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --state) STATES="$2"; shift 2 ;;
+            --tag)   TAG="$2"; shift 2 ;;
+            --file)  FILE="$2"; shift 2 ;;
+            *)       echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli search SUBSTR [--state S1,S2|all] [--tag TAG] [--file FILE]" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/search $(to_elisp "$SUBSTRING") $(to_elisp "$STATES") $(to_elisp "$TAG") $(to_elisp "$FILE"))"
+        ;;
+
       show)
         shift
         SUBSTRING="''${1:-}"
@@ -618,6 +642,7 @@ writeShellApplication {
       org-timestamp DATE [TIME] [--inactive]
       agenda [--state S1,S2] [--tag TAG] [--from DATE] [--to DATE]
       agenda-view [KEY]
+      search SUBSTR [--state S1,S2|all] [--tag TAG] [--file FILE]
       show SUBSTR [--index N] [--plain]
       subtasks SUBSTR [--index N]
       categories

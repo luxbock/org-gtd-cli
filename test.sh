@@ -338,6 +338,108 @@ assert_output_not_contains "$LAST_OUTPUT" "Write quarterly report" "task with de
 assert_output_not_contains "$LAST_OUTPUT" "Buy groceries" "task without date excluded"
 
 # ══════════════════════════════════════════════════════════════════════════════
+# search (read-only — single reset at section start)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== search ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/search "formicarium" nil nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/search "formicarium" "all" nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/search "buy" nil nil "inbox.org"))
+(org-gtd-test/run 3 '(org-gtd-cli/search "zzzznonexistent" nil nil nil))
+(org-gtd-test/run 4 '(org-gtd-cli/search "" nil nil nil))
+(org-gtd-test/run 5 '(org-gtd-cli/search "backups" nil "@agent" nil))
+(org-gtd-test/run 6 '(org-gtd-cli/search "insurance" "WAITING" nil nil))
+(org-gtd-test/run 7 '(org-gtd-cli/search "dentist" "DONE" nil nil))
+(org-gtd-test/run 8 '(org-gtd-cli/search "quarterly" nil nil nil))
+(org-gtd-test/run 9 '(org-gtd-cli/search "buy" nil nil "nonexistent.org"))
+(org-gtd-test/run 10 '(org-gtd-cli/search "report" nil "work" nil))
+(org-gtd-test/run 11 '(org-gtd-cli/search "interesting" nil nil nil))
+(org-gtd-test/run 12 '(org-gtd-cli/search "formicarium" "CANCELLED" nil nil))
+ELISP
+run_batch_file
+
+echo "test: default state filter (TODO,NEXT)"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "[1]" "indexed output"
+assert_output_contains "$LAST_OUTPUT" "[2]" "second match indexed"
+assert_output_contains "$LAST_OUTPUT" "TODO Buy a formicarium" "finds TODO task"
+assert_output_contains "$LAST_OUTPUT" "NEXT Choose a formicarium" "finds NEXT task"
+assert_output_not_contains "$LAST_OUTPUT" "Research formicarium options" "excludes DONE task"
+
+echo "test: --state all includes DONE"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Research formicarium options" "DONE task included"
+assert_output_contains "$LAST_OUTPUT" "Buy a formicarium" "TODO task still included"
+assert_output_contains "$LAST_OUTPUT" "Choose a formicarium" "NEXT task still included"
+
+echo "test: --file restricts to single file"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Buy groceries" "finds task in inbox.org"
+assert_output_not_contains "$LAST_OUTPUT" "Buy a formicarium" "excludes tasks.org task"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "correct file reference"
+
+echo "test: no matches returns exit 0"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "No matches." "no matches message"
+
+echo "test: empty SUBSTR returns exit 1"
+get_result 4
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "Error" "error message"
+
+echo "test: --tag filter"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Set up automated backups" "finds @agent task matching substr"
+assert_output_not_contains "$LAST_OUTPUT" "Buy a formicarium" "excludes @agent task not matching substr"
+
+echo "test: --state WAITING"
+get_result 6
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Get travel insurance quote" "finds WAITING task"
+
+echo "test: --state DONE finds only done tasks"
+get_result 7
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Research dentists" "finds DONE task"
+assert_output_not_contains "$LAST_OUTPUT" "Reply to dentist" "excludes TODO task"
+
+echo "test: cross-file matches"
+get_result 8
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Pay quarterly taxes" "finds task in tasks.org"
+assert_output_contains "$LAST_OUTPUT" "Write quarterly report" "finds second task"
+
+echo "test: --file with nonexistent file"
+get_result 9
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "file not found" "error message for missing file"
+
+echo "test: --tag with inherited tags"
+get_result 10
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Write quarterly report" "finds task inheriting :work: tag"
+
+echo "test: cross-file match from inbox"
+get_result 11
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "interesting" "finds task with link in heading"
+assert_output_contains "$LAST_OUTPUT" "(inbox.org:" "correct file reference for inbox task"
+
+echo "test: valid state with no matches"
+get_result 12
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "No matches." "no matches for unused state"
+
+# ══════════════════════════════════════════════════════════════════════════════
 # show (read-only — single reset at section start)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -660,6 +762,54 @@ get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would refile" "dry-run message"
 assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "still in inbox"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# refile: self-match filtering
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== refile: self-match filtering ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: self-match skipped, valid target found
+;; "Research new tools" in inbox.org contains "Research"; target "Research"
+;; should skip the source task (scanned first in inbox.org) and find
+;; the * Research category heading in tasks.org.
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-task "Research new tools" nil nil nil nil nil "inbox.org" nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/refile "Research new tools" "Research" nil nil))
+
+;; Test 2: all targets are self-matches (only the source heading matches)
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/add-task "Unique xyzzy heading" nil nil nil nil nil "inbox.org" nil nil))
+(org-gtd-test/run 3 '(org-gtd-cli/refile "Unique xyzzy" "xyzzy" nil nil))
+
+;; Test 4: subtree child is also a self-match
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/add-task "Plan zqxjk celebration" nil nil nil nil nil "inbox.org" nil nil))
+(org-gtd-test/run 5 '(org-gtd-cli/add-subtask "Plan zqxjk" "Zqxjk venue search" nil nil nil nil nil nil nil))
+(org-gtd-test/run 6 '(org-gtd-cli/refile "Plan zqxjk celebration" "zqxjk" nil nil))
+ELISP
+run_batch_file
+
+echo "test: self-match skipped, valid target found"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "Research new tools" "removed from inbox"
+assert_file_contains "$TEST_DIR/tasks.org" "Research new tools" "added to tasks.org under Research"
+
+echo "test: all targets are self-matches"
+get_result 3
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "self-match" "self-match error message"
+assert_file_contains "$TEST_DIR/inbox.org" "Unique xyzzy heading" "inbox unchanged"
+
+echo "test: subtree child also counts as self-match"
+get_result 6
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "skipped 2 self-match" "counts both source and child"
+assert_file_contains "$TEST_DIR/inbox.org" "Plan zqxjk celebration" "inbox unchanged"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # add-event

@@ -306,6 +306,69 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
       (princ (concat line "\n")))
     (kill-emacs 0)))
 
+;; --- search ---
+
+(defun org-gtd-cli/search (substring &optional states-csv tag-filter file-name)
+  "Search for tasks matching SUBSTRING in heading text.
+Unlike `find-task' (which treats multiple matches as an error),
+search intentionally returns all matches with exit code 0.
+STATES-CSV defaults to \"TODO,NEXT\".  \"all\" means no state filter.
+TAG-FILTER limits to tasks with that tag (supports inheritance).
+FILE-NAME restricts search to a single file in org-directory."
+  (when (or (null substring) (string-empty-p substring))
+    (princ "Error: search requires a SUBSTR argument\n")
+    (kill-emacs 1))
+  (let* ((state-filter
+          (cond
+           ((or (null states-csv) (string-empty-p states-csv)
+                (equal states-csv "nil"))
+            '("TODO" "NEXT"))
+           ((equal (downcase states-csv) "all") nil)
+           (t (split-string states-csv ","))))
+         (tag-filter (when (and tag-filter (not (string-empty-p tag-filter))
+                                (not (equal tag-filter "nil")))
+                       tag-filter))
+         (files (if (and file-name (not (string-empty-p file-name))
+                         (not (equal file-name "nil")))
+                    (let ((f (expand-file-name file-name org-directory)))
+                      (unless (file-exists-p f)
+                        (princ (format "Error: file not found: %s\n" file-name))
+                        (kill-emacs 1))
+                      (list f))
+                  (org-agenda-files)))
+         (matches '()))
+    (dolist (file files)
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (goto-char (point-min))
+           (while (re-search-forward org-heading-regexp nil t)
+             (let* ((state (org-get-todo-state))
+                    (heading (org-get-heading t t t t))
+                    (tags (org-get-tags))
+                    (line (line-number-at-pos))
+                    (rel-file (org-gtd-cli/relative-filename file)))
+               (when (and state
+                          (or (null state-filter)
+                              (member state state-filter))
+                          (string-match-p (regexp-quote substring)
+                                          heading)
+                          (or (not tag-filter)
+                              (let ((tag-list (split-string tag-filter "[+]")))
+                                (cl-every (lambda (tag)
+                                            (member tag tags))
+                                          tag-list))))
+                 (push (list state heading rel-file line) matches))))))))
+    (setq matches (nreverse matches))
+    (if (null matches)
+        (princ "No matches.\n")
+      (let ((i 1))
+        (dolist (m matches)
+          (princ (format "[%d] %s %s (%s:%d)\n"
+                         i (nth 0 m) (nth 1 m) (nth 2 m) (nth 3 m)))
+          (cl-incf i)))))
+  (kill-emacs 0))
+
 ;; --- show ---
 
 (defun org-gtd-cli/show (substring &optional index plain)
@@ -969,12 +1032,20 @@ FILE-NAME defaults to \"tasks.org\"."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))
-         (buf-pos (org-gtd-cli/find-task substring idx t)))
+         (buf-pos (org-gtd-cli/find-task substring idx t))
+         (src-buf (car buf-pos))
+         (src-start (cdr buf-pos))
+         (src-end (with-current-buffer src-buf
+                    (org-with-wide-buffer
+                     (goto-char src-start)
+                     (org-end-of-subtree t)
+                     (point)))))
     ;; Find the target heading
     (let ((target-parts (split-string target "/"))
           (target-pos nil)
           (target-buf nil)
-          (target-file nil))
+          (target-file nil)
+          (self-match-count 0))
       (dolist (file (org-agenda-files))
         (when (and (file-exists-p file) (not target-pos))
           (with-current-buffer (find-file-noselect file)
@@ -982,31 +1053,42 @@ FILE-NAME defaults to \"tasks.org\"."
              (goto-char (point-min))
              (while (and (not target-pos)
                          (re-search-forward org-heading-regexp nil t))
-               ;; Match single heading or path
-               (if (= (length target-parts) 1)
-                   (when (string-match-p (regexp-quote (car target-parts))
+               ;; Skip candidates inside the source subtree
+               (let ((in-source (and (eq (current-buffer) src-buf)
+                                     (>= (point) src-start)
+                                     (< (point) src-end))))
+                 ;; Match single heading or path
+                 (if (= (length target-parts) 1)
+                     (when (string-match-p (regexp-quote (car target-parts))
+                                           (org-get-heading t t t t))
+                       (if in-source
+                           (cl-incf self-match-count)
+                         (setq target-pos (point)
+                               target-buf (current-buffer)
+                               target-file file)))
+                   ;; Multi-part path
+                   (when (string-match-p (regexp-quote (car (last target-parts)))
                                          (org-get-heading t t t t))
-                     (setq target-pos (point)
-                           target-buf (current-buffer)
-                           target-file file))
-                 ;; Multi-part path
-                 (when (string-match-p (regexp-quote (car (last target-parts)))
-                                       (org-get-heading t t t t))
-                   ;; Verify parent path
-                   (let ((path-match t)
-                         (parts (butlast target-parts)))
-                     (save-excursion
-                       (dolist (part (reverse parts))
-                         (unless (and (org-up-heading-safe)
-                                      (string-match-p (regexp-quote part)
-                                                      (org-get-heading t t t t)))
-                           (setq path-match nil))))
-                     (when path-match
-                       (setq target-pos (point)
-                             target-buf (current-buffer)
-                             target-file file))))))))))
+                     ;; Verify parent path
+                     (let ((path-match t)
+                           (parts (butlast target-parts)))
+                       (save-excursion
+                         (dolist (part (reverse parts))
+                           (unless (and (org-up-heading-safe)
+                                        (string-match-p (regexp-quote part)
+                                                        (org-get-heading t t t t)))
+                             (setq path-match nil))))
+                       (when path-match
+                         (if in-source
+                             (cl-incf self-match-count)
+                           (setq target-pos (point)
+                                 target-buf (current-buffer)
+                                 target-file file))))))))))))
       (unless target-pos
-        (princ (format "Error: target heading \"%s\" not found\n" target))
+        (if (> self-match-count 0)
+            (princ (format "Error: no valid refile target for \"%s\" (skipped %d self-match%s inside source subtree)\n"
+                           target self-match-count (if (= self-match-count 1) "" "es")))
+          (princ (format "Error: target heading \"%s\" not found\n" target)))
         (kill-emacs 1))
       (with-current-buffer (car buf-pos)
         (org-with-wide-buffer
