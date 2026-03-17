@@ -848,10 +848,14 @@ FILE-NAME defaults to \"tasks.org\"."
                                (not (equal file "nil")))
                           (concat org-directory file)
                         (concat org-directory "calendar.org")))
-         (cal-tag (if (and tag (not (string-empty-p tag))
-                           (not (equal tag "nil")))
-                      tag
-                    "calpersonal"))
+         (cal-tag (cond
+                   ((and tag (not (string-empty-p tag))
+                         (not (equal tag "nil")))
+                    tag)
+                   ((not (and file (not (string-empty-p file))
+                              (not (equal file "nil"))))
+                    "calpersonal")
+                   (t nil)))
          (time-str (when (and time (not (string-empty-p time))
                               (not (equal time "nil")))
                      time))
@@ -868,7 +872,10 @@ FILE-NAME defaults to \"tasks.org\"."
       (org-with-wide-buffer
        (goto-char (point-max))
        (unless (bolp) (insert "\n"))
-       (insert (format "\n* %s :%s:\n%s\n" title cal-tag timestamp)))
+       (insert (format "\n* %s%s\n%s\n"
+                       title
+                       (if cal-tag (format " :%s:" cal-tag) "")
+                       timestamp)))
       (save-buffer))
     (princ (format "Added event: %s -> %s\n"
                    title (org-gtd-cli/relative-filename target-file))))

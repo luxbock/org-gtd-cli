@@ -966,6 +966,32 @@ get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/calendar.org" "<2026-04-01 Wed 09:00>--<2026-04-03 Fri>" "date range with time"
 
+# --- non-default file (no default tag) ---
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(with-temp-file (concat org-gtd-test/test-dir "/family-calendar.org")
+  (insert "#+title: Family Calendar\n"))
+(org-gtd-test/run 0 '(org-gtd-cli/add-event "Family dinner" "2026-03-23" nil nil "family-calendar.org" nil))
+(org-gtd-test/reset)
+(with-temp-file (concat org-gtd-test/test-dir "/family-calendar.org")
+  (insert "#+title: Family Calendar\n"))
+(org-gtd-test/run 1 '(org-gtd-cli/add-event "School play" "2026-03-25" nil "calfamily" "family-calendar.org" nil))
+ELISP
+run_batch_file
+
+echo "test: non-default file omits tag"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/family-calendar.org" "* Family dinner" "event added"
+assert_file_not_contains "$TEST_DIR/family-calendar.org" ":calpersonal:" "no default tag"
+
+echo "test: non-default file with explicit tag"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/family-calendar.org" ":calfamily:" "explicit tag on non-default file"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # add-note
 # ══════════════════════════════════════════════════════════════════════════════
