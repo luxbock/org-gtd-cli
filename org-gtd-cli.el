@@ -864,7 +864,10 @@ FILE-NAME defaults to \"tasks.org\"."
                         (concat (org-gtd-cli/make-timestamp date time-str t)
                                 "--"
                                 (org-gtd-cli/make-timestamp end-date nil t))
-                      (org-gtd-cli/make-timestamp date time-str t))))
+                      (org-gtd-cli/make-timestamp date time-str t)))
+         (use-gcal-drawer (string-suffix-p "family-calendar.org" target-file))
+         (gcal-calendar-id (when use-gcal-drawer
+                             "REDACTED@group.calendar.google.com")))
     (unless (file-exists-p target-file)
       (princ (format "Error: file not found: %s\n" target-file))
       (kill-emacs 1))
@@ -872,10 +875,16 @@ FILE-NAME defaults to \"tasks.org\"."
       (org-with-wide-buffer
        (goto-char (point-max))
        (unless (bolp) (insert "\n"))
-       (insert (format "\n* %s%s\n%s\n"
-                       title
-                       (if cal-tag (format " :%s:" cal-tag) "")
-                       timestamp)))
+       (if use-gcal-drawer
+           (insert (format "\n* %s%s\n:PROPERTIES:\n:calendar-id: %s\n:END:\n:org-gcal:\n%s\n:END:\n"
+                           title
+                           (if cal-tag (format " :%s:" cal-tag) "")
+                           gcal-calendar-id
+                           timestamp))
+         (insert (format "\n* %s%s\n%s\n"
+                         title
+                         (if cal-tag (format " :%s:" cal-tag) "")
+                         timestamp))))
       (save-buffer))
     (princ (format "Added event: %s -> %s\n"
                    title (org-gtd-cli/relative-filename target-file))))

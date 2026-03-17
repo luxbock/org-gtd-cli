@@ -978,6 +978,10 @@ cat > "$BATCH_FILE" << 'ELISP'
 (with-temp-file (concat org-gtd-test/test-dir "/family-calendar.org")
   (insert "#+title: Family Calendar\n"))
 (org-gtd-test/run 1 '(org-gtd-cli/add-event "School play" "2026-03-25" nil "calfamily" "family-calendar.org" nil))
+(org-gtd-test/reset)
+(with-temp-file (concat org-gtd-test/test-dir "/family-calendar.org")
+  (insert "#+title: Family Calendar\n"))
+(org-gtd-test/run 2 '(org-gtd-cli/add-event "Spring break" "2026-04-06" nil nil "family-calendar.org" "2026-04-17"))
 ELISP
 run_batch_file
 
@@ -986,11 +990,21 @@ get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/family-calendar.org" "* Family dinner" "event added"
 assert_file_not_contains "$TEST_DIR/family-calendar.org" ":calpersonal:" "no default tag"
+assert_file_contains "$TEST_DIR/family-calendar.org" ":org-gcal:" "gcal drawer present"
+assert_file_contains "$TEST_DIR/family-calendar.org" ":END:" "gcal drawer closed"
+assert_file_contains "$TEST_DIR/family-calendar.org" ":calendar-id:" "calendar-id property present"
 
 echo "test: non-default file with explicit tag"
 get_result 1
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/family-calendar.org" ":calfamily:" "explicit tag on non-default file"
+assert_file_contains "$TEST_DIR/family-calendar.org" ":org-gcal:" "gcal drawer with explicit tag"
+
+echo "test: date range in gcal drawer"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/family-calendar.org" ":org-gcal:" "gcal drawer present"
+assert_file_contains "$TEST_DIR/family-calendar.org" "<2026-04-06 Mon>--<2026-04-17 Fri>" "date range in drawer"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # add-note
