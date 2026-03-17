@@ -39,6 +39,22 @@
         (sequence "WAITING(w/!)" "DEFER(f/!)" "|" "CANCELLED(c/!)")))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
+;; Body text validation
+;; ══════════════════════════════════════════════════════════════════════════════
+
+(defun org-gtd-cli/validate-body-text (text)
+  "Error and exit if TEXT contains org headings that would corrupt the file."
+  (when (and text (not (string-empty-p text))
+             (or (string-match-p "\\`\\*+ " text)
+                 (string-match-p "\n\\*+ " text)))
+    (princ (concat
+            "Error: body text contains org headings (\"* \" at start of line), "
+            "which would corrupt\nthe file structure. Use \"- list items\" instead "
+            "of headings. For structured content\nwith sections, use: "
+            "org-gtd-cli add-note --link-task \"task heading\" --title \"...\"\n"))
+    (kill-emacs 1)))
+
+;; ══════════════════════════════════════════════════════════════════════════════
 ;; Sibling reordering by state
 ;; ══════════════════════════════════════════════════════════════════════════════
 
@@ -694,6 +710,7 @@ FILE-NAME defaults to \"tasks.org\"."
                               (not (equal priority "nil")))
                      priority)))
     (when body (setq body (org-gtd-cli/fill-text body)))
+    (org-gtd-cli/validate-body-text body)
     (unless (file-exists-p target-file)
       (princ (format "Error: file not found: %s\n" target-file))
       (kill-emacs 1))
@@ -800,6 +817,7 @@ FILE-NAME defaults to \"tasks.org\"."
                      priority))
          (buf-pos (org-gtd-cli/find-task parent-substring idx t)))
     (when body (setq body (org-gtd-cli/fill-text body)))
+    (org-gtd-cli/validate-body-text body)
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
@@ -824,8 +842,8 @@ FILE-NAME defaults to \"tasks.org\"."
 
 ;; --- add-event ---
 
-(defun org-gtd-cli/add-event (title date &optional time tag file)
-  "Add a calendar event."
+(defun org-gtd-cli/add-event (title date &optional time tag file end-date)
+  "Add a calendar event.  When END-DATE is given, create a date range."
   (let* ((target-file (if (and file (not (string-empty-p file))
                                (not (equal file "nil")))
                           (concat org-directory file)
@@ -837,7 +855,12 @@ FILE-NAME defaults to \"tasks.org\"."
          (time-str (when (and time (not (string-empty-p time))
                               (not (equal time "nil")))
                      time))
-         (timestamp (org-gtd-cli/make-timestamp date time-str t)))
+         (timestamp (if (and end-date (not (string-empty-p end-date))
+                              (not (equal end-date "nil")))
+                        (concat (org-gtd-cli/make-timestamp date time-str t)
+                                "--"
+                                (org-gtd-cli/make-timestamp end-date nil t))
+                      (org-gtd-cli/make-timestamp date time-str t))))
     (unless (file-exists-p target-file)
       (princ (format "Error: file not found: %s\n" target-file))
       (kill-emacs 1))
@@ -888,6 +911,10 @@ FILE-NAME defaults to \"tasks.org\"."
                  (subtree-end (save-excursion (org-end-of-subtree t) (point))))
              ;; Find insertion point: after heading/planning/body, before children
              (org-end-of-meta-data t)
+             ;; Clamp: org-end-of-meta-data can overshoot past subtree-end
+             ;; for deeply nested leaf headings (level 6+)
+             (when (> (point) subtree-end)
+               (goto-char subtree-end))
              (let ((insert-point (point)))
                ;; Check if there are child headings
                (when (re-search-forward
@@ -904,11 +931,7 @@ FILE-NAME defaults to \"tasks.org\"."
 
 (defun org-gtd-cli/append-body (substring text &optional index)
   "Append text to an existing task's body."
-  ;; Reject text that starts with an org heading — it would corrupt the tree
-  (when (string-match-p "\\`\\*+ " text)
-    (princ (format "Error: body text starts with an org heading: %s\n"
-                   (car (split-string text "\n"))))
-    (kill-emacs 1))
+  (org-gtd-cli/validate-body-text text)
   (let* ((idx (org-gtd-cli/parse-index index))
          (buf-pos (org-gtd-cli/find-task substring idx t)))
     (with-current-buffer (car buf-pos)
@@ -957,12 +980,7 @@ FILE-NAME defaults to \"tasks.org\"."
 
 (defun org-gtd-cli/set-body (substring text &optional index)
   "Replace the body of an existing task, or remove it if TEXT is empty."
-  ;; Reject text that starts with an org heading — it would corrupt the tree
-  (when (and (not (string-empty-p text))
-             (string-match-p "\\`\\*+ " text))
-    (princ (format "Error: body text starts with an org heading: %s\n"
-                   (car (split-string text "\n"))))
-    (kill-emacs 1))
+  (org-gtd-cli/validate-body-text text)
   (let* ((idx (org-gtd-cli/parse-index index))
          (buf-pos (org-gtd-cli/find-task substring idx t)))
     (with-current-buffer (car buf-pos)

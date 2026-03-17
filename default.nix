@@ -240,9 +240,9 @@ writeShellApplication {
 
       add-event)
         shift
-        TITLE="" DATE="" TIME="" TAG="" FILE=""
+        TITLE="" DATE="" TIME="" TAG="" FILE="" END_DATE=""
         if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
-          echo "Usage: org-gtd-cli add-event TITLE --date DATE [--time TIME] [--tag TAG] [--file FILE]"; exit 0
+          echo "Usage: org-gtd-cli add-event TITLE --date DATE [--end-date DATE] [--time TIME] [--tag TAG] [--file FILE]"; exit 0
         fi
         # First positional arg is title
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
@@ -250,10 +250,11 @@ writeShellApplication {
         fi
         while [[ $# -gt 0 ]]; do
           case "$1" in
-            --date) DATE="$2"; shift 2 ;;
-            --time) TIME="$2"; shift 2 ;;
-            --tag)  TAG="$2"; shift 2 ;;
-            --file) FILE="$2"; shift 2 ;;
+            --date)     DATE="$2"; shift 2 ;;
+            --end-date) END_DATE="$2"; shift 2 ;;
+            --time)     TIME="$2"; shift 2 ;;
+            --tag)      TAG="$2"; shift 2 ;;
+            --file)     FILE="$2"; shift 2 ;;
             *)      echo "Unknown option: $1" >&2; exit 1 ;;
           esac
         done
@@ -261,7 +262,7 @@ writeShellApplication {
           echo "Usage: org-gtd-cli add-event TITLE --date DATE [OPTIONS]" >&2
           exit 1
         fi
-        run_elisp "(org-gtd-cli/add-event $(to_elisp "$TITLE") $(to_elisp "$DATE") $(to_elisp "$TIME") $(to_elisp "$TAG") $(to_elisp "$FILE"))"
+        run_elisp "(org-gtd-cli/add-event $(to_elisp "$TITLE") $(to_elisp "$DATE") $(to_elisp "$TIME") $(to_elisp "$TAG") $(to_elisp "$FILE") $(to_elisp "$END_DATE"))"
         ;;
 
       add-note)
@@ -653,7 +654,7 @@ writeShellApplication {
       add-subtask SUBSTR TITLE [--body TEXT] [--tags T1,T2]
         [--schedule DATE] [--deadline DATE] [--priority A|B|C]
         [--state STATE] [--index N]
-      add-event TITLE --date DATE [--time TIME] [--tag TAG] [--file FILE]
+      add-event TITLE --date DATE [--end-date DATE] [--time TIME] [--tag TAG] [--file FILE]
       add-note --title TITLE [--link-task SUBSTR] [--tags T1,T2]
         [--sections S1,S2]
       append-body SUBSTR TEXT [--index N]

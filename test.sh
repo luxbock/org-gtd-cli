@@ -220,6 +220,8 @@ cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/run 7 '(org-gtd-cli/add-task "Category task" nil nil nil nil nil nil "Finance" nil))
 (org-gtd-test/reset)
 (org-gtd-test/run 8 '(org-gtd-cli/add-task "Missing cat" nil nil nil nil nil nil "Nonexistent" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 9 '(org-gtd-cli/add-task "Heading body task" "Some text\n* Sneaky heading" nil nil nil nil nil nil nil))
 ELISP
 run_batch_file
 
@@ -268,6 +270,11 @@ assert_output_contains "$LAST_OUTPUT" "tasks.org/Finance" "output shows full pat
 echo "test: category not found fails"
 get_result 8
 assert_exit 1 "$LAST_RC" "exits 1 for missing category"
+
+echo "test: rejects --body containing org heading"
+get_result 9
+assert_exit 1 "$LAST_RC" "exits 1 for heading in body"
+assert_output_contains "$LAST_OUTPUT" "Error" "error message"
 
 # --- add-task --category path + ambiguity tests ---
 
@@ -938,6 +945,27 @@ get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/calendar.org" ":calfamily:" "custom tag"
 
+# --- date ranges ---
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-event "School holiday" "2026-03-16" nil nil nil "2026-03-27"))
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-event "Conference" "2026-04-01" "09:00" nil nil "2026-04-03"))
+ELISP
+run_batch_file
+
+echo "test: date range event"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/calendar.org" "<2026-03-16 Mon>--<2026-03-27 Fri>" "date range"
+
+echo "test: date range with start time"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/calendar.org" "<2026-04-01 Wed 09:00>--<2026-04-03 Fri>" "date range with time"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # add-note
 # ══════════════════════════════════════════════════════════════════════════════
@@ -952,6 +980,8 @@ cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/run 1 '(org-gtd-cli/add-note "Custom note" nil nil "Background,Analysis,Recommendations"))
 (org-gtd-test/reset)
 (org-gtd-test/run 2 '(org-gtd-cli/add-note "Formicarium research" "Buy a formicarium" nil nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/add-note "Deep nested note" "Deeply nested leaf task" nil nil))
 ELISP
 run_batch_file
 
@@ -986,6 +1016,12 @@ get_result 2
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/formicarium-research.org]]" "link added to task"
 
+echo "test: link-task works on deeply nested heading (level 6+)"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Created:" "creation message"
+assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/deep-nested-note.org]]" "link added to deeply nested task"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # append-body
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1004,6 +1040,8 @@ cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/run 3 '(org-gtd-cli/append-body "Bare heading no body" "Appended to bare heading"))
 (org-gtd-test/reset)
 (org-gtd-test/run 4 '(org-gtd-cli/append-body "Buy a small UPS" "** Test heading" nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/append-body "Buy a small UPS" "Some text\n* Mid-text heading" nil))
 ELISP
 run_batch_file
 
@@ -1053,6 +1091,11 @@ get_result 4
 assert_exit 1 "$LAST_RC" "exits 1 for heading body"
 assert_output_contains "$LAST_OUTPUT" "Error" "error message"
 
+echo "test: rejects body with org heading on subsequent line"
+get_result 5
+assert_exit 1 "$LAST_RC" "exits 1 for mid-text heading"
+assert_output_contains "$LAST_OUTPUT" "Error" "error message"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # set-body
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1072,9 +1115,11 @@ cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/reset)
 (org-gtd-test/run 4 '(org-gtd-cli/set-body "Buy a small UPS" "** Sneaky heading" nil))
 (org-gtd-test/reset)
-(org-gtd-test/run 5 '(org-gtd-cli/set-body "Fix org-capture" "Replaced body." nil))
+(org-gtd-test/run 5 '(org-gtd-cli/set-body "Buy a small UPS" "Some text\n* Mid-text heading" nil))
 (org-gtd-test/reset)
-(org-gtd-test/run 6 '(org-gtd-cli/set-body "Buy a" "Index test body." "2"))
+(org-gtd-test/run 6 '(org-gtd-cli/set-body "Fix org-capture" "Replaced body." nil))
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/set-body "Buy a" "Index test body." "2"))
 ELISP
 run_batch_file
 
@@ -1120,8 +1165,13 @@ get_result 4
 assert_exit 1 "$LAST_RC" "exits 1 for heading body"
 assert_output_contains "$LAST_OUTPUT" "Error" "error message"
 
-echo "test: preserves metadata (PROPERTIES, LOGBOOK, SCHEDULED/DEADLINE)"
+echo "test: rejects body with org heading on subsequent line"
 get_result 5
+assert_exit 1 "$LAST_RC" "exits 1 for mid-text heading"
+assert_output_contains "$LAST_OUTPUT" "Error" "error message"
+
+echo "test: preserves metadata (PROPERTIES, LOGBOOK, SCHEDULED/DEADLINE)"
+get_result 6
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Replaced body." "new body present"
 assert_file_not_contains "$TEST_DIR/tasks.org" "It appears in the existing Emacs instance" "old body removed"
@@ -1130,7 +1180,7 @@ assert_file_contains "$TEST_DIR/tasks.org" "State \"DONE\"       from \"TODO\"" 
 assert_file_contains "$TEST_DIR/tasks.org" "[2026-03-06 Fri 14:33]" "timestamp preserved"
 
 echo "test: index disambiguation"
-get_result 6
+get_result 7
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "Index test body." "body set with index"
 
