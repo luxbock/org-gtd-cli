@@ -1,3 +1,4 @@
+# Reference: notes/reference/org-gtd-cli.md
 { writeShellApplication
 , lib
 , coreutils
@@ -637,6 +638,33 @@ writeShellApplication {
         fi
         ;;
 
+      delete)
+        shift
+        HEADING="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli delete HEADING [--index N] [--dry-run]"
+          echo ""
+          echo "  HEADING must match the full task heading exactly (case-insensitive)."
+          echo "  Cannot delete projects (tasks with subtasks)."
+          exit 0
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          HEADING="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --index)   INDEX="$2"; shift 2 ;;
+            --dry-run) DRY_RUN="t"; shift ;;
+            *)         echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$HEADING" ]]; then
+          echo "Usage: org-gtd-cli delete HEADING [--index N] [--dry-run]" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/delete $(to_elisp "$HEADING") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        ;;
+
       fix-timestamps)
         shift || true
         DRY_RUN=""
@@ -685,10 +713,13 @@ writeShellApplication {
       set-tags SUBSTR --add T1,T2 --remove T3 [--index N] [--dry-run]
       archive SUBSTR [--index N] [--dry-run]
       archive --all [--dry-run]
+      delete HEADING [--index N] [--dry-run]
       fix-timestamps [--dry-run]
 
     SUBSTR matches task headings case-insensitively. --index N (1-based)
     disambiguates when multiple tasks match.
+
+    delete uses exact heading match (not substring). Cannot delete projects.
 
     Environment:
       ORG_DIRECTORY    Path to org files (default: ~/Nextcloud/org/)

@@ -112,11 +112,12 @@ Walks up the org tree to build a path like \"Computers/NixOS/epiphyte\"."
         (push (org-get-heading t t t t) path)))
     (mapconcat #'identity path "/")))
 
-(defun org-gtd-cli/find-task (substring &optional index include-done)
+(defun org-gtd-cli/find-task (substring &optional index include-done exact)
   "Find a task by SUBSTRING match across all agenda files.
 Returns a cons (buffer . position) or exits with appropriate code.
 If INDEX is non-nil, select the Nth match (1-based).
-If INCLUDE-DONE is non-nil, also match done tasks."
+If INCLUDE-DONE is non-nil, also match done tasks.
+If EXACT is non-nil, require full heading match instead of substring."
   (let ((matches '()))
     (dolist (file (org-agenda-files))
       (when (file-exists-p file)
@@ -130,8 +131,10 @@ If INCLUDE-DONE is non-nil, also match done tasks."
                (when (and state
                           (or include-done
                               (not (member state org-done-keywords)))
-                          (string-match-p (regexp-quote substring)
-                                          (downcase heading)))
+                          (if exact
+                              (string= (downcase substring) (downcase heading))
+                            (string-match-p (regexp-quote substring)
+                                            (downcase heading))))
                  (push (list (current-buffer) pos
                              state heading
                              (org-gtd-cli/relative-filename file))
@@ -1752,6 +1755,45 @@ a TODO keyword that is NOT in `org-done-keywords'."
                        (if is-dry-run "Would archive" "Archived")
                        archived skipped)))))
   (kill-emacs 0))
+
+;; --- delete ---
+
+(defun org-gtd-cli/delete (heading &optional index dry-run)
+  "Delete a task by exact heading match.
+HEADING must match the full heading text (case-insensitive).
+Refuses to delete projects (tasks with subtasks)."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (buf-pos (org-gtd-cli/find-task heading idx t t)))  ;; include-done=t, exact=t
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((task-heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (level (org-current-level))
+              (child-level (1+ level))
+              (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+              (has-children nil))
+         ;; Check for child headings (project detection)
+         (save-excursion
+           (forward-line 1)
+           (while (and (not has-children) (< (point) subtree-end)
+                       (re-search-forward org-heading-regexp subtree-end t))
+             (when (= (org-current-level) child-level)
+               (setq has-children t))))
+         (when has-children
+           (princ (format "Cannot delete: \"%s\" is a project with subtasks (%s)\n"
+                          task-heading rel-file))
+           (kill-emacs 1))
+         (if is-dry-run
+             (progn
+               (princ (format "Would delete: \"%s\" (%s)\n" task-heading rel-file))
+               (kill-emacs 0))
+           (org-cut-subtree)
+           (save-buffer)
+           (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file))))))
+    (kill-emacs 0)))
 
 ;; --- fix-timestamps (batch) ---
 

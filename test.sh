@@ -2529,5 +2529,89 @@ assert_no_long_lines "$TEST_DIR/tasks.org" "Bare heading" "[[file:" 80 "text par
 # Link must be intact
 assert_file_contains "$TEST_DIR/tasks.org" "[[file:agent-notes/service-phone-number-requirements-for-agent-accounts.org][Service Phone Number Requirements]]" "org link preserved intact"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# delete
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== delete ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; 0: delete a simple leaf task (happy path)
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/delete "Buy a small UPS for the server" nil nil))
+
+;; 1: dry-run doesn't modify
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/delete "Buy a small UPS for the server" nil "t"))
+
+;; 2: refuse to delete a project (task with subtasks)
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/delete "Buy a formicarium" nil nil))
+
+;; 3: no match (nonexistent heading)
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/delete "xyznonexistent" nil nil))
+
+;; 4: substring doesn't match (only exact does) — "Buy" matches nothing exactly
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/delete "Buy" nil nil))
+
+;; 5: delete a DONE task (include-done works)
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/delete "Mystery task" nil nil))
+
+;; 6: --index selects among same-name matches
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/delete "Buy a small UPS for the server" "1" nil))
+
+;; 7: --index out of range
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/delete "Buy a small UPS for the server" "5" nil))
+ELISP
+run_batch_file
+
+echo "test: delete happy path"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" 'Deleted: "Buy a small UPS for the server"' "output confirms deletion"
+assert_file_not_contains "$TEST_DIR/tasks.org" "Buy a small UPS for the server" "removed from tasks.org"
+assert_file_contains "$TEST_DIR/tasks.org" "Write quarterly report" "other tasks preserved"
+
+echo "test: delete dry-run"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" 'Would delete:' "output says would delete"
+assert_file_contains "$TEST_DIR/tasks.org" "Buy a small UPS for the server" "still in tasks.org"
+
+echo "test: delete refuses project"
+get_result 2
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "is a project with subtasks" "error mentions subtasks"
+assert_file_contains "$TEST_DIR/tasks.org" "Buy a formicarium" "project still in tasks.org"
+
+echo "test: delete no match"
+get_result 3
+assert_exit 1 "$LAST_RC" "exits 1"
+
+echo "test: delete rejects substring match"
+get_result 4
+assert_exit 1 "$LAST_RC" "exits 1 for substring-only match"
+
+echo "test: delete DONE task"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" 'Deleted: "Mystery task"' "output confirms deletion"
+assert_file_not_contains "$TEST_DIR/tasks.org" "Mystery task" "removed from tasks.org"
+
+echo "test: delete with --index"
+get_result 6
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_not_contains "$TEST_DIR/tasks.org" "Buy a small UPS for the server" "removed from tasks.org"
+
+echo "test: delete --index out of range"
+get_result 7
+assert_exit 1 "$LAST_RC" "exits 1"
+
 echo ""
 echo "All tests completed."
