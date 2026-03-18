@@ -837,11 +837,11 @@ echo "=== refile ==="
 BATCH_FILE=$(mktemp --suffix=.el)
 cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/reset)
-(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Shopping" nil nil))
+(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Shopping" nil nil nil))
 (org-gtd-test/reset)
-(org-gtd-test/run 1 '(org-gtd-cli/refile "Buy groceries" "Nonexistent" nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/refile "Buy groceries" "Nonexistent" nil nil nil))
 (org-gtd-test/reset)
-(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy groceries" "Shopping" nil "t"))
+(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy groceries" "Shopping" nil nil "t"))
 ELISP
 run_batch_file
 
@@ -877,18 +877,18 @@ cat > "$BATCH_FILE" << 'ELISP'
 ;; the * Research category heading in tasks.org.
 (org-gtd-test/reset)
 (org-gtd-test/run 0 '(org-gtd-cli/add-task "Research new tools" nil nil nil nil nil "inbox.org" nil nil))
-(org-gtd-test/run 1 '(org-gtd-cli/refile "Research new tools" "Research" nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/refile "Research new tools" "Research" nil nil nil))
 
 ;; Test 2: all targets are self-matches (only the source heading matches)
 (org-gtd-test/reset)
-(org-gtd-test/run 2 '(org-gtd-cli/add-task "Unique xyzzy heading" nil nil nil nil nil "inbox.org" nil nil))
-(org-gtd-test/run 3 '(org-gtd-cli/refile "Unique xyzzy" "xyzzy" nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/add-task "xyzzy" nil nil nil nil nil "inbox.org" nil nil))
+(org-gtd-test/run 3 '(org-gtd-cli/refile "xyzzy" "xyzzy" nil nil nil))
 
 ;; Test 4: subtree child is also a self-match
 (org-gtd-test/reset)
-(org-gtd-test/run 4 '(org-gtd-cli/add-task "Plan zqxjk celebration" nil nil nil nil nil "inbox.org" nil nil))
-(org-gtd-test/run 5 '(org-gtd-cli/add-subtask "Plan zqxjk" "Zqxjk venue search" nil nil nil nil nil nil nil))
-(org-gtd-test/run 6 '(org-gtd-cli/refile "Plan zqxjk celebration" "zqxjk" nil nil))
+(org-gtd-test/run 4 '(org-gtd-cli/add-task "zqxjk" nil nil nil nil nil "inbox.org" nil nil))
+(org-gtd-test/run 5 '(org-gtd-cli/add-subtask "zqxjk" "zqxjk" nil nil nil nil nil nil nil))
+(org-gtd-test/run 6 '(org-gtd-cli/refile "zqxjk" "zqxjk" nil "1" nil))
 ELISP
 run_batch_file
 
@@ -903,13 +903,156 @@ echo "test: all targets are self-matches"
 get_result 3
 assert_exit 1 "$LAST_RC" "exits 1"
 assert_output_contains "$LAST_OUTPUT" "self-match" "self-match error message"
-assert_file_contains "$TEST_DIR/inbox.org" "Unique xyzzy heading" "inbox unchanged"
+assert_file_contains "$TEST_DIR/inbox.org" "xyzzy" "inbox unchanged"
 
 echo "test: subtree child also counts as self-match"
 get_result 6
 assert_exit 1 "$LAST_RC" "exits 1"
 assert_output_contains "$LAST_OUTPUT" "skipped 2 self-match" "counts both source and child"
-assert_file_contains "$TEST_DIR/inbox.org" "Plan zqxjk celebration" "inbox unchanged"
+assert_file_contains "$TEST_DIR/inbox.org" "zqxjk" "inbox unchanged"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# refile: --to exact match
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== refile: --to exact match ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: exact match finds first match (Computers/Tools before Research/Tools)
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Tools" nil nil nil))
+
+;; Test 1: partial match fails (no heading called exactly "Tool")
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/refile "Buy groceries" "Tool" nil nil nil))
+
+;; Test 2: path disambiguates (Research/Tools, not Computers/Tools)
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy groceries" "Research/Tools" nil nil nil))
+
+;; Test 3: --to can target a TODO heading
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/refile "Buy groceries" "Write quarterly report" nil nil nil))
+
+;; Test 4: case-insensitive
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/refile "Buy groceries" "tools" nil nil nil))
+
+;; Test 5: dry-run
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/refile "Buy groceries" "Shopping" nil nil "t"))
+
+;; Test 6: intermediate path typo fails
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/refile "Buy groceries" "Computer/Tools" nil nil nil))
+ELISP
+run_batch_file
+
+echo "test: --to exact match finds first match"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+
+echo "test: --to partial match fails"
+get_result 1
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "not found" "not found message"
+
+echo "test: --to path disambiguates"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+assert_output_contains "$LAST_OUTPUT" "Research" "refiled under Research"
+
+echo "test: --to targets TODO heading"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+
+echo "test: --to case-insensitive"
+get_result 4
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+
+echo "test: --to dry-run"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would refile" "dry-run message"
+assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "still in inbox"
+
+echo "test: --to intermediate path typo fails"
+get_result 6
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "not found" "not found message"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# refile: --category
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== refile: --category ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: substring matches "Shopping"
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" nil "Shop" nil nil))
+
+;; Test 1: skips TODO "Holiday pre-trip tasks", finds "Holiday Trip"
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/refile "Buy groceries" nil "Holiday" nil nil))
+
+;; Test 2: ambiguous (Computers/Tools + Research/Tools)
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy groceries" nil "Tools" nil nil))
+
+;; Test 3: path disambiguates
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/refile "Buy groceries" nil "Research/Tools" nil nil))
+
+;; Test 4: only TODO matches -> not found (no category heading called "Design")
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/refile "Buy groceries" nil "Design" nil nil))
+
+;; Test 5: dry-run
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/refile "Buy groceries" nil "Research/Tools" nil "t"))
+ELISP
+run_batch_file
+
+echo "test: --category substring matches"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+
+echo "test: --category skips TODO headings"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
+
+echo "test: --category ambiguous match"
+get_result 2
+assert_exit 2 "$LAST_RC" "exits 2"
+assert_output_contains "$LAST_OUTPUT" "Multiple category matches" "ambiguity message"
+
+echo "test: --category path disambiguates"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+
+echo "test: --category only TODO matches"
+get_result 4
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "not found" "not found message"
+
+echo "test: --category dry-run"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would refile" "dry-run message"
+assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "still in inbox"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # add-event
@@ -1402,7 +1545,7 @@ cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/reset)
 (org-gtd-test/run 1 '(org-gtd-cli/set-state "Buy" "NEXT" "999" nil))
 (org-gtd-test/reset)
-(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy" "Shopping" "999" nil))
+(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy" "Shopping" nil "999" nil))
 (org-gtd-test/reset)
 (org-gtd-test/run 3 '(org-gtd-cli/append-body "Buy" "text" "999"))
 (org-gtd-test/reset)
@@ -1453,7 +1596,7 @@ cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/reset)
 (org-gtd-test/run 0 '(org-gtd-cli/set-done "xyznonexistent" nil nil))
 (org-gtd-test/run 1 '(org-gtd-cli/set-state "xyznonexistent" "NEXT" nil nil))
-(org-gtd-test/run 2 '(org-gtd-cli/refile "xyznonexistent" "Shopping" nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/refile "xyznonexistent" "Shopping" nil nil nil))
 (org-gtd-test/run 3 '(org-gtd-cli/append-body "xyznonexistent" "text" nil))
 (org-gtd-test/run 4 '(org-gtd-cli/move "xyznonexistent" "up" nil nil))
 ELISP
@@ -1492,7 +1635,7 @@ BEFORE_INBOX=$(md5sum "$TEST_DIR/inbox.org" | cut -d' ' -f1)
 BATCH_FILE=$(mktemp --suffix=.el)
 cat > "$BATCH_FILE" << 'ELISP'
 (org-gtd-test/reset)
-(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Nonexistent Heading" nil nil))
+(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Nonexistent Heading" nil nil nil))
 ELISP
 run_batch_file
 

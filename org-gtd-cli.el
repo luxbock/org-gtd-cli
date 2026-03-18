@@ -1146,8 +1146,10 @@ FILE-NAME defaults to \"tasks.org\"."
 
 ;; --- refile ---
 
-(defun org-gtd-cli/refile (substring target &optional index dry-run)
-  "Move a task to a different heading."
+(defun org-gtd-cli/refile (substring target category &optional index dry-run)
+  "Move a task to a different heading.
+TARGET (--to) uses exact match on any heading across all agenda files.
+CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))
@@ -1158,57 +1160,112 @@ FILE-NAME defaults to \"tasks.org\"."
                     (org-with-wide-buffer
                      (goto-char src-start)
                      (org-end-of-subtree t)
-                     (point)))))
+                     (point))))
+         (use-exact (and target (not (equal target "nil")) (not (string-empty-p target))))
+         (target-name (if use-exact target category)))
     ;; Find the target heading
-    (let ((target-parts (split-string target "/"))
-          (target-pos nil)
+    (let ((target-pos nil)
           (target-buf nil)
-          (target-file nil)
-          (self-match-count 0))
-      (dolist (file (org-agenda-files))
-        (when (and (file-exists-p file) (not target-pos))
-          (with-current-buffer (find-file-noselect file)
-            (org-with-wide-buffer
-             (goto-char (point-min))
-             (while (and (not target-pos)
-                         (re-search-forward org-heading-regexp nil t))
-               ;; Skip candidates inside the source subtree
-               (let ((in-source (and (eq (current-buffer) src-buf)
-                                     (>= (point) src-start)
-                                     (< (point) src-end))))
-                 ;; Match single heading or path
-                 (if (= (length target-parts) 1)
-                     (when (string-match-p (regexp-quote (car target-parts))
-                                           (org-get-heading t t t t))
-                       (if in-source
-                           (cl-incf self-match-count)
-                         (setq target-pos (point)
-                               target-buf (current-buffer)
-                               target-file file)))
-                   ;; Multi-part path
-                   (when (string-match-p (regexp-quote (car (last target-parts)))
-                                         (org-get-heading t t t t))
-                     ;; Verify parent path
-                     (let ((path-match t)
-                           (parts (butlast target-parts)))
-                       (save-excursion
-                         (dolist (part (reverse parts))
-                           (unless (and (org-up-heading-safe)
-                                        (string-match-p (regexp-quote part)
-                                                        (org-get-heading t t t t)))
-                             (setq path-match nil))))
-                       (when path-match
-                         (if in-source
-                             (cl-incf self-match-count)
-                           (setq target-pos (point)
-                                 target-buf (current-buffer)
-                                 target-file file))))))))))))
-      (unless target-pos
-        (if (> self-match-count 0)
-            (princ (format "Error: no valid refile target for \"%s\" (skipped %d self-match%s inside source subtree)\n"
-                           target self-match-count (if (= self-match-count 1) "" "es")))
-          (princ (format "Error: target heading \"%s\" not found\n" target)))
-        (kill-emacs 1))
+          (target-file nil))
+      (if use-exact
+          ;; --to: exact match on heading text (case-insensitive), any heading type
+          (let ((target-parts (split-string target "/" t))
+                (self-match-count 0))
+            (dolist (file (org-agenda-files))
+              (when (and (file-exists-p file) (not target-pos))
+                (with-current-buffer (find-file-noselect file)
+                  (org-with-wide-buffer
+                   (goto-char (point-min))
+                   (while (and (not target-pos)
+                               (re-search-forward org-heading-regexp nil t))
+                     (let ((in-source (and (eq (current-buffer) src-buf)
+                                           (>= (point) src-start)
+                                           (< (point) src-end)))
+                           (heading (org-get-heading t t t t)))
+                       (if (= (length target-parts) 1)
+                           ;; Single segment: exact case-insensitive
+                           (when (string= (downcase (car target-parts))
+                                          (downcase heading))
+                             (if in-source
+                                 (cl-incf self-match-count)
+                               (setq target-pos (point)
+                                     target-buf (current-buffer)
+                                     target-file file)))
+                         ;; Multi-segment: exact match on last, exact on each ancestor
+                         (when (string= (downcase (car (last target-parts)))
+                                        (downcase heading))
+                           (let ((path-match t)
+                                 (parts (butlast target-parts)))
+                             (save-excursion
+                               (dolist (part (reverse parts))
+                                 (unless (and (org-up-heading-safe)
+                                              (string= (downcase part)
+                                                       (downcase (org-get-heading t t t t))))
+                                   (setq path-match nil))))
+                             (when path-match
+                               (if in-source
+                                   (cl-incf self-match-count)
+                                 (setq target-pos (point)
+                                       target-buf (current-buffer)
+                                       target-file file))))))))))))
+            ;; Error handling for --to
+            (unless target-pos
+              (if (> self-match-count 0)
+                  (princ (format "Error: no valid refile target for \"%s\" (skipped %d self-match%s inside source subtree)\n"
+                                 target self-match-count (if (= self-match-count 1) "" "es")))
+                (princ (format "Error: target heading \"%s\" not found\n" target)))
+              (kill-emacs 1)))
+        ;; --category: substring match on non-TODO headings in tasks.org only
+        (let* ((cat-parts (split-string category "/" t))
+               (matches '())
+               (cat-file (expand-file-name "tasks.org" org-directory)))
+          (when (file-exists-p cat-file)
+            (with-current-buffer (find-file-noselect cat-file)
+              (org-with-wide-buffer
+               (goto-char (point-min))
+               (while (re-search-forward org-heading-regexp nil t)
+                 (if (org-get-todo-state)
+                     (org-end-of-subtree t)
+                   (let ((heading (org-get-heading t t t t)))
+                     (if (= (length cat-parts) 1)
+                         (when (string-match-p (regexp-quote (car cat-parts)) heading)
+                           (push (list (current-buffer) (point) cat-file
+                                       (org-gtd-cli/heading-path-at-point))
+                                 matches))
+                       ;; Multi-segment: substring match on last, substring on ancestors
+                       (when (string-match-p (regexp-quote (car (last cat-parts))) heading)
+                         (let ((path-match t)
+                               (parts (butlast cat-parts)))
+                           (save-excursion
+                             (dolist (part (reverse parts))
+                               (unless (and (org-up-heading-safe)
+                                            (string-match-p (regexp-quote part)
+                                                            (org-get-heading t t t t)))
+                                 (setq path-match nil))))
+                           (when path-match
+                             (push (list (current-buffer) (point) cat-file
+                                         (org-gtd-cli/heading-path-at-point))
+                                   matches)))))))))))
+          (setq matches (nreverse matches))
+          (cond
+           ((null matches)
+            (princ (format "Error: category heading \"%s\" not found\n" category))
+            (kill-emacs 1))
+           ((> (length matches) 1)
+            (princ (format "Multiple category matches for \"%s\":\n" category))
+            (let ((idx 1))
+              (dolist (m matches)
+                (princ (format "[%d] %s (%s)\n"
+                               idx (nth 3 m)
+                               (org-gtd-cli/relative-filename (nth 2 m))))
+                (cl-incf idx)))
+            (princ "Use a more specific path (e.g. --category \"Parent/Child\").\n")
+            (kill-emacs 2))
+           (t
+            (let ((m (car matches)))
+              (setq target-buf (nth 0 m)
+                    target-pos (nth 1 m)
+                    target-file (nth 2 m)))))))
       (with-current-buffer (car buf-pos)
         (org-with-wide-buffer
          (goto-char (cdr buf-pos))
@@ -1217,7 +1274,7 @@ FILE-NAME defaults to \"tasks.org\"."
                 (rel-target (org-gtd-cli/relative-filename target-file)))
            (if is-dry-run
                (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
-                              heading rel-target target rel-file))
+                              heading rel-target target-name rel-file))
              ;; Perform the refile
              (let ((rfloc (list (org-get-heading t t t t)
                                 target-file nil target-pos)))
@@ -1225,7 +1282,7 @@ FILE-NAME defaults to \"tasks.org\"."
              (save-buffer)
              (with-current-buffer target-buf (save-buffer))
              (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
-                            heading rel-target target rel-file)))))))
+                            heading rel-target target-name rel-file)))))))
     (kill-emacs 0)))
 
 ;; --- set-next ---

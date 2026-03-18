@@ -389,26 +389,41 @@ writeShellApplication {
 
       refile)
         shift
-        SUBSTRING="" TARGET="" INDEX="" DRY_RUN=""
+        SUBSTRING="" TARGET="" CATEGORY="" INDEX="" DRY_RUN=""
         if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
-          echo "Usage: org-gtd-cli refile SUBSTR --to TARGET [--index N] [--dry-run]"; exit 0
+          echo "Usage: org-gtd-cli refile SUBSTR --to TARGET [--index N] [--dry-run]"
+          echo "       org-gtd-cli refile SUBSTR --category CAT [--index N] [--dry-run]"
+          echo ""
+          echo "  --to TARGET      Exact match on heading text (case-insensitive)."
+          echo "                   Targets any heading including tasks. Path: --to \"Parent/Child\""
+          echo "  --category CAT   Substring match on non-TODO (category) headings in tasks.org."
+          echo "                   Path: --category \"Parent/Child\""
+          echo "                   Exits 2 on ambiguous match with a listing."
+          echo ""
+          echo "  --to and --category are mutually exclusive."
+          exit 0
         fi
         if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
           SUBSTRING="$1"; shift
         fi
         while [[ $# -gt 0 ]]; do
           case "$1" in
-            --to)      TARGET="$2"; shift 2 ;;
-            --index)   INDEX="$2"; shift 2 ;;
-            --dry-run) DRY_RUN="t"; shift ;;
-            *)         echo "Unknown option: $1" >&2; exit 1 ;;
+            --to)       TARGET="$2"; shift 2 ;;
+            --category) CATEGORY="$2"; shift 2 ;;
+            --index)    INDEX="$2"; shift 2 ;;
+            --dry-run)  DRY_RUN="t"; shift ;;
+            *)          echo "Unknown option: $1" >&2; exit 1 ;;
           esac
         done
-        if [[ -z "$SUBSTRING" || -z "$TARGET" ]]; then
-          echo "Usage: org-gtd-cli refile SUBSTRING --to TARGET [--index N] [--dry-run]" >&2
+        if [[ -n "$TARGET" && -n "$CATEGORY" ]]; then
+          echo "Error: --to and --category are mutually exclusive" >&2
           exit 1
         fi
-        run_elisp "(org-gtd-cli/refile $(to_elisp "$SUBSTRING") $(to_elisp "$TARGET") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        if [[ -z "$SUBSTRING" || ( -z "$TARGET" && -z "$CATEGORY" ) ]]; then
+          echo "Usage: org-gtd-cli refile SUBSTR --to TARGET|--category CAT [--index N] [--dry-run]" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/refile $(to_elisp "$SUBSTRING") $(to_elisp "$TARGET") $(to_elisp "$CATEGORY") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
         ;;
 
       set-next)
@@ -662,7 +677,7 @@ writeShellApplication {
       set-done SUBSTR [--index N] [--dry-run]
       set-state SUBSTR STATE [--index N] [--dry-run]
       set-next SUBSTR [--index N]
-      refile SUBSTR --to TARGET [--index N] [--dry-run]
+      refile SUBSTR --to TARGET|--category CAT [--index N] [--dry-run]
       move SUBSTR --up|--down|--before SIBL|--after SIBL [--index N]
       rename SUBSTR NEWTITLE [--index N] [--dry-run]
       set-schedule SUBSTR DATE [--time TIME] [--clear] [--index N] [--dry-run]
