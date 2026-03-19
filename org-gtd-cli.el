@@ -573,8 +573,7 @@ FILE-NAME defaults to \"tasks.org\"."
          (goto-char (point-min))
          (while (re-search-forward org-heading-regexp nil t)
            (let ((state (org-get-todo-state)))
-             (if state
-                 (org-end-of-subtree t)
+             (unless state
                (setq found t)
                (princ (format "%s (%s)\n"
                               (org-gtd-cli/heading-path-at-point)
@@ -772,8 +771,7 @@ at least one direct child with a TODO keyword."
                     (matches '()))
                (goto-char (point-min))
                (while (re-search-forward org-heading-regexp nil t)
-                 (if (org-get-todo-state)
-                     (org-end-of-subtree t)
+                 (unless (org-get-todo-state)
                    (let ((heading (org-get-heading t t t t)))
                      (if (= (length cat-parts) 1)
                          ;; Single segment: substring match
@@ -1273,8 +1271,7 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
               (org-with-wide-buffer
                (goto-char (point-min))
                (while (re-search-forward org-heading-regexp nil t)
-                 (if (org-get-todo-state)
-                     (org-end-of-subtree t)
+                 (unless (org-get-todo-state)
                    (let ((heading (org-get-heading t t t t)))
                      (if (= (length cat-parts) 1)
                          (when (string-match-p (regexp-quote (car cat-parts)) heading)

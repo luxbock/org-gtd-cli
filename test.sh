@@ -343,6 +343,32 @@ get_result 1
 assert_exit 1 "$LAST_RC" "exits 1 when all matches are TODO headings"
 assert_output_contains "$LAST_OUTPUT" "not found" "shows not found error"
 
+# --- add-task --category plain headings under tasks ---
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: path to plain heading under task
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-task "Task under project" nil nil nil nil nil nil "Improve agent workflow/Resources" nil))
+;; Test 1: ambiguous "Resources" (under task + category level)
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/add-task "Ambig resources task" nil nil nil nil nil nil "Resources" nil))
+ELISP
+run_batch_file
+
+echo "test: --category with path to plain heading under task"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/tasks.org" "TODO Task under project" "task in tasks.org"
+assert_output_contains "$LAST_OUTPUT" "Improve agent workflow/Resources" "output shows path"
+
+echo "test: --category Resources ambiguous"
+get_result 1
+assert_exit 2 "$LAST_RC" "exits 2 for ambiguous match"
+assert_output_contains "$LAST_OUTPUT" "Multiple category matches" "shows ambiguity message"
+assert_output_contains "$LAST_OUTPUT" "Improve agent workflow/Resources" "lists task-child match"
+assert_output_contains "$LAST_OUTPUT" "Research/Resources" "lists category-level match"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # add-subtask
 # ══════════════════════════════════════════════════════════════════════════════
@@ -606,7 +632,7 @@ get_result 0
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points" "DONE child"
 assert_output_contains "$LAST_OUTPUT" "TODO Design CLI tool" "TODO child (subproject)"
-assert_output_contains "$LAST_OUTPUT" "2/4 done" "progress count"
+assert_output_contains "$LAST_OUTPUT" "2/5 done" "progress count"
 assert_output_contains "$LAST_OUTPUT" "(tasks.org)" "child has file ref"
 
 echo "test: exits 1 if no subtasks"
@@ -651,9 +677,13 @@ assert_output_not_contains "$LAST_OUTPUT" "Write quarterly report" "no TODO head
 assert_output_not_contains "$LAST_OUTPUT" "Pay quarterly taxes" "no TODO task"
 assert_output_not_contains "$LAST_OUTPUT" "Buy a formicarium" "no TODO subtask"
 
-echo "test: does not show children of TODO headings"
+echo "test: does not show task headings that are children of TODO headings"
 assert_output_not_contains "$LAST_OUTPUT" "Add more test cases" "no child of TODO heading"
 assert_output_not_contains "$LAST_OUTPUT" "Research formicarium options" "no child of TODO project"
+
+echo "test: shows plain headings under task headings"
+assert_output_contains "$LAST_OUTPUT" "Computers/Agents/Improve agent workflow/Resources" "plain heading under task"
+assert_output_contains "$LAST_OUTPUT" "Research/Resources" "category-level Resources heading"
 
 echo "test: does not show headings from other files"
 assert_output_not_contains "$LAST_OUTPUT" "(inbox.org)" "no inbox.org headings"
@@ -725,7 +755,7 @@ assert_output_contains "$LAST_OUTPUT" "Improve agent workflow" "finds workflow t
 assert_output_contains "$LAST_OUTPUT" "Buy a formicarium" "finds formicarium task"
 assert_output_contains "$LAST_OUTPUT" "Found 3 agent tasks" "correct count"
 assert_output_contains "$LAST_OUTPUT" "research backup strategies" "AGENT instruction shown"
-assert_output_contains "$LAST_OUTPUT" "2/4 done" "subtask progress"
+assert_output_contains "$LAST_OUTPUT" "2/5 done" "subtask progress"
 # "Set up automated backups" is under "Agents" (no TODO keyword) → no project
 assert_output_not_contains "$LAST_OUTPUT" "Project: Agents" "skips non-TODO ancestor"
 # "Buy a formicarium" is under "Pet Ants" (no TODO keyword) → no project
@@ -1053,6 +1083,14 @@ cat > "$BATCH_FILE" << 'ELISP'
 ;; Test 5: dry-run
 (org-gtd-test/reset)
 (org-gtd-test/run 5 '(org-gtd-cli/refile "Buy groceries" nil "Research/Tools" nil "t"))
+
+;; Test 6: --category matches plain heading under a task (path-disambiguated)
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/refile "Buy groceries" nil "Improve agent workflow/Resources" nil nil))
+
+;; Test 7: --category ambiguous when same name at category level and under task
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/refile "Buy groceries" nil "Resources" nil nil))
 ELISP
 run_batch_file
 
@@ -1088,6 +1126,19 @@ get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would refile" "dry-run message"
 assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "still in inbox"
+
+echo "test: --category matches plain heading under a task"
+get_result 6
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
+
+echo "test: --category ambiguous Resources (under task + category level)"
+get_result 7
+assert_exit 2 "$LAST_RC" "exits 2"
+assert_output_contains "$LAST_OUTPUT" "Multiple category matches" "ambiguity message"
+assert_output_contains "$LAST_OUTPUT" "Improve agent workflow/Resources" "lists task-child match"
+assert_output_contains "$LAST_OUTPUT" "Research/Resources" "lists category-level match"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # add-event
@@ -1549,7 +1600,7 @@ assert_output_contains "$LAST_OUTPUT" "TODO Implement CLI tool" "sibling shown"
 
 echo "test: process-agent-tasks shows correct direct-child subtask count and file ref"
 get_result 2
-assert_output_contains "$LAST_OUTPUT" "2/4 done" "correct subtask count for improved workflow"
+assert_output_contains "$LAST_OUTPUT" "2/5 done" "correct subtask count for improved workflow"
 assert_output_contains "$LAST_OUTPUT" "DONE What are the current pain points? (tasks.org)" "child has file ref"
 
 # ══════════════════════════════════════════════════════════════════════════════

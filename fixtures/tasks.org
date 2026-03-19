@@ -27,6 +27,7 @@ AGENT: research backup strategies and implement a simple cron-based solution
 [2026-03-08 Sun 14:00]
 *** TODO Improve agent workflow :@agent:
 [2026-03-09 Mon 11:00]
+**** Resources
 **** DONE What are the current pain points?
 CLOSED: [2026-03-10 Tue 15:00]
 :LOGBOOK:
@@ -162,4 +163,5 @@ CLOSED: [2026-01-20 Tue 14:00]
 :END:
 [2026-01-18 Sun]
 ** Tools
+** Resources
 ** TODO Bare heading no body
