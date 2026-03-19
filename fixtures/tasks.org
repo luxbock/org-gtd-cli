@@ -76,6 +76,10 @@ It appears in the existing Emacs instance instead.
 *** TODO [#B] Add aliases to common systemctl commands
 [2026-03-11 Wed 13:21]
 ** Tools
+*** TODO Fix the =find= command in org-gtd-cli
+[2026-03-15 Sun 10:00]
+*** TODO Review /italic/ and ~code~ formatting in export
+[2026-03-15 Sun 11:00]
 * Family                                                                  :family:
 :PROPERTIES:
 :ID:       test-id-family

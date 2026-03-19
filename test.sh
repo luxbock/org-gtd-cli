@@ -2699,5 +2699,94 @@ echo "test: delete --index out of range"
 get_result 7
 assert_exit 1 "$LAST_RC" "exits 1"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# markup-aware matching
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== markup-aware matching ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; search: stripped query matches marked-up heading
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/search "find" nil nil nil))
+
+;; search: raw markup query still works
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/search "=find=" nil nil nil))
+
+;; search: strips /italic/ marker
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/search "italic" nil nil nil))
+
+;; search: strips ~code~ marker in same heading
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/search "code" nil nil nil))
+
+;; search: raw /italic/ query still works
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/search "/italic/" nil nil nil))
+
+;; find-task via show: substring match with stripped markup
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/show "find command" nil nil))
+
+;; find-task via show: raw markup query
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/show "=find= command" nil nil))
+
+;; find-task via delete: exact match with stripped markup (dry-run)
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/delete "Fix the find command in org-gtd-cli" nil "t"))
+
+;; find-task via delete: raw exact match (dry-run)
+(org-gtd-test/reset)
+(org-gtd-test/run 8 '(org-gtd-cli/delete "Fix the =find= command in org-gtd-cli" nil "t"))
+ELISP
+run_batch_file
+
+echo "test: search — stripped query matches marked-up heading"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Fix the =find= command" "finds marked-up heading"
+
+echo "test: search — raw markup query still works"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Fix the =find= command" "raw markup match"
+
+echo "test: search — strips /italic/ marker"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Review /italic/" "finds italic-marked heading"
+
+echo "test: search — strips ~code~ marker in same heading"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Review /italic/" "finds code-marked heading"
+
+echo "test: search — raw /italic/ query still works"
+get_result 4
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Review /italic/" "raw italic match"
+
+echo "test: show — substring match with stripped markup"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+
+echo "test: show — raw markup query still works"
+get_result 6
+assert_exit 0 "$LAST_RC" "exits 0"
+
+echo "test: delete — exact match with stripped markup (dry-run)"
+get_result 7
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would delete:" "dry-run stripped exact match"
+
+echo "test: delete — raw exact match (dry-run)"
+get_result 8
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would delete:" "dry-run raw exact match"
+
 echo ""
 echo "All tests completed."

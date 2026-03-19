@@ -112,6 +112,19 @@ Walks up the org tree to build a path like \"Computers/NixOS/epiphyte\"."
         (push (org-get-heading t t t t) path)))
     (mapconcat #'identity path "/")))
 
+(defun org-gtd-cli/strip-markup (s)
+  "Strip org emphasis markers from S for fuzzy matching.
+Removes paired markers: *bold*, /italic/, _underline_, =verbatim=, ~code~, +strikethrough+."
+  (let ((result s))
+    (dolist (marker '("*" "/" "_" "=" "~" "+"))
+      (setq result
+            (replace-regexp-in-string
+             (concat (regexp-quote marker)
+                     "\\([^ \t\n]\\(?:[^\n]*?[^ \t\n]\\)?\\)"
+                     (regexp-quote marker))
+             "\\1" result)))
+    result))
+
 (defun org-gtd-cli/find-task (substring &optional index include-done exact)
   "Find a task by SUBSTRING match across all agenda files.
 Returns a cons (buffer . position) or exits with appropriate code.
@@ -132,9 +145,13 @@ If EXACT is non-nil, require full heading match instead of substring."
                           (or include-done
                               (not (member state org-done-keywords)))
                           (if exact
-                              (string= (downcase substring) (downcase heading))
-                            (string-match-p (regexp-quote substring)
-                                            (downcase heading))))
+                              (or (string= (downcase substring) (downcase heading))
+                                  (string= (downcase substring)
+                                           (downcase (org-gtd-cli/strip-markup heading))))
+                            (or (string-match-p (regexp-quote substring)
+                                                (downcase heading))
+                                (string-match-p (regexp-quote substring)
+                                                (downcase (org-gtd-cli/strip-markup heading))))))
                  (push (list (current-buffer) pos
                              state heading
                              (org-gtd-cli/relative-filename file))
@@ -444,8 +461,10 @@ FILE-NAME restricts search to a single file in org-directory."
                (when (and state
                           (or (null state-filter)
                               (member state state-filter))
-                          (string-match-p (regexp-quote substring)
-                                          heading)
+                          (or (string-match-p (regexp-quote substring)
+                                              heading)
+                              (string-match-p (regexp-quote substring)
+                                              (org-gtd-cli/strip-markup heading)))
                           (or (not tag-filter)
                               (let ((tag-list (split-string tag-filter "[+]")))
                                 (cl-every (lambda (tag)
