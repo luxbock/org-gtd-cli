@@ -583,6 +583,52 @@ FILE-NAME defaults to \"tasks.org\"."
       (princ "No categories found\n")))
   (kill-emacs 0))
 
+;; --- projects ---
+
+(defun org-gtd-cli/projects ()
+  "List all active projects with category paths and progress counts.
+An active project is a heading with a non-done TODO keyword that has
+at least one direct child with a TODO keyword."
+  (let ((results '()))
+    (dolist (file (org-agenda-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (let ((rel-file (org-gtd-cli/relative-filename file)))
+             (goto-char (point-min))
+             (while (re-search-forward org-heading-regexp nil t)
+               (let ((state (org-get-todo-state)))
+                 (when (and state
+                            (member state org-todo-keywords-1)
+                            (not (member state org-done-keywords)))
+                   (let* ((level (org-current-level))
+                          (child-level (1+ level))
+                          (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+                          (done-count 0)
+                          (total-count 0))
+                     (save-excursion
+                       (forward-line 1)
+                       (while (and (< (point) subtree-end)
+                                   (re-search-forward org-heading-regexp subtree-end t))
+                         (when (= (org-current-level) child-level)
+                           (let ((child-state (org-get-todo-state)))
+                             (when (and child-state
+                                        (member child-state org-todo-keywords-1))
+                               (cl-incf total-count)
+                               (when (member child-state org-done-keywords)
+                                 (cl-incf done-count)))))))
+                     (when (> total-count 0)
+                       (push (format "%s (%s) [%d/%d]"
+                                     (org-gtd-cli/heading-path-at-point)
+                                     rel-file
+                                     done-count total-count)
+                             results)))))))))))
+    (if results
+        (dolist (line (nreverse results))
+          (princ (concat line "\n")))
+      (princ "No projects.\n")))
+  (kill-emacs 0))
+
 ;; --- process-agent-tasks ---
 
 (defun org-gtd-cli/process-agent-tasks ()

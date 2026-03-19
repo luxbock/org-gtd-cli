@@ -670,6 +670,41 @@ assert_exit 1 "$LAST_RC" "exits 1 for missing file"
 assert_output_contains "$LAST_OUTPUT" "File not found" "shows error message"
 
 # ══════════════════════════════════════════════════════════════════════════════
+# projects (read-only — single call, all assertions together)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== projects ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/projects))
+ELISP
+run_batch_file
+
+echo "test: lists active projects with paths and progress"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Computers/Agents/Improve agent workflow (tasks.org) [2/4]" "top-level project with progress"
+assert_output_contains "$LAST_OUTPUT" "Computers/Agents/Improve agent workflow/Design CLI tool (tasks.org) [0/3]" "nested subproject"
+assert_output_contains "$LAST_OUTPUT" "Computers/Agents/Improve agent workflow/Implement CLI tool (tasks.org) [0/1]" "subproject with one child"
+assert_output_contains "$LAST_OUTPUT" "Deep nesting parent (tasks.org) [0/1]" "deeply nested project"
+assert_output_contains "$LAST_OUTPUT" "Family/Pet Ants/Buy a formicarium (tasks.org) [1/3]" "project in different category"
+assert_output_contains "$LAST_OUTPUT" "Travel/Holiday Trip/Holiday pre-trip tasks (tasks.org) [2/4]" "project with mixed states"
+
+echo "test: does not contain leaf tasks"
+assert_output_not_contains "$LAST_OUTPUT" "Write quarterly report" "no leaf task"
+assert_output_not_contains "$LAST_OUTPUT" "Pay quarterly taxes" "no leaf task (finance)"
+assert_output_not_contains "$LAST_OUTPUT" "Add aliases" "no leaf task (nixos)"
+assert_output_not_contains "$LAST_OUTPUT" "Buy a small UPS" "no leaf task (shopping)"
+
+echo "test: does not contain done tasks or category headings"
+assert_output_not_contains "$LAST_OUTPUT" "Submit expense claims" "no done task"
+assert_output_not_contains "$LAST_OUTPUT" "Fix org-capture" "no done task (emacs)"
+assert_output_not_contains "$LAST_OUTPUT" "Work (" "no category-only heading"
+assert_output_not_contains "$LAST_OUTPUT" "Computers (" "no category-only heading"
+
+# ══════════════════════════════════════════════════════════════════════════════
 # process-agent-tasks (read-only — single call, all assertions together)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""

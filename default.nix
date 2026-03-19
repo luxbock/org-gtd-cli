@@ -169,6 +169,14 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/categories $(to_elisp "$FILE"))"
         ;;
 
+      projects)
+        shift || true
+        if [[ "''${1:-}" == "--help" || "''${1:-}" == "-h" ]]; then
+          echo "Usage: org-gtd-cli projects"; exit 0
+        fi
+        run_elisp "(org-gtd-cli/projects)"
+        ;;
+
       process-agent-tasks)
         shift || true
         if [[ "''${1:-}" == "--help" || "''${1:-}" == "-h" ]]; then
@@ -690,6 +698,7 @@ writeShellApplication {
       show SUBSTR [--index N] [--plain]
       subtasks SUBSTR [--index N]
       categories
+      projects
       process-agent-tasks
       add-task TITLE [--body TEXT] [--tags T1,T2] [--schedule DATE]
         [--deadline DATE] [--priority A|B|C] [--file FILE]
