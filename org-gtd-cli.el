@@ -834,10 +834,11 @@ at least one direct child with a TODO keyword."
                  (goto-char (car match))
                  (let ((target-level (1+ (nth 1 match))))
                    (org-end-of-subtree t)
-                   (insert "\n" (org-gtd-cli/build-entry
-                                 target-level todo-state title
-                                 priority tags-csv schedule deadline body))
-                   (insert "\n"))))
+                   (unless (bolp) (insert "\n"))
+                   (insert (org-gtd-cli/build-entry
+                            target-level todo-state title
+                            priority tags-csv schedule deadline body)
+                           "\n"))))
            ;; Append to end of file
            (goto-char (point-max))
            (unless (bolp) (insert "\n"))
@@ -897,10 +898,11 @@ at least one direct child with a TODO keyword."
              (org-todo "TODO")))
          ;; Go to end of subtree
          (org-end-of-subtree t)
-         (insert "\n" (org-gtd-cli/build-entry
-                       child-level todo-state title
-                       priority tags-csv schedule deadline body))
-         (insert "\n")
+         (unless (bolp) (insert "\n"))
+         (insert (org-gtd-cli/build-entry
+                  child-level todo-state title
+                  priority tags-csv schedule deadline body)
+                 "\n")
          (save-buffer)
          (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
                         title parent-heading rel-file))))))

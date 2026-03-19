@@ -156,6 +156,16 @@ assert_no_long_lines() {
   fi
 }
 
+assert_no_consecutive_blank_lines() {
+  local file="$1" desc="$2"
+  if ! grep -Pzq '\n\n\n' "$file" 2>/dev/null; then
+    echo "  PASS: $desc"; ((PASS++))
+  else
+    echo "  FAIL: $desc (file contains consecutive blank lines)"; ((FAIL++))
+    grep -n '^$' "$file" | head -5
+  fi
+}
+
 summary() {
   echo ""
   echo "═══════════════════════════════════════"
@@ -369,6 +379,24 @@ assert_output_contains "$LAST_OUTPUT" "Multiple category matches" "shows ambigui
 assert_output_contains "$LAST_OUTPUT" "Improve agent workflow/Resources" "lists task-child match"
 assert_output_contains "$LAST_OUTPUT" "Research/Resources" "lists category-level match"
 
+# --- repeated add-task --category: no extra blank lines ---
+echo ""
+echo "=== add-task --category: no extra blank lines ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-task "First category task" nil nil nil nil nil nil "Finance" nil))
+(org-gtd-test/run 1 '(org-gtd-cli/add-task "Second category task" nil nil nil nil nil nil "Finance" nil))
+(org-gtd-test/run 2 '(org-gtd-cli/add-task "Third category task" nil nil nil nil nil nil "Finance" nil))
+ELISP
+run_batch_file
+
+echo "test: repeated add-task --category produces no consecutive blank lines"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_no_consecutive_blank_lines "$TEST_DIR/tasks.org" "no consecutive blank lines in tasks.org"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # add-subtask
 # ══════════════════════════════════════════════════════════════════════════════
@@ -399,6 +427,24 @@ assert_exit 2 "$LAST_RC" "exits 2 on ambiguous"
 echo "test: index selects match"
 get_result 2
 assert_exit 0 "$LAST_RC" "exits 0 with index"
+
+# --- repeated add-subtask: no extra blank lines ---
+echo ""
+echo "=== add-subtask: no extra blank lines ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-subtask "Write quarterly report" "First subtask" nil nil nil nil nil nil nil))
+(org-gtd-test/run 1 '(org-gtd-cli/add-subtask "Write quarterly report" "Second subtask" nil nil nil nil nil nil nil))
+(org-gtd-test/run 2 '(org-gtd-cli/add-subtask "Write quarterly report" "Third subtask" nil nil nil nil nil nil nil))
+ELISP
+run_batch_file
+
+echo "test: repeated add-subtask produces no consecutive blank lines"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_no_consecutive_blank_lines "$TEST_DIR/tasks.org" "no consecutive blank lines in tasks.org"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # agenda (read-only — single reset at section start)
