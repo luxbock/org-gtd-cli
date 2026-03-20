@@ -1128,50 +1128,121 @@ at least one direct child with a TODO keyword."
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
               (old-state (org-get-todo-state)))
          (if is-dry-run
+             ;; Dry-run: simulate "if this task were DONE" without changing state
              (progn
                (princ (format "Would mark done: %s (%s)\n" heading rel-file))
-               ;; Check for auto-progress
                (when (gtd/is-project-subtree-p)
-                 (let ((next-sibling-heading
-                        (save-excursion
-                          (when (org-get-next-sibling)
-                            (when (and (org-get-todo-state)
-                                       (string= (org-get-todo-state) "TODO"))
-                              (org-get-heading t t t t))))))
-                   (when next-sibling-heading
-                     (princ (format "  Would auto-progress: \"%s\" -> NEXT\n"
-                                    next-sibling-heading))))))
+                 (let ((saved-pos (point))
+                       (has-next nil)
+                       (all-done t))
+                   ;; Scan ALL siblings, treating current task as DONE
+                   (save-excursion
+                     (org-up-heading-safe)
+                     (when (org-goto-first-child)
+                       (catch 'scanned
+                         (while t
+                           (let ((s (if (= (point) saved-pos) "DONE" (org-get-todo-state))))
+                             (when (equal s "NEXT") (setq has-next t))
+                             (when (and s (not (member s org-done-keywords)))
+                               (setq all-done nil)))
+                           (unless (org-get-next-sibling) (throw 'scanned nil))))))
+                   (cond
+                    (has-next nil)
+                    (all-done
+                     (save-excursion
+                       (org-up-heading-safe)
+                       (when (org-entry-is-todo-p)
+                         (princ (format "  Would auto-complete project: \"%s\" (%s)\n"
+                                        (org-get-heading t t t t) rel-file)))))
+                    (t
+                     ;; Walk forward for promotion preview (no state changes)
+                     (save-excursion
+                       (let ((found nil))
+                         (while (and (not found) (org-get-next-sibling))
+                           (when (equal (org-get-todo-state) "TODO")
+                             (if (not (gtd/is-project-p))
+                                 (progn
+                                   (princ (format "  Would auto-progress: \"%s\" -> NEXT\n"
+                                                  (org-get-heading t t t t)))
+                                   (setq found t))
+                               (unless (gtd/has-active-in-subtree-p)
+                                 ;; Preview drill-in
+                                 (let ((sub-heading (org-get-heading t t t t)))
+                                   (save-excursion
+                                     (when (org-goto-first-child)
+                                       (catch 'done
+                                         (while t
+                                           (when (and (equal (org-get-todo-state) "TODO")
+                                                      (not (gtd/is-project-p)))
+                                             (princ (format "  Would auto-progress: \"%s\" -> NEXT (in subproject \"%s\")\n"
+                                                            (org-get-heading t t t t) sub-heading))
+                                             (throw 'done t))
+                                           (unless (org-get-next-sibling) (throw 'done nil)))))))
+                                 (setq found t))))))))))))
            ;; Actually mark done
            (let ((org-inhibit-logging nil))
              (org-todo "DONE"))
-           ;; Auto-progress: promote next TODO sibling to NEXT
-           (let ((auto-msg nil))
+           ;; Auto-progress: project-aware promotion
+           (let ((auto-msgs '()))
              (when (gtd/is-project-subtree-p)
-               ;; Check siblings for NEXT
-               (let ((sibling-states '()))
-                 (save-excursion
-                   (let ((s (org-get-todo-state)))
-                     (push s sibling-states)
-                     (while (org-get-next-sibling)
-                       (push (org-get-todo-state) sibling-states))))
-                 (unless (member "NEXT" sibling-states)
-                   ;; Promote next TODO to NEXT
-                   (save-excursion
-                     (when (org-get-next-sibling)
-                       (when (and (org-get-todo-state)
-                                  (string= (org-get-todo-state) "TODO"))
-                         (let ((next-heading (org-get-heading t t t t)))
-                           (org-todo "NEXT")
-                           (setq auto-msg
-                                 (format "  Auto-progressed: \"%s\" -> NEXT (%s)\n"
-                                         next-heading rel-file)))))))))
-             ;; Reorder siblings by state (DONE first, then NEXT, TODO, etc.)
+               ;; Collect ALL sibling states (parent → first-child → walk all)
+               (let ((all-sibling-states
+                      (save-excursion
+                        (org-up-heading-safe)
+                        (when (org-goto-first-child)
+                          (let ((states (list (org-get-todo-state))))
+                            (while (org-get-next-sibling)
+                              (push (org-get-todo-state) states))
+                            states)))))
+                 (when all-sibling-states
+                   (cond
+                    ;; A sibling already has NEXT — do nothing
+                    ((member "NEXT" all-sibling-states))
+                    ;; All siblings are done — auto-complete parent project
+                    ((not (cl-find-if
+                           (lambda (s) (and s (not (member s org-done-keywords))))
+                           all-sibling-states))
+                     (save-excursion
+                       (org-up-heading-safe)
+                       (when (org-entry-is-todo-p)
+                         (let ((parent-heading (org-get-heading t t t t)))
+                           (org-todo "DONE")
+                           (push (format "  Auto-completed project: \"%s\" (%s)\n"
+                                         parent-heading rel-file)
+                                 auto-msgs)))))
+                    ;; Default — promote next actionable task (project-aware)
+                    (t
+                     (save-excursion
+                       (let ((promoted nil))
+                         (while (and (not promoted) (org-get-next-sibling))
+                           (when (equal (org-get-todo-state) "TODO")
+                             (if (not (gtd/is-project-p))
+                                 ;; Simple task — promote directly
+                                 (let ((h (org-get-heading t t t t)))
+                                   (org-todo "NEXT")
+                                   (push (format "  Auto-progressed: \"%s\" -> NEXT (%s)\n"
+                                                 h rel-file)
+                                         auto-msgs)
+                                   (setq promoted t))
+                               ;; Project sibling — check if stuck
+                               (if (gtd/has-active-in-subtree-p)
+                                   nil ; has active child, skip
+                                 ;; Stuck project — drill in
+                                 (let* ((sub-heading (org-get-heading t t t t))
+                                        (child-heading (gtd/promote-first-child-task)))
+                                   (when child-heading
+                                     (push (format "  Auto-progressed: \"%s\" -> NEXT (in subproject \"%s\") (%s)\n"
+                                                   child-heading sub-heading rel-file)
+                                           auto-msgs)
+                                     (setq promoted t))))))))))))))
+             ;; Reorder + save + print
              (save-excursion
                (goto-char (cdr buf-pos))
                (org-gtd-cli/reorder-siblings-by-state))
              (save-buffer)
              (princ (format "Done: %s (%s)\n" heading rel-file))
-             (when auto-msg (princ auto-msg))))))))
+             (dolist (msg (nreverse auto-msgs))
+               (princ msg))))))))
   (kill-emacs 0))
 
 ;; --- set-state ---

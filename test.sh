@@ -863,6 +863,63 @@ get_result 5
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "DONE Get travel insurance quote" "marked done"
 
+# --- project-aware auto-progress tests ---
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: All siblings done → auto-complete parent project
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-done "Test migration on staging" nil nil))
+;; Test 1: Subproject drill-in promotion
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/set-done "Set up alerting" nil nil))
+;; Test 2: NEXT exists among all siblings → no promotion
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/set-done "Get travel insurance quote" nil nil))
+;; Test 3: Dry-run shows auto-complete preview
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-done "Test migration on staging" nil "t"))
+;; Test 4: Dry-run shows subproject drill-in preview
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-done "Set up alerting" nil "t"))
+ELISP
+run_batch_file
+
+echo "test: all siblings done auto-completes parent project"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Auto-completed project" "auto-complete message"
+assert_output_contains "$LAST_OUTPUT" "Ship epiphyte updates" "parent project name"
+assert_file_contains "$TEST_DIR/tasks.org" "DONE Ship epiphyte updates" "parent marked DONE"
+
+echo "test: subproject drill-in promotes first child task"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Auto-progressed" "auto-progress message"
+assert_output_contains "$LAST_OUTPUT" "in subproject" "drill-in message"
+assert_output_contains "$LAST_OUTPUT" "Design dashboard layout" "child task promoted"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Design dashboard layout" "child becomes NEXT"
+
+echo "test: existing NEXT among all siblings prevents promotion"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_not_contains "$LAST_OUTPUT" "Auto-progressed" "no auto-progress when NEXT exists"
+assert_output_not_contains "$LAST_OUTPUT" "Auto-completed" "no auto-complete when NEXT exists"
+
+echo "test: dry-run shows auto-complete preview"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would auto-complete project" "dry-run auto-complete message"
+assert_output_contains "$LAST_OUTPUT" "Ship epiphyte updates" "dry-run parent project name"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Test migration on staging" "file unchanged by dry-run"
+
+echo "test: dry-run shows subproject drill-in preview"
+get_result 4
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would auto-progress" "dry-run progress message"
+assert_output_contains "$LAST_OUTPUT" "in subproject" "dry-run drill-in message"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Set up alerting" "file unchanged by dry-run"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # set-state
 # ══════════════════════════════════════════════════════════════════════════════

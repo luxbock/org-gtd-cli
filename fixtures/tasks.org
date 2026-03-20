@@ -73,6 +73,26 @@ CLOSED: [2026-03-07 Sat 16:03]
 It appears in the existing Emacs instance instead.
 [2026-03-06 Fri 14:33]
 ** NixOS                                                                  :nixos:
+*** TODO Ship epiphyte updates
+[2026-03-15 Sun 10:00]
+**** DONE Write migration script
+CLOSED: [2026-03-15 Sun 12:00]
+:LOGBOOK:
+- State "DONE"       from "NEXT"       [2026-03-15 Sun 12:00]
+:END:
+[2026-03-15 Sun 10:00]
+**** NEXT Test migration on staging
+[2026-03-15 Sun 10:00]
+*** TODO Improve monitoring
+[2026-03-16 Mon 09:00]
+**** NEXT Set up alerting
+[2026-03-16 Mon 09:00]
+**** TODO Add dashboards
+[2026-03-16 Mon 09:00]
+***** TODO Design dashboard layout
+[2026-03-16 Mon 09:00]
+***** TODO Implement dashboard
+[2026-03-16 Mon 09:00]
 *** TODO [#B] Add aliases to common systemctl commands
 [2026-03-11 Wed 13:21]
 ** Tools
