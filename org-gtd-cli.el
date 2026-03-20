@@ -838,7 +838,10 @@ at least one direct child with a TODO keyword."
                    (insert (org-gtd-cli/build-entry
                             target-level todo-state title
                             priority tags-csv schedule deadline body)
-                           "\n"))))
+                           "\n")
+                   ;; Remove orphaned blank lines at insertion point
+                   (while (and (not (eobp)) (looking-at-p "\n"))
+                     (delete-char 1)))))
            ;; Append to end of file
            (goto-char (point-max))
            (unless (bolp) (insert "\n"))
@@ -903,6 +906,9 @@ at least one direct child with a TODO keyword."
                   child-level todo-state title
                   priority tags-csv schedule deadline body)
                  "\n")
+         ;; Remove orphaned blank lines at insertion point
+         (while (and (not (eobp)) (looking-at-p "\n"))
+           (delete-char 1))
          (save-buffer)
          (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
                         title parent-heading rel-file))))))
