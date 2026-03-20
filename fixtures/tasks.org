@@ -93,6 +93,26 @@ CLOSED: [2026-03-15 Sun 12:00]
 [2026-03-16 Mon 09:00]
 ***** TODO Implement dashboard
 [2026-03-16 Mon 09:00]
+*** TODO Deploy new services
+[2026-03-17 Tue 10:00]
+**** DONE Configure DNS
+CLOSED: [2026-03-17 Tue 12:00]
+:LOGBOOK:
+- State "DONE"       from "NEXT"       [2026-03-17 Tue 12:00]
+:END:
+[2026-03-17 Tue 10:00]
+**** TODO Set up TLS certs
+[2026-03-17 Tue 10:00]
+***** DONE Generate CSR
+CLOSED: [2026-03-18 Wed 09:00]
+:LOGBOOK:
+- State "DONE"       from "NEXT"       [2026-03-18 Wed 09:00]
+:END:
+[2026-03-17 Tue 10:00]
+***** NEXT Install certificates
+[2026-03-17 Tue 10:00]
+**** TODO Run smoke tests
+[2026-03-17 Tue 10:00]
 *** TODO [#B] Add aliases to common systemctl commands
 [2026-03-11 Wed 13:21]
 ** Tools

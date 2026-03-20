@@ -882,6 +882,12 @@ cat > "$BATCH_FILE" << 'ELISP'
 ;; Test 4: Dry-run shows subproject drill-in preview
 (org-gtd-test/reset)
 (org-gtd-test/run 4 '(org-gtd-cli/set-done "Set up alerting" nil "t"))
+;; Test 5: Cascading — auto-complete subproject triggers promotion at parent level
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-done "Install certificates" nil nil))
+;; Test 6: Cascading dry-run preview
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/set-done "Install certificates" nil "t"))
 ELISP
 run_batch_file
 
@@ -919,6 +925,25 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would auto-progress" "dry-run progress message"
 assert_output_contains "$LAST_OUTPUT" "in subproject" "dry-run drill-in message"
 assert_file_contains "$TEST_DIR/tasks.org" "NEXT Set up alerting" "file unchanged by dry-run"
+
+echo "test: cascading auto-complete triggers promotion at parent level"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Auto-completed project" "cascade auto-complete message"
+assert_output_contains "$LAST_OUTPUT" "Set up TLS certs" "subproject auto-completed"
+assert_output_contains "$LAST_OUTPUT" "Auto-progressed" "cascade triggers promotion"
+assert_output_contains "$LAST_OUTPUT" "Run smoke tests" "next sibling promoted"
+assert_file_contains "$TEST_DIR/tasks.org" "DONE Set up TLS certs" "subproject marked DONE"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Run smoke tests" "sibling becomes NEXT"
+
+echo "test: cascading dry-run preview"
+get_result 6
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would auto-complete project" "cascade dry-run auto-complete"
+assert_output_contains "$LAST_OUTPUT" "Set up TLS certs" "cascade dry-run subproject name"
+assert_output_contains "$LAST_OUTPUT" "Would auto-progress" "cascade dry-run promotion"
+assert_output_contains "$LAST_OUTPUT" "Run smoke tests" "cascade dry-run next sibling"
+assert_file_contains "$TEST_DIR/tasks.org" "NEXT Install certificates" "file unchanged by cascade dry-run"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # set-state
