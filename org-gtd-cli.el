@@ -1346,24 +1346,30 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                                            (< (point) src-end)))
                            (heading (org-get-heading t t t t)))
                        (if (= (length target-parts) 1)
-                           ;; Single segment: exact case-insensitive
-                           (when (string= (downcase (car target-parts))
-                                          (downcase heading))
+                           ;; Single segment: exact case-insensitive (with markup stripping)
+                           (when (let ((dh (downcase heading))
+                                       (dt (downcase (car target-parts))))
+                                   (or (string= dt dh)
+                                       (string= dt (downcase (org-gtd-cli/strip-markup heading)))))
                              (if in-source
                                  (cl-incf self-match-count)
                                (setq target-pos (point)
                                      target-buf (current-buffer)
                                      target-file file)))
                          ;; Multi-segment: exact match on last, exact on each ancestor
-                         (when (string= (downcase (car (last target-parts)))
-                                        (downcase heading))
+                         (when (let ((dh (downcase heading))
+                                     (dt (downcase (car (last target-parts)))))
+                                 (or (string= dt dh)
+                                     (string= dt (downcase (org-gtd-cli/strip-markup heading)))))
                            (let ((path-match t)
                                  (parts (butlast target-parts)))
                              (save-excursion
                                (dolist (part (reverse parts))
                                  (unless (and (org-up-heading-safe)
-                                              (string= (downcase part)
-                                                       (downcase (org-get-heading t t t t))))
+                                              (let ((h (org-get-heading t t t t)))
+                                                (or (string= (downcase part) (downcase h))
+                                                    (string= (downcase part)
+                                                             (downcase (org-gtd-cli/strip-markup h))))))
                                    (setq path-match nil))))
                              (when path-match
                                (if in-source
@@ -1388,21 +1394,26 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                (goto-char (point-min))
                (while (re-search-forward org-heading-regexp nil t)
                  (unless (org-get-todo-state)
-                   (let ((heading (org-get-heading t t t t)))
+                   (let* ((heading (org-get-heading t t t t))
+                          (stripped (org-gtd-cli/strip-markup heading)))
                      (if (= (length cat-parts) 1)
-                         (when (string-match-p (regexp-quote (car cat-parts)) heading)
+                         (when (or (string-match-p (regexp-quote (car cat-parts)) heading)
+                                   (string-match-p (regexp-quote (car cat-parts)) stripped))
                            (push (list (current-buffer) (point) cat-file
                                        (org-gtd-cli/heading-path-at-point))
                                  matches))
                        ;; Multi-segment: substring match on last, substring on ancestors
-                       (when (string-match-p (regexp-quote (car (last cat-parts))) heading)
+                       (when (or (string-match-p (regexp-quote (car (last cat-parts))) heading)
+                                 (string-match-p (regexp-quote (car (last cat-parts))) stripped))
                          (let ((path-match t)
                                (parts (butlast cat-parts)))
                            (save-excursion
                              (dolist (part (reverse parts))
                                (unless (and (org-up-heading-safe)
-                                            (string-match-p (regexp-quote part)
-                                                            (org-get-heading t t t t)))
+                                            (let ((h (org-get-heading t t t t)))
+                                              (or (string-match-p (regexp-quote part) h)
+                                                  (string-match-p (regexp-quote part)
+                                                                  (org-gtd-cli/strip-markup h)))))
                                  (setq path-match nil))))
                            (when path-match
                              (push (list (current-buffer) (point) cat-file
@@ -1703,6 +1714,56 @@ Preserves TODO state, priority, and tags."
                               heading ts rel-file)))))
           (t
            (princ "Error: provide a DATE or --clear\n")
+           (kill-emacs 1)))))))
+  (kill-emacs 0))
+
+;; --- set-priority ---
+
+(defun org-gtd-cli/set-priority (substring priority &optional clear index dry-run)
+  "Set or clear the priority on an existing task.
+PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (is-clear (and clear (not (equal clear "nil"))
+                        (not (string-empty-p clear))))
+         (priority (when (and priority (not (string-empty-p priority))
+                              (not (equal priority "nil")))
+                     (upcase priority)))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    ;; Validate priority value
+    (when (and (not is-clear) priority
+               (not (member priority '("A" "B" "C"))))
+      (princ (format "Error: \"%s\" is not a valid priority\nValid priorities: A, B, C\n"
+                     priority))
+      (kill-emacs 1))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (old-priority (org-entry-get nil "PRIORITY")))
+         (cond
+          (is-clear
+           (if is-dry-run
+               (princ (format "Would clear priority: \"%s\" (%s)\n"
+                              heading rel-file))
+             (condition-case nil
+                 (org-priority 'remove)
+               (user-error nil))  ; no-op if no priority cookie
+             (save-buffer)
+             (princ (format "Cleared priority: \"%s\" (%s)\n"
+                            heading rel-file))))
+          (priority
+           (if is-dry-run
+               (princ (format "Would set priority: \"%s\" [#%s] -> [#%s] (%s)\n"
+                              heading (or old-priority "B") priority rel-file))
+             (org-priority (string-to-char priority))
+             (save-buffer)
+             (princ (format "Priority: \"%s\" [#%s] -> [#%s] (%s)\n"
+                            heading (or old-priority "B") priority rel-file))))
+          (t
+           (princ "Error: provide a PRIORITY (A, B, or C) or --clear\n")
            (kill-emacs 1)))))))
   (kill-emacs 0))
 

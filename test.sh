@@ -1022,6 +1022,101 @@ assert_exit 0 "$LAST_RC" "exits 0"
 assert_file_contains "$TEST_DIR/tasks.org" "TODO Book a rental car" "state is TODO"
 
 # ══════════════════════════════════════════════════════════════════════════════
+# set-priority
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== set-priority ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: set priority A on a task with no priority
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/set-priority "Buy groceries" "A" nil nil nil))
+
+;; Test 1: change priority A → C
+(org-gtd-test/run 1 '(org-gtd-cli/set-priority "Buy groceries" "C" nil nil nil))
+
+;; Test 2: clear priority
+(org-gtd-test/run 2 '(org-gtd-cli/set-priority "Buy groceries" nil "t" nil nil))
+
+;; Test 3: clear on task with no priority (no-op)
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/set-priority "Buy groceries" nil "t" nil nil))
+
+;; Test 4: invalid priority value
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/set-priority "Buy groceries" "D" nil nil nil))
+
+;; Test 5: dry-run doesn't modify
+(org-gtd-test/reset)
+(org-gtd-test/run 5 '(org-gtd-cli/set-priority "Buy groceries" "A" nil nil "t"))
+
+;; Test 6: set priority on a task that already has one (Pay quarterly taxes has [#A])
+(org-gtd-test/reset)
+(org-gtd-test/run 6 '(org-gtd-cli/set-priority "Pay quarterly taxes" "C" nil nil nil))
+
+;; Test 7: lowercase input is accepted
+(org-gtd-test/reset)
+(org-gtd-test/run 7 '(org-gtd-cli/set-priority "Buy groceries" "a" nil nil nil))
+
+;; Test 8: index disambiguation
+(org-gtd-test/reset)
+(org-gtd-test/run 8 '(org-gtd-cli/set-priority "Buy" "A" nil "1" nil))
+ELISP
+run_batch_file
+
+echo "test: set priority A on task with no priority"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Priority:" "priority message"
+assert_output_contains "$LAST_OUTPUT" "[#B] -> [#A]" "shows old → new"
+assert_file_contains "$TEST_DIR/inbox.org" "[#A] Buy groceries" "priority cookie in file"
+
+echo "test: change priority A → C"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "[#A] -> [#C]" "shows A → C"
+assert_file_contains "$TEST_DIR/inbox.org" "[#C] Buy groceries" "priority C in file"
+
+echo "test: clear priority"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Cleared priority:" "clear message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "[#" "no priority cookie"
+
+echo "test: clear on task with no priority (no-op)"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Cleared priority:" "clear message"
+
+echo "test: invalid priority gives clean error"
+get_result 4
+assert_exit 1 "$LAST_RC" "exits 1"
+assert_output_contains "$LAST_OUTPUT" "not a valid priority" "clean error message"
+assert_output_contains "$LAST_OUTPUT" "A, B, C" "lists valid priorities"
+
+echo "test: dry-run doesn't modify"
+get_result 5
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would set priority:" "dry-run message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "[#A] Buy groceries" "file unchanged"
+
+echo "test: change existing priority"
+get_result 6
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "[#A] -> [#C]" "shows A → C"
+assert_file_contains "$TEST_DIR/tasks.org" "[#C] Pay quarterly taxes" "priority C in file"
+
+echo "test: lowercase input accepted"
+get_result 7
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" "[#A] Buy groceries" "priority A from lowercase"
+
+echo "test: index disambiguation"
+get_result 8
+assert_exit 0 "$LAST_RC" "exits 0"
+
+# ══════════════════════════════════════════════════════════════════════════════
 # refile
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -2915,6 +3010,65 @@ echo "test: delete — raw exact match (dry-run)"
 get_result 8
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Would delete:" "dry-run raw exact match"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# refile: markup-aware --to matching
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== refile: markup-aware --to matching ==="
+
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << 'ELISP'
+;; Test 0: --to with stripped markup matches marked-up heading
+;; "Fix the find command in org-gtd-cli" should match "Fix the =find= command in org-gtd-cli"
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/refile "Buy groceries" "Fix the find command in org-gtd-cli" nil nil nil))
+
+;; Test 1: --to with raw markup still works
+(org-gtd-test/reset)
+(org-gtd-test/run 1 '(org-gtd-cli/refile "Buy groceries" "Fix the =find= command in org-gtd-cli" nil nil nil))
+
+;; Test 2: --to path with stripped markup on leaf segment
+;; "Tools/Fix the find command in org-gtd-cli" → Tools / "Fix the =find= command in org-gtd-cli"
+(org-gtd-test/reset)
+(org-gtd-test/run 2 '(org-gtd-cli/refile "Buy groceries" "Tools/Fix the find command in org-gtd-cli" nil nil nil))
+
+;; Test 3: --to with stripped markup, dry-run
+(org-gtd-test/reset)
+(org-gtd-test/run 3 '(org-gtd-cli/refile "Buy groceries" "Fix the find command in org-gtd-cli" nil nil "t"))
+
+;; Test 4: --category still works normally (no regression)
+(org-gtd-test/reset)
+(org-gtd-test/run 4 '(org-gtd-cli/refile "Buy groceries" nil "Computers/Tools" nil nil))
+ELISP
+run_batch_file
+
+echo "test: --to with stripped markup matches marked-up heading"
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+assert_file_not_contains "$TEST_DIR/inbox.org" "Buy groceries" "removed from inbox"
+
+echo "test: --to with raw markup still works"
+get_result 1
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+
+echo "test: --to path with stripped markup on leaf segment"
+get_result 2
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
+
+echo "test: --to with stripped markup, dry-run"
+get_result 3
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Would refile" "dry-run message"
+assert_file_contains "$TEST_DIR/inbox.org" "Buy groceries" "still in inbox"
+
+echo "test: --category still works (no regression)"
+get_result 4
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
 
 echo ""
 echo "All tests completed."

@@ -396,6 +396,37 @@ writeShellApplication {
         run_elisp "(org-gtd-cli/set-state $(to_elisp "$SUBSTRING") $(to_elisp "$STATE") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
         ;;
 
+      set-priority)
+        shift
+        SUBSTRING="" PRIORITY="" CLEAR="" INDEX="" DRY_RUN=""
+        if [[ $# -gt 0 && ("''${1}" == "--help" || "''${1}" == "-h") ]]; then
+          echo "Usage: org-gtd-cli set-priority SUBSTR A|B|C [--clear] [--index N] [--dry-run]"; exit 0
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          SUBSTRING="$1"; shift
+        fi
+        if [[ $# -gt 0 && "''${1:0:2}" != "--" ]]; then
+          PRIORITY="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --clear)   CLEAR="t"; shift ;;
+            --index)   INDEX="$2"; shift 2 ;;
+            --dry-run) DRY_RUN="t"; shift ;;
+            *)         echo "Unknown option: $1" >&2; exit 1 ;;
+          esac
+        done
+        if [[ -z "$SUBSTRING" ]]; then
+          echo "Usage: org-gtd-cli set-priority SUBSTR A|B|C [--clear] [--index N] [--dry-run]" >&2
+          exit 1
+        fi
+        if [[ -z "$PRIORITY" && -z "$CLEAR" ]]; then
+          echo "Error: provide a PRIORITY (A, B, or C) or --clear" >&2
+          exit 1
+        fi
+        run_elisp "(org-gtd-cli/set-priority $(to_elisp "$SUBSTRING") $(to_elisp "$PRIORITY") $(to_elisp "$CLEAR") $(to_elisp "$INDEX") $(to_elisp "$DRY_RUN"))"
+        ;;
+
       refile)
         shift
         SUBSTRING="" TARGET="" CATEGORY="" INDEX="" DRY_RUN=""
@@ -713,6 +744,7 @@ writeShellApplication {
       set-body SUBSTR TEXT [--index N]
       set-done SUBSTR [--index N] [--dry-run]
       set-state SUBSTR STATE [--index N] [--dry-run]
+      set-priority SUBSTR A|B|C [--clear] [--index N] [--dry-run]
       set-next SUBSTR [--index N]
       refile SUBSTR --to TARGET|--category CAT [--index N] [--dry-run]
       move SUBSTR --up|--down|--before SIBL|--after SIBL [--index N]
