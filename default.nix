@@ -40,6 +40,16 @@ writeShellApplication {
       printf '%s' "$s"
     }
 
+    # Convert literal \n sequences to actual newlines in body text.
+    # Agents behind skill constraints write \\n in JSON which arrives as
+    # two literal characters (\, n) in the shell argument.  escape_elisp
+    # would then double the backslash, producing \\n in elisp — a literal
+    # backslash-n instead of a newline.
+    # Preserves intended literal \\n (double-backslash n) via placeholder.
+    unescape_body_newlines() {
+      printf '%s' "$1" | sed 's/\\\\n/\x00/g; s/\\n/\n/g; s/\x00/\\n/g'
+    }
+
     # Convert a value to elisp: empty/unset -> nil, otherwise quoted string
     to_elisp() {
       if [[ -z "''${1:-}" ]]; then
@@ -212,6 +222,7 @@ writeShellApplication {
           echo "Usage: org-gtd-cli add-task TITLE [OPTIONS]" >&2
           exit 1
         fi
+        BODY="$(unescape_body_newlines "$BODY")"
         run_elisp "(org-gtd-cli/add-task $(to_elisp "$TITLE") $(to_elisp "$BODY") $(to_elisp "$TAGS") $(to_elisp "$SCHEDULE") $(to_elisp "$DEADLINE") $(to_elisp "$PRIORITY") $(to_elisp "$FILE") $(to_elisp "$CATEGORY") $(to_elisp "$STATE"))"
         ;;
 
@@ -244,6 +255,7 @@ writeShellApplication {
           echo "Usage: org-gtd-cli add-subtask PARENT_SUBSTRING TITLE [OPTIONS]" >&2
           exit 1
         fi
+        BODY="$(unescape_body_newlines "$BODY")"
         run_elisp "(org-gtd-cli/add-subtask $(to_elisp "$PARENT") $(to_elisp "$TITLE") $(to_elisp "$BODY") $(to_elisp "$TAGS") $(to_elisp "$SCHEDULE") $(to_elisp "$DEADLINE") $(to_elisp "$PRIORITY") $(to_elisp "$STATE") $(to_elisp "$INDEX"))"
         ;;
 

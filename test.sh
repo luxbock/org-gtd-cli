@@ -3070,5 +3070,79 @@ get_result 4
 assert_exit 0 "$LAST_RC" "exits 0"
 assert_output_contains "$LAST_OUTPUT" "Refiled" "refile message"
 
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "=== unescape_body_newlines (literal \\n → newline) ==="
+
+# Define the function under test (same as in default.nix)
+unescape_body_newlines() {
+  printf '%s' "$1" | sed 's/\\\\n/\x00/g; s/\\n/\n/g; s/\x00/\\n/g'
+}
+
+echo "test: literal \\n converted to actual newline"
+RESULT="$(unescape_body_newlines 'Line one.\nLine two.')"
+if [[ "$RESULT" == "Line one."$'\n'"Line two." ]]; then
+  echo "  PASS: \\n becomes newline"; ((PASS++))
+else
+  echo "  FAIL: expected newline, got: $(printf '%q' "$RESULT")"; ((FAIL++))
+fi
+
+echo "test: literal \\\\n preserved as backslash-n"
+RESULT="$(unescape_body_newlines 'Keep \\n literal')"
+if [[ "$RESULT" == 'Keep \n literal' ]]; then
+  echo "  PASS: \\\\n stays as \\n"; ((PASS++))
+else
+  echo "  FAIL: expected literal \\n, got: $(printf '%q' "$RESULT")"; ((FAIL++))
+fi
+
+echo "test: no \\n sequences unchanged"
+RESULT="$(unescape_body_newlines 'No escapes here')"
+if [[ "$RESULT" == "No escapes here" ]]; then
+  echo "  PASS: plain text unchanged"; ((PASS++))
+else
+  echo "  FAIL: expected unchanged text, got: $(printf '%q' "$RESULT")"; ((FAIL++))
+fi
+
+echo "test: empty string unchanged"
+RESULT="$(unescape_body_newlines '')"
+if [[ "$RESULT" == "" ]]; then
+  echo "  PASS: empty string unchanged"; ((PASS++))
+else
+  echo "  FAIL: expected empty, got: $(printf '%q' "$RESULT")"; ((FAIL++))
+fi
+
+echo "test: multiple \\n in one string"
+RESULT="$(unescape_body_newlines 'A\nB\nC')"
+if [[ "$RESULT" == "A"$'\n'"B"$'\n'"C" ]]; then
+  echo "  PASS: multiple \\n converted"; ((PASS++))
+else
+  echo "  FAIL: expected two newlines, got: $(printf '%q' "$RESULT")"; ((FAIL++))
+fi
+
+echo "test: integration — add-task with unescaped body produces real newlines"
+# Simulate the full wrapper flow: unescape_body_newlines then escape_elisp then elisp.
+# The body text has literal \n (as agents send via skill constraints).
+UNESCAPED="$(unescape_body_newlines 'Step one.\nStep two.\nStep three.')"
+# escape_elisp equivalent (same as default.nix wrapper)
+_test_escape_elisp() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+ESCAPED="$(_test_escape_elisp "$UNESCAPED")"
+BATCH_FILE=$(mktemp --suffix=.el)
+cat > "$BATCH_FILE" << ELISP
+(org-gtd-test/reset)
+(org-gtd-test/run 0 '(org-gtd-cli/add-task "Newline test" "$ESCAPED" nil nil nil nil nil nil nil))
+ELISP
+run_batch_file
+get_result 0
+assert_exit 0 "$LAST_RC" "exits 0"
+assert_file_contains "$TEST_DIR/inbox.org" "Step one." "first line present"
+assert_file_contains "$TEST_DIR/inbox.org" "Step two." "second line present"
+assert_file_contains "$TEST_DIR/inbox.org" "Step three." "third line present"
+assert_file_not_contains "$TEST_DIR/inbox.org" 'Step one.\nStep two.' "no literal \\n in file"
+
 echo ""
 echo "All tests completed."
