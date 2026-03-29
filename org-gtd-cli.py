@@ -200,8 +200,10 @@ def cmd_append_body(args):
 
 
 def cmd_set_body(args):
+    # set-body allows empty string to remove body — pass "" not nil
+    text_elisp = '""' if args.text is not None and args.text == "" else to_elisp(args.text)
     expr = (f'(org-gtd-cli/set-body {to_elisp(args.substr)} '
-            f'{to_elisp(args.text)} {to_elisp(args.index)})')
+            f'{text_elisp} {to_elisp(args.index)})')
     return run_elisp(expr)
 
 
