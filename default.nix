@@ -3,6 +3,7 @@
 , coreutils
 , emacs-nox
 , python3
+, python3Packages
 , runCommand
 , writeShellScriptBin
 , symlinkJoin
@@ -34,15 +35,16 @@ symlinkJoin {
   };
 
   passthru.tests = runCommand "org-gtd-cli-tests" {
-    nativeBuildInputs = [ emacs-nox coreutils ];
+    nativeBuildInputs = [ emacs-nox coreutils python3 python3Packages.pytest ];
   } ''
-    cp ${./test.sh} test.sh
+    cp ${pythonScript} org-gtd-cli.py
+    cp ${./test_org_gtd_cli.py} test_org_gtd_cli.py
     cp ${coreFile} gtd-core.el
-    cp ${./org-gtd-cli.el} org-gtd-cli.el
-    cp ${./test-harness.el} test-harness.el
+    cp ${elispFile} org-gtd-cli.el
     cp -r ${./fixtures} fixtures
-    chmod +x test.sh
-    bash test.sh
+    export ORG_GTD_CORE_FILE="$PWD/gtd-core.el"
+    export ORG_GTD_ELISP_FILE="$PWD/org-gtd-cli.el"
+    python3 -m pytest test_org_gtd_cli.py -q
     touch $out
   '';
 }
