@@ -8,6 +8,7 @@ Port of the 3148-line bash test suite (46 sections, 744+ assertions).
 """
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -2374,3 +2375,195 @@ class TestUnescapeBodyNewlines:
         assert "Step two." in text
         assert "Step three." in text
         assert "Step one.\\nStep two." not in text
+
+
+# =========================================================================
+# Body file input and literal dash rejection
+# =========================================================================
+
+class TestBodyFileInput:
+    """Test --body-file FILE and --body-file - (stdin) support."""
+
+    def test_set_body_from_file(self, org_dir, tmp_path):
+        body_file = tmp_path / "body.txt"
+        body_file.write_text("Body from file content.")
+        stdout, stderr, rc = run_cli(
+            "set-body", "Write quarterly report", "--body-file", str(body_file),
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert "Body from file content." in (org_dir / "tasks.org").read_text()
+
+    def test_append_body_from_file(self, org_dir, tmp_path):
+        body_file = tmp_path / "append.txt"
+        body_file.write_text("Appended from file.")
+        stdout, stderr, rc = run_cli(
+            "append-body", "Write quarterly report", "--body-file", str(body_file),
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert "Appended from file." in (org_dir / "tasks.org").read_text()
+
+    def test_add_task_body_from_file(self, org_dir, tmp_path):
+        body_file = tmp_path / "body.txt"
+        body_file.write_text("Task body from file.")
+        stdout, stderr, rc = run_cli(
+            "add-task", "File body test", "--body-file", str(body_file),
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert "Task body from file." in (org_dir / "inbox.org").read_text()
+
+    def test_set_body_from_stdin(self, org_dir):
+        """--body-file - reads from stdin."""
+        env = os.environ.copy()
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        cmd = ["python3", str(CLI_SCRIPT),
+               "set-body", "Write quarterly report", "--body-file", "-"]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=env,
+            input="Stdin body content.", timeout=30,
+        )
+        assert result.returncode == 0
+        assert "Stdin body content." in (org_dir / "tasks.org").read_text()
+
+    def test_append_body_from_stdin(self, org_dir):
+        env = os.environ.copy()
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        cmd = ["python3", str(CLI_SCRIPT),
+               "append-body", "Write quarterly report", "--body-file", "-"]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=env,
+            input="Stdin append.", timeout=30,
+        )
+        assert result.returncode == 0
+        assert "Stdin append." in (org_dir / "tasks.org").read_text()
+
+    def test_body_file_overrides_positional_text(self, org_dir, tmp_path):
+        """--body-file takes precedence over positional TEXT."""
+        body_file = tmp_path / "body.txt"
+        body_file.write_text("From file.")
+        stdout, stderr, rc = run_cli(
+            "set-body", "Write quarterly report", "positional text", "--body-file", str(body_file),
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        text = (org_dir / "tasks.org").read_text()
+        assert "From file." in text
+        assert "positional text" not in text
+
+
+class TestRejectLiteralDash:
+    """Reject literal '-' as TEXT in body commands."""
+
+    def test_set_body_rejects_dash(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-body", "Write quarterly report", "-",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        assert "--body-file" in stderr
+
+    def test_append_body_rejects_dash(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "append-body", "Write quarterly report", "-",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        assert "--body-file" in stderr
+
+    def test_add_task_rejects_dash_body(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Dash test", "--body", "-",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        assert "--body-file" in stderr
+
+
+# ===========================================================================
+# JSON infrastructure
+# ===========================================================================
+
+def run_cli_json(*args, org_dir):
+    """Run org-gtd-cli with --json flag. Returns (parsed_json, stderr, rc).
+
+    If stdout is valid JSON, returns the parsed dict/list.
+    If stdout is empty or not valid JSON, returns None.
+    """
+    stdout, stderr, rc = run_cli("--json", *args, org_dir=org_dir)
+    if stdout.strip():
+        try:
+            return json.loads(stdout), stderr, rc
+        except json.JSONDecodeError:
+            return None, stderr, rc
+    return None, stderr, rc
+
+
+class TestJsonInfrastructure:
+    """Tests for the --json flag, env var passing, and error formatting."""
+
+    def test_json_flag_on_search_returns_valid_json(self, org_dir):
+        """--json on a simple command returns valid JSON with version and command."""
+        data, stderr, rc = run_cli_json("search", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        assert data["version"] == 1
+        assert data["command"] == "search"
+
+    def test_json_flag_on_search_no_match(self, org_dir):
+        """--json search with no match returns empty tasks array."""
+        data, stderr, rc = run_cli_json(
+            "search", "nonexistent_xyz_task_12345", org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert data["tasks"] == []
+        assert data["count"] == 0
+
+    def test_json_error_on_stderr(self, org_dir):
+        """--json errors produce JSON on stderr."""
+        data, stderr, rc = run_cli_json("show", "nonexistent_xyz_12345", org_dir=org_dir)
+        assert rc == 1
+        # stderr contains Emacs loading messages mixed with our JSON errors
+        # Find the first line that looks like JSON
+        err_data = None
+        for line in stderr.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                err_data = json.loads(line)
+                break
+        assert err_data is not None, f"No JSON error found in stderr: {stderr}"
+        assert "error" in err_data
+
+    def test_json_rejected_for_agenda_view(self, org_dir):
+        """--json on agenda-view returns error."""
+        stdout, stderr, rc = run_cli("--json", "agenda-view", org_dir=org_dir)
+        assert rc == 1
+        err_data = json.loads(stderr.strip())
+        assert "error" in err_data
+        assert "agenda-view" in err_data["error"]
+
+    def test_json_rejected_for_org_timestamp(self, org_dir):
+        """--json on org-timestamp returns error."""
+        stdout, stderr, rc = run_cli("--json", "org-timestamp", "2026-03-15", org_dir=org_dir)
+        assert rc == 1
+        err_data = json.loads(stderr.strip())
+        assert "error" in err_data
+        assert "org-timestamp" in err_data["error"]
+
+    def test_text_mode_unchanged(self, org_dir):
+        """Without --json, output is still human-readable text (not JSON)."""
+        stdout, stderr, rc = run_cli("search", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert "[1]" in stdout  # Text format uses [index] prefix
+        # Should not be valid JSON
+        try:
+            json.loads(stdout)
+            assert False, "Text mode should not produce valid JSON"
+        except json.JSONDecodeError:
+            pass

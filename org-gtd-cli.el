@@ -39,14 +39,34 @@
         (sequence "WAITING(w/!)" "DEFER(f/!)" "|" "CANCELLED(c/!)")))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
+;; JSON mode
+;; ══════════════════════════════════════════════════════════════════════════════
+
+(defvar org-gtd-cli/json-mode
+  (equal (getenv "ORG_GTD_CLI_JSON") "1")
+  "When non-nil, output JSON instead of human-readable text.")
+
+(defun org-gtd-cli/output (alist)
+  "Output ALIST as JSON (json-mode) or do nothing (text mode).
+In JSON mode, serializes ALIST with `json-serialize' and prints to stdout.
+In text mode, this is a no-op — callers handle their own text output."
+  (when org-gtd-cli/json-mode
+    (princ (json-serialize alist))
+    (princ "\n")))
+
+;; ══════════════════════════════════════════════════════════════════════════════
 ;; Error output
 ;; ══════════════════════════════════════════════════════════════════════════════
 
 (defun org-gtd-cli/error (fmt &rest args)
   "Write a diagnostic/error message to stderr.
 In Emacs batch mode, `message' writes to stderr while `princ' writes to stdout.
+In JSON mode, outputs {\"error\": \"...\"}  to stderr.
 Use this for errors, warnings, and hints — never for command output data."
-  (apply #'message fmt args))
+  (if org-gtd-cli/json-mode
+      (let ((msg (apply #'format fmt args)))
+        (message "%s" (json-serialize `((error . ,msg)))))
+    (apply #'message fmt args)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
 ;; Body text validation
@@ -509,15 +529,61 @@ FILE-NAME restricts search to a single file in org-directory."
                                               (org-gtd-cli/strip-markup heading)))
                           (or (not tag-filter)
                               (org-gtd-cli/match-tag-filter tag-filter tags)))
-                 (push (list state heading rel-file) matches))))))))
+                 (let ((parent-heading
+                        (save-excursion
+                          (if (org-up-heading-safe)
+                              (org-get-heading t t t t)
+                            nil)))
+                       (is-project
+                        (save-excursion
+                          (let ((child-level (1+ (org-current-level)))
+                                (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+                                (found nil))
+                            (save-excursion
+                              (forward-line 1)
+                              (while (and (not found) (< (point) subtree-end)
+                                          (re-search-forward org-heading-regexp subtree-end t))
+                                (when (and (= (org-current-level) child-level)
+                                           (org-get-todo-state))
+                                  (setq found t))))
+                            found))))
+                   (push (list state heading rel-file
+                               (vconcat (mapcar #'identity tags))
+                               parent-heading is-project)
+                         matches)))))))))
     (setq matches (nreverse matches))
-    (if (null matches)
-        (org-gtd-cli/error "No matches.")
-      (let ((i 1))
-        (dolist (m matches)
-          (princ (format "[%d] %s %s (%s)\n"
-                         i (nth 0 m) (nth 1 m) (nth 2 m)))
-          (cl-incf i)))))
+    (if org-gtd-cli/json-mode
+        (let ((tasks '())
+              (i 1))
+          (dolist (m matches)
+            (let* ((state (nth 0 m))
+                   (heading (nth 1 m))
+                   (rel-file (nth 2 m))
+                   (tags (nth 3 m))
+                   (parent (nth 4 m))
+                   (is-project (nth 5 m)))
+              (push `((index . ,i)
+                      (heading . ,heading)
+                      (state . ,state)
+                      (tags . ,(or tags []))
+                      (file . ,rel-file)
+                      (parent . ,parent)
+                      (is_project . ,(if is-project t :false)))
+                    tasks)
+              (cl-incf i)))
+          (org-gtd-cli/output
+           `((version . 1)
+             (command . "search")
+             (tasks . ,(apply #'vector (nreverse tasks)))
+             (count . ,(length matches)))))
+      ;; Text mode
+      (if (null matches)
+          (org-gtd-cli/error "No matches.")
+        (let ((i 1))
+          (dolist (m matches)
+            (princ (format "[%d] %s %s (%s)\n"
+                           i (nth 0 m) (nth 1 m) (nth 2 m)))
+            (cl-incf i))))))
   (kill-emacs 0))
 
 ;; --- show ---

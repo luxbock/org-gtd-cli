@@ -34,6 +34,29 @@ def to_elisp(value: str | None) -> str:
     return f'"{escape_elisp(value)}"'
 
 
+def resolve_body_text(text: str | None, body_file: str | None) -> str | None:
+    """Resolve body text from positional arg, --body-file, or stdin.
+
+    Precedence: --body-file > positional text.
+    --body-file with path "-" reads stdin.
+    Rejects literal '-' as positional text (agent likely intended stdin).
+    """
+    if body_file is not None:
+        if body_file == "-":
+            return sys.stdin.read()
+        with open(body_file) as f:
+            return f.read()
+    if text is not None:
+        if text == "-":
+            print("Error: literal '-' as body text is not supported. "
+                  "Use --body-file - to read from stdin, or "
+                  "--body-file FILE to read from a file.",
+                  file=sys.stderr)
+            return None  # sentinel — caller should exit 1
+        return text
+    return None
+
+
 def unescape_body_newlines(text: str) -> str:
     """Convert literal \\n sequences to actual newlines in body text.
 
@@ -75,7 +98,7 @@ def normalize_tags(tag_list: list[str] | None) -> str | None:
     return "|".join(and_groups)
 
 
-def run_elisp(expr: str) -> int:
+def run_elisp(expr: str, json_mode: bool = False) -> int:
     """Run an elisp expression in batch Emacs. Returns exit code."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cmd = [
@@ -86,8 +109,11 @@ def run_elisp(expr: str) -> int:
             "-l", ELISP_FILE,
             "--eval", expr,
         ]
+        env = os.environ.copy()
+        if json_mode:
+            env["ORG_GTD_CLI_JSON"] = "1"
         # Emacs --batch sends its own diagnostics to stderr; let them through
-        result = subprocess.run(cmd, capture_output=False)
+        result = subprocess.run(cmd, capture_output=False, env=env)
         return result.returncode
 
 
@@ -107,6 +133,10 @@ class CompactHelpFormatter(argparse.RawDescriptionHelpFormatter):
 # Each handler extracts args from the namespace and calls run_elisp.
 
 def cmd_org_timestamp(args):
+    if args.json:
+        print('{"error": "--json is not supported for org-timestamp"}',
+              file=sys.stderr)
+        return 1
     expr = (f'(org-gtd-cli/org-timestamp {to_elisp(args.date)} '
             f'{to_elisp(args.time)} {to_elisp("t" if args.inactive else None)})')
     return run_elisp(expr)
@@ -116,7 +146,7 @@ def cmd_agenda(args):
     tag = normalize_tags(args.tag)
     expr = (f'(org-gtd-cli/agenda {to_elisp(args.state)} '
             f'{to_elisp(tag)} {to_elisp(getattr(args, "from"))} {to_elisp(args.to)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_search(args):
@@ -126,31 +156,31 @@ def cmd_search(args):
         return 1
     expr = (f'(org-gtd-cli/search {to_elisp(args.substr)} '
             f'{to_elisp(args.state)} {to_elisp(tag)} {to_elisp(args.file)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_show(args):
     expr = (f'(org-gtd-cli/show {to_elisp(args.substr)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.plain else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_subtasks(args):
     expr = f'(org-gtd-cli/subtasks {to_elisp(args.substr)} {to_elisp(args.index)})'
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_categories(args):
     expr = f'(org-gtd-cli/categories {to_elisp(args.file)})'
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
-def cmd_projects(_args):
-    return run_elisp("(org-gtd-cli/projects)")
+def cmd_projects(args):
+    return run_elisp("(org-gtd-cli/projects)", json_mode=args.json)
 
 
-def cmd_process_agent_tasks(_args):
-    return run_elisp("(org-gtd-cli/process-agent-tasks)")
+def cmd_process_agent_tasks(args):
+    return run_elisp("(org-gtd-cli/process-agent-tasks)", json_mode=args.json)
 
 
 def cmd_add_task(args):
@@ -158,23 +188,29 @@ def cmd_add_task(args):
     if not title:
         print("Error: TITLE is required", file=sys.stderr)
         return 1
-    body = unescape_body_newlines(args.body) if args.body else args.body
+    raw_body = resolve_body_text(args.body, args.body_file)
+    if args.body == "-" and raw_body is None:
+        return 1  # resolve_body_text already printed error
+    body = unescape_body_newlines(raw_body) if raw_body else raw_body
     expr = (f'(org-gtd-cli/add-task {to_elisp(title)} {to_elisp(body)} '
             f'{to_elisp(args.tags)} {to_elisp(args.schedule)} '
             f'{to_elisp(args.deadline)} {to_elisp(args.priority)} '
             f'{to_elisp(args.file)} {to_elisp(args.category)} '
             f'{to_elisp(args.state)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_add_subtask(args):
-    body = unescape_body_newlines(args.body) if args.body else args.body
+    raw_body = resolve_body_text(args.body, args.body_file)
+    if args.body == "-" and raw_body is None:
+        return 1
+    body = unescape_body_newlines(raw_body) if raw_body else raw_body
     expr = (f'(org-gtd-cli/add-subtask {to_elisp(args.parent)} '
             f'{to_elisp(args.title)} {to_elisp(body)} '
             f'{to_elisp(args.tags)} {to_elisp(args.schedule)} '
             f'{to_elisp(args.deadline)} {to_elisp(args.priority)} '
             f'{to_elisp(args.state)} {to_elisp(args.index)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_add_event(args):
@@ -182,7 +218,7 @@ def cmd_add_event(args):
             f'{to_elisp(args.date)} {to_elisp(args.time)} '
             f'{to_elisp(args.tag)} {to_elisp(args.file)} '
             f'{to_elisp(args.end_date)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_add_note(args):
@@ -193,34 +229,48 @@ def cmd_add_note(args):
     expr = (f'(org-gtd-cli/add-note {to_elisp(title)} '
             f'{to_elisp(args.link_task)} {to_elisp(args.tags)} '
             f'{to_elisp(args.sections)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_append_body(args):
+    text = resolve_body_text(args.text, args.body_file)
+    if args.text == "-" and text is None:
+        return 1
+    if text is None:
+        print("Error: provide TEXT or --body-file", file=sys.stderr)
+        return 1
+    text = unescape_body_newlines(text) if text else text
     expr = (f'(org-gtd-cli/append-body {to_elisp(args.substr)} '
-            f'{to_elisp(args.text)} {to_elisp(args.index)})')
-    return run_elisp(expr)
+            f'{to_elisp(text)} {to_elisp(args.index)})')
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_body(args):
+    text = resolve_body_text(args.text, args.body_file)
+    if args.text == "-" and text is None:
+        return 1
+    if text is None and args.body_file is None:
+        print("Error: provide TEXT or --body-file", file=sys.stderr)
+        return 1
+    text = unescape_body_newlines(text) if text else text
     # set-body allows empty string to remove body — pass "" not nil
-    text_elisp = '""' if args.text is not None and args.text == "" else to_elisp(args.text)
+    text_elisp = '""' if text is not None and text == "" else to_elisp(text)
     expr = (f'(org-gtd-cli/set-body {to_elisp(args.substr)} '
             f'{text_elisp} {to_elisp(args.index)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_done(args):
     expr = (f'(org-gtd-cli/set-done {to_elisp(args.substr)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_state(args):
     expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
             f'{to_elisp(args.state)} {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_priority(args):
@@ -230,19 +280,19 @@ def cmd_set_priority(args):
     expr = (f'(org-gtd-cli/set-priority {to_elisp(args.substr)} '
             f'{to_elisp(args.priority)} {to_elisp("t" if args.clear else None)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_cancelled(args):
     expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
             f'"CANCELLED" {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_next(args):
     expr = f'(org-gtd-cli/set-next {to_elisp(args.substr)} {to_elisp(args.index)})'
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_refile(args):
@@ -255,7 +305,7 @@ def cmd_refile(args):
     expr = (f'(org-gtd-cli/refile {to_elisp(args.substr)} '
             f'{to_elisp(args.to)} {to_elisp(args.category)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_move(args):
@@ -277,14 +327,14 @@ def cmd_move(args):
         return 1
     expr = (f'(org-gtd-cli/move {to_elisp(args.substr)} '
             f'{to_elisp(direction)} {to_elisp(sibling)} {to_elisp(args.index)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_rename(args):
     expr = (f'(org-gtd-cli/rename {to_elisp(args.substr)} '
             f'{to_elisp(args.newtitle)} {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_schedule(args):
@@ -295,7 +345,7 @@ def cmd_set_schedule(args):
             f'{to_elisp(args.date)} {to_elisp(args.time)} '
             f'{to_elisp("t" if args.clear else None)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_deadline(args):
@@ -306,7 +356,7 @@ def cmd_set_deadline(args):
             f'{to_elisp(args.date)} {to_elisp(args.time)} '
             f'{to_elisp("t" if args.clear else None)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_tags(args):
@@ -317,10 +367,15 @@ def cmd_set_tags(args):
     expr = (f'(org-gtd-cli/set-tags {to_elisp(args.substr)} '
             f'{to_elisp(args.add)} {to_elisp(args.remove)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_agenda_view(args):
+    if args.json:
+        print('{"error": "--json is not supported for agenda-view", '
+              '"hint": "Use agenda or search with --json instead."}',
+              file=sys.stderr)
+        return 1
     key = args.key if args.key else " "
     expr = f'(org-gtd-cli/agenda-view {to_elisp(key)})'
     return run_elisp(expr)
@@ -338,18 +393,18 @@ def cmd_archive(args):
     else:
         expr = (f'(org-gtd-cli/archive {to_elisp(args.substr)} '
                 f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_delete(args):
     expr = (f'(org-gtd-cli/delete {to_elisp(args.heading)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_fix_timestamps(args):  # noqa: unused 'args' used for dry_run
     expr = f'(org-gtd-cli/fix-timestamps {to_elisp("t" if args.dry_run else None)})'
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json)
 
 
 # --- Parser construction ---
@@ -405,8 +460,10 @@ Run 'org-gtd-cli <command> -h' for command details."""
         description="CLI for org-mode GTD system management",
         epilog=epilog,
         formatter_class=CompactHelpFormatter,
-        usage="org-gtd-cli <command> [options]",
+        usage="org-gtd-cli [--json] <command> [options]",
     )
+    parser.add_argument("--json", action="store_true",
+                        help="Output structured JSON instead of human-readable text")
     sub = parser.add_subparsers(dest="command")
 
     # --- Querying ---
@@ -463,6 +520,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--title", dest="title_flag", default=None,
                    help="Task title (alternative to positional)")
     p.add_argument("--body", help="Body text below the heading")
+    p.add_argument("--body-file", dest="body_file",
+                   help="Read body from FILE (use - for stdin)")
     p.add_argument("--tags", help="Comma-separated tags")
     p.add_argument("--schedule", help="SCHEDULED date")
     p.add_argument("--deadline", help="DEADLINE date")
@@ -476,6 +535,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("parent", metavar="SUBSTR", help="Parent heading substring")
     p.add_argument("title", metavar="TITLE", help="Subtask title")
     p.add_argument("--body", help="Body text")
+    p.add_argument("--body-file", dest="body_file",
+                   help="Read body from FILE (use - for stdin)")
     p.add_argument("--tags", help="Comma-separated tags")
     p.add_argument("--schedule", help="SCHEDULED date")
     p.add_argument("--deadline", help="DEADLINE date")
@@ -593,13 +654,19 @@ Run 'org-gtd-cli <command> -h' for command details."""
 
     p = sub.add_parser("append-body", help="Append text to task body")
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("text", metavar="TEXT", help="Text to append")
+    p.add_argument("text", nargs="?", default=None, metavar="TEXT",
+                   help="Text to append (optional when --body-file is used)")
+    p.add_argument("--body-file", dest="body_file",
+                   help="Read text from FILE (use - for stdin)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_append_body)
 
     p = sub.add_parser("set-body", help="Replace task body")
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("text", metavar="TEXT", help="New body text")
+    p.add_argument("text", nargs="?", default=None, metavar="TEXT",
+                   help="New body text (optional when --body-file is used)")
+    p.add_argument("--body-file", dest="body_file",
+                   help="Read text from FILE (use - for stdin)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_set_body)
 
