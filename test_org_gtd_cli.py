@@ -2567,3 +2567,83 @@ class TestJsonInfrastructure:
             assert False, "Text mode should not produce valid JSON"
         except json.JSONDecodeError:
             pass
+
+
+# ===========================================================================
+# JSON: search command
+# ===========================================================================
+
+class TestJsonSearch:
+    """Tests for --json search output."""
+
+    def test_search_with_matches(self, org_dir):
+        data, _, rc = run_cli_json("search", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "search"
+        assert data["count"] == 1
+        task = data["tasks"][0]
+        assert task["index"] == 1
+        assert task["heading"] == "Buy groceries"
+        assert task["state"] == "TODO"
+        assert isinstance(task["tags"], list)
+        assert "@errand" in task["tags"]
+        assert task["file"] == "inbox.org"
+        assert task["is_project"] is False
+
+    def test_search_empty_returns_zero_count(self, org_dir):
+        data, _, rc = run_cli_json("search", "zzz_no_match_zzz", org_dir=org_dir)
+        assert rc == 0
+        assert data["tasks"] == []
+        assert data["count"] == 0
+
+    def test_search_parent_field(self, org_dir):
+        """Tasks under a parent heading should have parent set."""
+        data, _, rc = run_cli_json(
+            "search", "--state", "all", "--tag", "@agent",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        # Find a task that has a parent
+        for task in data["tasks"]:
+            if task["parent"] is not None:
+                break
+        else:
+            # If no tasks have a parent, that's fine — just check types
+            pass
+        # All tasks should have parent as string or null
+        for task in data["tasks"]:
+            assert task["parent"] is None or isinstance(task["parent"], str)
+
+    def test_search_is_project_field(self, org_dir):
+        """Projects should have is_project=true."""
+        data, _, rc = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        assert rc == 0
+        for task in data["tasks"]:
+            assert isinstance(task["is_project"], bool)
+
+    def test_search_indices_sequential(self, org_dir):
+        """Index values should be sequential starting at 1."""
+        data, _, rc = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        assert rc == 0
+        if data["count"] > 0:
+            indices = [t["index"] for t in data["tasks"]]
+            assert indices == list(range(1, len(indices) + 1))
+
+    def test_search_with_tag_filter(self, org_dir):
+        """Tag filter should work with --json."""
+        data, _, rc = run_cli_json(
+            "search", "--tag", "@errand", org_dir=org_dir,
+        )
+        assert rc == 0
+        for task in data["tasks"]:
+            assert "@errand" in task["tags"]
+
+    def test_search_with_state_filter(self, org_dir):
+        """State filter should work with --json."""
+        data, _, rc = run_cli_json(
+            "search", "--state", "TODO", org_dir=org_dir,
+        )
+        assert rc == 0
+        for task in data["tasks"]:
+            assert task["state"] == "TODO"

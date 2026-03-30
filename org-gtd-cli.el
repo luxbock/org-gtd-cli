@@ -567,7 +567,7 @@ FILE-NAME restricts search to a single file in org-directory."
                       (state . ,state)
                       (tags . ,(or tags []))
                       (file . ,rel-file)
-                      (parent . ,parent)
+                      (parent . ,(or parent :null))
                       (is_project . ,(if is-project t :false)))
                     tasks)
               (cl-incf i)))
