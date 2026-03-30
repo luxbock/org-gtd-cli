@@ -217,7 +217,7 @@ class TestAddTask:
             org_dir=org_dir,
         )
         assert rc == 1
-        assert "Error" in stdout
+        assert "Error" in stderr
 
     def test_category_path_match(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Path task", "--category", "Computers/Agents", org_dir=org_dir)
@@ -228,9 +228,9 @@ class TestAddTask:
     def test_ambiguous_category(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Ambig task", "--category", "Tools", org_dir=org_dir)
         assert rc == 2
-        assert "Multiple category matches" in stdout
-        assert "Computers/Tools" in stdout
-        assert "Research/Tools" in stdout
+        assert "Multiple category matches" in stderr
+        assert "Computers/Tools" in stderr
+        assert "Research/Tools" in stderr
 
     def test_path_disambiguates(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Disambig task", "--category", "Research/Tools", org_dir=org_dir)
@@ -241,7 +241,7 @@ class TestAddTask:
     def test_wrong_path_not_found(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Wrong path", "--category", "Work/Agents", org_dir=org_dir)
         assert rc == 1
-        assert "not found" in stdout
+        assert "not found" in stderr
 
     def test_category_skips_todo_headings_holiday(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Holiday test task", "--category", "Holiday", org_dir=org_dir)
@@ -252,7 +252,7 @@ class TestAddTask:
     def test_category_only_todo_matches_returns_not_found(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Design test task", "--category", "Design", org_dir=org_dir)
         assert rc == 1
-        assert "not found" in stdout
+        assert "not found" in stderr
 
     def test_category_path_to_plain_heading_under_task(self, org_dir):
         stdout, stderr, rc = run_cli(
@@ -266,9 +266,9 @@ class TestAddTask:
     def test_category_resources_ambiguous(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Ambig resources task", "--category", "Resources", org_dir=org_dir)
         assert rc == 2
-        assert "Multiple category matches" in stdout
-        assert "Improve agent workflow/Resources" in stdout
-        assert "Research/Resources" in stdout
+        assert "Multiple category matches" in stderr
+        assert "Improve agent workflow/Resources" in stderr
+        assert "Research/Resources" in stderr
 
 
 # ===========================================================================
@@ -400,12 +400,12 @@ class TestSearch:
     def test_no_matches_returns_exit_0(self, org_dir):
         stdout, stderr, rc = run_cli("search", "zzzznonexistent", org_dir=org_dir)
         assert rc == 0
-        assert "No matches." in stdout
+        assert "No matches." in stderr
 
     def test_empty_substr_returns_exit_1(self, org_dir):
         stdout, stderr, rc = run_cli("search", "", org_dir=org_dir)
         assert rc == 1
-        assert "Error" in stdout
+        assert "Error" in stderr
 
     def test_tag_filter(self, org_dir):
         stdout, stderr, rc = run_cli("search", "backups", "--tag", "@agent", org_dir=org_dir)
@@ -433,7 +433,7 @@ class TestSearch:
     def test_file_nonexistent(self, org_dir):
         stdout, stderr, rc = run_cli("search", "buy", "--file", "nonexistent.org", org_dir=org_dir)
         assert rc == 1
-        assert "file not found" in stdout
+        assert "file not found" in stderr
 
     def test_tag_inherited(self, org_dir):
         stdout, stderr, rc = run_cli("search", "report", "--tag", "work", org_dir=org_dir)
@@ -449,7 +449,7 @@ class TestSearch:
     def test_valid_state_with_no_matches(self, org_dir):
         stdout, stderr, rc = run_cli("search", "formicarium", "--state", "CANCELLED", org_dir=org_dir)
         assert rc == 0
-        assert "No matches." in stdout
+        assert "No matches." in stderr
 
 
 # ===========================================================================
@@ -561,7 +561,7 @@ class TestCategories:
     def test_categories_nonexistent_file(self, org_dir):
         stdout, stderr, rc = run_cli("categories", "--file", "nonexistent.org", org_dir=org_dir)
         assert rc == 1
-        assert "File not found" in stdout
+        assert "File not found" in stderr
 
 
 # ===========================================================================
@@ -626,8 +626,8 @@ class TestDone:
     def test_exit_2_on_ambiguous(self, org_dir):
         stdout, stderr, rc = run_cli("set-done", "Buy", org_dir=org_dir)
         assert rc == 2
-        assert "[1]" in stdout
-        assert "[2]" in stdout
+        assert "[1]" in stderr
+        assert "[2]" in stderr
 
     def test_index_selects_match(self, org_dir):
         stdout, stderr, rc = run_cli("set-done", "Buy", "--index", "1", org_dir=org_dir)
@@ -740,8 +740,8 @@ class TestSetState:
     def test_invalid_state_clean_error(self, org_dir):
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "INVALID", org_dir=org_dir)
         assert rc == 1
-        assert "not a valid state" in stdout
-        assert "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" in stdout
+        assert "not a valid state" in stderr
+        assert "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" in stderr
 
     def test_defer_to_waiting_cleans_defer_tag(self, org_dir):
         # Multi-step: DEFER then WAITING
@@ -796,8 +796,8 @@ class TestSetPriority:
     def test_invalid_priority(self, org_dir):
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "D", org_dir=org_dir)
         assert rc == 1
-        assert "not a valid priority" in stdout
-        assert "A, B, C" in stdout
+        assert "not a valid priority" in stderr
+        assert "A, B, C" in stderr
 
     def test_dry_run(self, org_dir):
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "A", "--dry-run", org_dir=org_dir)
@@ -862,7 +862,7 @@ class TestRefileSelfMatch:
         run_cli("add-task", "xyzzy", "--file", "inbox.org", org_dir=org_dir)
         stdout, stderr, rc = run_cli("refile", "xyzzy", "--to", "xyzzy", org_dir=org_dir)
         assert rc == 1
-        assert "self-match" in stdout
+        assert "self-match" in stderr
         assert "xyzzy" in (org_dir / "inbox.org").read_text()
 
     def test_subtree_child_also_counts_as_self_match(self, org_dir):
@@ -870,7 +870,7 @@ class TestRefileSelfMatch:
         run_cli("add-subtask", "zqxjk", "zqxjk", org_dir=org_dir)
         stdout, stderr, rc = run_cli("refile", "zqxjk", "--to", "zqxjk", "--index", "1", org_dir=org_dir)
         assert rc == 1
-        assert "skipped 2 self-match" in stdout
+        assert "skipped 2 self-match" in stderr
         assert "zqxjk" in (org_dir / "inbox.org").read_text()
 
 
@@ -888,7 +888,7 @@ class TestRefileToExact:
     def test_partial_match_fails(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Tool", org_dir=org_dir)
         assert rc == 1
-        assert "not found" in stdout
+        assert "not found" in stderr
 
     def test_path_disambiguates(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Research/Tools", org_dir=org_dir)
@@ -915,7 +915,7 @@ class TestRefileToExact:
     def test_intermediate_path_typo_fails(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Computer/Tools", org_dir=org_dir)
         assert rc == 1
-        assert "not found" in stdout
+        assert "not found" in stderr
 
 
 # ===========================================================================
@@ -938,7 +938,7 @@ class TestRefileCategory:
     def test_ambiguous_match(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--category", "Tools", org_dir=org_dir)
         assert rc == 2
-        assert "Multiple category matches" in stdout
+        assert "Multiple category matches" in stderr
 
     def test_path_disambiguates(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--category", "Research/Tools", org_dir=org_dir)
@@ -948,7 +948,7 @@ class TestRefileCategory:
     def test_only_todo_matches(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--category", "Design", org_dir=org_dir)
         assert rc == 1
-        assert "not found" in stdout
+        assert "not found" in stderr
 
     def test_dry_run(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--category", "Research/Tools", "--dry-run", org_dir=org_dir)
@@ -965,9 +965,9 @@ class TestRefileCategory:
     def test_ambiguous_resources(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--category", "Resources", org_dir=org_dir)
         assert rc == 2
-        assert "Multiple category matches" in stdout
-        assert "Improve agent workflow/Resources" in stdout
-        assert "Research/Resources" in stdout
+        assert "Multiple category matches" in stderr
+        assert "Improve agent workflow/Resources" in stderr
+        assert "Research/Resources" in stderr
 
 
 # ===========================================================================
@@ -1122,12 +1122,12 @@ class TestAppendBody:
     def test_rejects_body_starting_with_org_heading(self, org_dir):
         stdout, stderr, rc = run_cli("append-body", "Buy a small UPS", "** Test heading", org_dir=org_dir)
         assert rc == 1
-        assert "Error" in stdout
+        assert "Error" in stderr
 
     def test_rejects_body_with_org_heading_on_subsequent_line(self, org_dir):
         stdout, stderr, rc = run_cli("append-body", "Buy a small UPS", "Some text\n* Mid-text heading", org_dir=org_dir)
         assert rc == 1
-        assert "Error" in stdout
+        assert "Error" in stderr
 
 
 # ===========================================================================
@@ -1173,12 +1173,12 @@ class TestSetBody:
     def test_rejects_body_starting_with_org_heading(self, org_dir):
         stdout, stderr, rc = run_cli("set-body", "Buy a small UPS", "** Sneaky heading", org_dir=org_dir)
         assert rc == 1
-        assert "Error" in stdout
+        assert "Error" in stderr
 
     def test_rejects_body_with_org_heading_on_subsequent_line(self, org_dir):
         stdout, stderr, rc = run_cli("set-body", "Buy a small UPS", "Some text\n* Mid-text heading", org_dir=org_dir)
         assert rc == 1
-        assert "Error" in stdout
+        assert "Error" in stderr
 
     def test_preserves_metadata(self, org_dir):
         stdout, stderr, rc = run_cli("set-body", "Fix org-capture", "Replaced body.", org_dir=org_dir)
@@ -1242,7 +1242,7 @@ class TestSetNext:
     def test_already_has_next_noop(self, org_dir):
         stdout, stderr, rc = run_cli("set-next", "Holiday pre-trip tasks", org_dir=org_dir)
         assert rc == 0
-        assert "Already has NEXT" in stdout
+        assert "Already has NEXT" in stderr
 
     def test_promotes_first_todo_child(self, org_dir):
         # Multi-step: done Book a rental car, set-state WAITING->TODO, then set-next
@@ -1268,12 +1268,12 @@ class TestSetNext:
         run_cli("set-next", "Pay quarterly taxes", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-next", "Pay quarterly taxes", org_dir=org_dir)
         assert rc == 0
-        assert "Already NEXT" in stdout
+        assert "Already NEXT" in stderr
 
     def test_subproject_set_next(self, org_dir):
         stdout, stderr, rc = run_cli("set-next", "Design CLI tool", org_dir=org_dir)
         assert rc == 0
-        assert "Already has NEXT" in stdout
+        assert "Already has NEXT" in stderr
 
 
 # ===========================================================================
@@ -1392,7 +1392,7 @@ class TestIntegrationChain:
         # Step 1: set-next on project with existing NEXT -> no-op
         stdout, stderr, rc = run_cli("set-next", "Holiday pre-trip tasks", org_dir=org_dir)
         assert rc == 0
-        assert "Already has NEXT" in stdout
+        assert "Already has NEXT" in stderr
 
         # Step 2: done Book a rental car -> auto-progress
         stdout, stderr, rc = run_cli("set-done", "Book a rental car", org_dir=org_dir)
@@ -1679,17 +1679,17 @@ class TestArchiveSingle:
     def test_rejects_active_task(self, org_dir):
         stdout, stderr, rc = run_cli("archive", "write quarterly report", org_dir=org_dir)
         assert rc == 1
-        assert "still active" in stdout
+        assert "still active" in stderr
 
     def test_rejects_recent_dates(self, org_dir):
         stdout, stderr, rc = run_cli("archive", "submit expense claims", org_dir=org_dir)
         assert rc == 1
-        assert "recent dates" in stdout
+        assert "recent dates" in stderr
 
     def test_rejects_inside_active_project(self, org_dir):
         stdout, stderr, rc = run_cli("archive", "pack suitcases", org_dir=org_dir)
         assert rc == 1
-        assert "inside active project" in stdout
+        assert "inside active project" in stderr
 
     def test_no_match(self, org_dir):
         stdout, stderr, rc = run_cli("archive", "xyznonexistent", org_dir=org_dir)
@@ -1712,7 +1712,7 @@ class TestArchiveBatch:
         text = (org_dir / "tasks.org").read_text()
         assert "Buy new router" not in text
         assert "Research dentists" not in text
-        assert 'Skipped (no dates): "Mystery task"' in stdout
+        assert 'Skipped (no dates): "Mystery task"' in stderr
         assert "Mystery task" in text
         assert "Submit expense claims" in text
         archive = (org_dir / "tasks.org_archive").read_text()
@@ -1733,7 +1733,7 @@ class TestArchiveBatch:
         # Second pass: nothing left
         stdout, stderr, rc = run_cli("archive", "--all", org_dir=org_dir)
         assert rc == 0
-        assert "No archivable tasks found" in stdout
+        assert "No archivable tasks found" in stderr
 
 
 # ===========================================================================
@@ -1875,7 +1875,7 @@ class TestAgendaView:
     def test_invalid_key(self, org_dir):
         stdout, stderr, rc = run_cli("agenda-view", "INVALID", org_dir=org_dir)
         assert rc == 1
-        assert "Unknown agenda view key" in stdout
+        assert "Unknown agenda view key" in stderr
 
 
 # ===========================================================================
@@ -1910,7 +1910,7 @@ class TestFixTimestamps:
         run_cli("fix-timestamps", org_dir=org_dir)
         stdout, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
         assert rc == 0
-        assert "nothing to fix" in stdout
+        assert "nothing to fix" in stderr
 
     def test_preserves_body_text(self, org_dir):
         stdout, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
@@ -2113,7 +2113,7 @@ class TestDelete:
     def test_refuses_project(self, org_dir):
         stdout, stderr, rc = run_cli("delete", "Buy a formicarium", org_dir=org_dir)
         assert rc == 1
-        assert "is a project with subtasks" in stdout
+        assert "is a project with subtasks" in stderr
         assert "Buy a formicarium" in (org_dir / "tasks.org").read_text()
 
     def test_no_match(self, org_dir):

@@ -39,6 +39,16 @@
         (sequence "WAITING(w/!)" "DEFER(f/!)" "|" "CANCELLED(c/!)")))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
+;; Error output
+;; ══════════════════════════════════════════════════════════════════════════════
+
+(defun org-gtd-cli/error (fmt &rest args)
+  "Write a diagnostic/error message to stderr.
+In Emacs batch mode, `message' writes to stderr while `princ' writes to stdout.
+Use this for errors, warnings, and hints — never for command output data."
+  (apply #'message fmt args))
+
+;; ══════════════════════════════════════════════════════════════════════════════
 ;; Body text validation
 ;; ══════════════════════════════════════════════════════════════════════════════
 
@@ -47,11 +57,13 @@
   (when (and text (not (string-empty-p text))
              (or (string-match-p "\\`\\*+ " text)
                  (string-match-p "\n\\*+ " text)))
-    (princ (concat
-            "Error: body text contains org headings (\"* \" at start of line), "
-            "which would corrupt\nthe file structure. Use \"- list items\" instead "
-            "of headings. For structured content\nwith sections, use: "
-            "org-gtd-cli add-note --link-task \"task heading\" --title \"...\"\n"))
+    (org-gtd-cli/error
+     "%s"
+     (concat
+      "Error: body text contains org headings (\"* \" at start of line), "
+      "which would corrupt\nthe file structure. Use \"- list items\" instead "
+      "of headings. For structured content\nwith sections, use: "
+      "org-gtd-cli add-note --link-task \"task heading\" --title \"...\"\n"))
     (kill-emacs 1)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
@@ -159,7 +171,8 @@ If EXACT is non-nil, require full heading match instead of substring."
     (setq matches (nreverse matches))
     (cond
      ((null matches)
-      (princ (format "No task found matching \"%s\"\n" substring))
+      (org-gtd-cli/error "No task found matching \"%s\"" substring)
+      (org-gtd-cli/error "Hint: use the full heading text from previous CLI output. Use 'search' for partial matches.")
       (kill-emacs 1))
      ((and (= (length matches) 1) (not index))
       (cons (nth 0 (car matches)) (nth 1 (car matches))))
@@ -167,16 +180,16 @@ If EXACT is non-nil, require full heading match instead of substring."
       (let ((m (nth (1- index) matches)))
         (cons (nth 0 m) (nth 1 m))))
      ((and index (or (<= index 0) (> index (length matches))))
-      (princ (format "Index %d out of range (1-%d)\n" index (length matches)))
+      (org-gtd-cli/error "Index %d out of range (1-%d)" index (length matches))
       (kill-emacs 1))
      (t
-      (princ "Multiple matches:\n")
+      (org-gtd-cli/error "Multiple matches:")
       (let ((i 1))
         (dolist (m matches)
-          (princ (format "[%d] %s %s (%s)\n"
-                         i (nth 2 m) (nth 3 m) (nth 4 m)))
+          (org-gtd-cli/error "[%d] %s %s (%s)"
+                             i (nth 2 m) (nth 3 m) (nth 4 m))
           (cl-incf i)))
-      (princ "\nUse --index N to select one.\n")
+      (org-gtd-cli/error "\nUse --index N to select one.")
       (kill-emacs 2)))))
 
 (defun org-gtd-cli/make-timestamp (date-str &optional time-str active)
@@ -330,7 +343,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
         (princ (concat ts "\n"))
         (kill-emacs 0))
     (error
-     (princ (format "Error: invalid date \"%s\": %s\n" date-str (error-message-string err)))
+     (org-gtd-cli/error "Error: invalid date \"%s\": %s" date-str (error-message-string err))
      (kill-emacs 1))))
 
 ;; --- agenda ---
@@ -427,7 +440,7 @@ STATES-CSV defaults to \"TODO,NEXT\".  \"all\" means no state filter.
 TAG-FILTER limits to tasks with that tag (supports inheritance).
 FILE-NAME restricts search to a single file in org-directory."
   (when (or (null substring) (string-empty-p substring))
-    (princ "Error: search requires a SUBSTR argument\n")
+    (org-gtd-cli/error "Error: search requires a SUBSTR argument")
     (kill-emacs 1))
   (let* ((state-filter
           (cond
@@ -443,7 +456,7 @@ FILE-NAME restricts search to a single file in org-directory."
                          (not (equal file-name "nil")))
                     (let ((f (expand-file-name file-name org-directory)))
                       (unless (file-exists-p f)
-                        (princ (format "Error: file not found: %s\n" file-name))
+                        (org-gtd-cli/error "Error: file not found: %s" file-name)
                         (kill-emacs 1))
                       (list f))
                   (org-agenda-files)))
@@ -473,7 +486,7 @@ FILE-NAME restricts search to a single file in org-directory."
                  (push (list state heading rel-file) matches))))))))
     (setq matches (nreverse matches))
     (if (null matches)
-        (princ "No matches.\n")
+        (org-gtd-cli/error "No matches.")
       (let ((i 1))
         (dolist (m matches)
           (princ (format "[%d] %s %s (%s)\n"
@@ -553,7 +566,7 @@ state and priority — no tags, body, drawers, or planning lines."
                        children)))))
          (if (= total-count 0)
              (progn
-               (princ (format "Task \"%s\" has no subtasks\n" heading))
+               (org-gtd-cli/error "Task \"%s\" has no subtasks" heading)
                (kill-emacs 1))
            (princ (format "Project: %s (%s)\n" heading rel-file))
            (dolist (child (nreverse children))
@@ -584,7 +597,7 @@ FILE-NAME defaults to \"tasks.org\"."
          (file (expand-file-name target org-directory))
          (found nil))
     (unless (file-exists-p file)
-      (princ (format "File not found: %s\n" target))
+      (org-gtd-cli/error "File not found: %s" target)
       (kill-emacs 1))
     (with-current-buffer (find-file-noselect file)
       (org-with-wide-buffer
@@ -598,7 +611,7 @@ FILE-NAME defaults to \"tasks.org\"."
                               (org-gtd-cli/heading-path-at-point)
                               rel-file))))))))
     (unless found
-      (princ "No categories found\n")))
+      (org-gtd-cli/error "No categories found")))
   (kill-emacs 0))
 
 ;; --- projects ---
@@ -644,7 +657,8 @@ at least one direct child with a TODO keyword."
     (if results
         (dolist (line (nreverse results))
           (princ (concat line "\n")))
-      (princ "No projects.\n")))
+      (org-gtd-cli/error "No projects."))
+)
   (kill-emacs 0))
 
 ;; --- process-agent-tasks ---
@@ -779,7 +793,7 @@ at least one direct child with a TODO keyword."
     (when body (setq body (org-gtd-cli/fill-text body)))
     (org-gtd-cli/validate-body-text body)
     (unless (file-exists-p target-file)
-      (princ (format "Error: file not found: %s\n" target-file))
+      (org-gtd-cli/error "Error: file not found: %s" target-file)
       (kill-emacs 1))
     (let (matched-path)
       (with-current-buffer (find-file-noselect target-file)
@@ -815,18 +829,18 @@ at least one direct child with a TODO keyword."
                (setq matches (nreverse matches))
                (cond
                 ((null matches)
-                 (princ (format "Error: category heading \"%s\" not found in %s\n"
-                                category (org-gtd-cli/relative-filename target-file)))
+                 (org-gtd-cli/error "Error: category heading \"%s\" not found in %s"
+                                    category (org-gtd-cli/relative-filename target-file))
                  (kill-emacs 1))
                 ((> (length matches) 1)
-                 (princ (format "Multiple category matches for \"%s\":\n" category))
+                 (org-gtd-cli/error "Multiple category matches for \"%s\":" category)
                  (let ((idx 1))
                    (dolist (m matches)
-                     (princ (format "[%d] %s (%s)\n"
-                                    idx (nth 2 m)
-                                    (org-gtd-cli/relative-filename target-file)))
+                     (org-gtd-cli/error "[%d] %s (%s)"
+                                        idx (nth 2 m)
+                                        (org-gtd-cli/relative-filename target-file))
                      (cl-incf idx)))
-                 (princ "Use a more specific path (e.g. --category \"Parent/Child\").\n")
+                 (org-gtd-cli/error "Use a more specific path (e.g. --category \"Parent/Child\").")
                  (kill-emacs 2)))
                ;; Single match — go to it and insert
                (let ((match (car matches)))
@@ -943,7 +957,7 @@ at least one direct child with a TODO keyword."
          (gcal-calendar-id (when use-gcal-drawer
                              "REDACTED@group.calendar.google.com")))
     (unless (file-exists-p target-file)
-      (princ (format "Error: file not found: %s\n" target-file))
+      (org-gtd-cli/error "Error: file not found: %s" target-file)
       (kill-emacs 1))
     (with-current-buffer (find-file-noselect target-file)
       (org-with-wide-buffer
@@ -1283,8 +1297,8 @@ Returns a list of message strings in printing order."
                                               (cdr seq))))
                                    org-todo-keywords))))
     (unless (member new-state all-states)
-      (princ (format "Error: \"%s\" is not a valid state\nValid states: %s\n"
-                     new-state (mapconcat #'identity all-states ", ")))
+      (org-gtd-cli/error "Error: \"%s\" is not a valid state\nValid states: %s"
+                         new-state (mapconcat #'identity all-states ", "))
       (kill-emacs 1)))
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
@@ -1380,9 +1394,9 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
             ;; Error handling for --to
             (unless target-pos
               (if (> self-match-count 0)
-                  (princ (format "Error: no valid refile target for \"%s\" (skipped %d self-match%s inside source subtree)\n"
-                                 target self-match-count (if (= self-match-count 1) "" "es")))
-                (princ (format "Error: target heading \"%s\" not found\n" target)))
+                  (org-gtd-cli/error "Error: no valid refile target for \"%s\" (skipped %d self-match%s inside source subtree)"
+                                     target self-match-count (if (= self-match-count 1) "" "es"))
+                (org-gtd-cli/error "Error: target heading \"%s\" not found" target))
               (kill-emacs 1)))
         ;; --category: substring match on non-TODO headings in tasks.org only
         (let* ((cat-parts (split-string category "/" t))
@@ -1422,17 +1436,17 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
           (setq matches (nreverse matches))
           (cond
            ((null matches)
-            (princ (format "Error: category heading \"%s\" not found\n" category))
+            (org-gtd-cli/error "Error: category heading \"%s\" not found" category)
             (kill-emacs 1))
            ((> (length matches) 1)
-            (princ (format "Multiple category matches for \"%s\":\n" category))
+            (org-gtd-cli/error "Multiple category matches for \"%s\":" category)
             (let ((idx 1))
               (dolist (m matches)
-                (princ (format "[%d] %s (%s)\n"
-                               idx (nth 3 m)
-                               (org-gtd-cli/relative-filename (nth 2 m))))
+                (org-gtd-cli/error "[%d] %s (%s)"
+                                   idx (nth 3 m)
+                                   (org-gtd-cli/relative-filename (nth 2 m)))
                 (cl-incf idx)))
-            (princ "Use a more specific path (e.g. --category \"Parent/Child\").\n")
+            (org-gtd-cli/error "Use a more specific path (e.g. --category \"Parent/Child\").")
             (kill-emacs 2))
            (t
             (let ((m (car matches)))
@@ -1496,9 +1510,9 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
            (let ((current-state (org-get-todo-state)))
              (cond
               ((string= current-state "NEXT")
-               (princ (format "Already NEXT: \"%s\" (%s)\n" heading rel-file)))
+               (org-gtd-cli/error "Already NEXT: \"%s\" (%s)" heading rel-file))
               ((not (member current-state org-not-done-keywords))
-               (princ (format "Error: \"%s\" is in done state %s\n" heading current-state))
+               (org-gtd-cli/error "Error: \"%s\" is in done state %s" heading current-state)
                (kill-emacs 1))
               (t
                (let ((org-inhibit-logging nil))
@@ -1506,11 +1520,11 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                (save-buffer)
                (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file))))))
           (existing-next
-           (princ (format "Already has NEXT: \"%s\" (%s)\n"
-                          existing-next rel-file))
+           (org-gtd-cli/error "Already has NEXT: \"%s\" (%s)"
+                              existing-next rel-file)
            (kill-emacs 0))
           ((not first-todo-pos)
-           (princ (format "Error: \"%s\" has no TODO children to promote\n" heading))
+           (org-gtd-cli/error "Error: \"%s\" has no TODO children to promote" heading)
            (kill-emacs 1))
           (t
            (goto-char first-todo-pos)
@@ -1546,7 +1560,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
            (unless (and sibling-substring
                         (not (string-empty-p sibling-substring))
                         (not (equal sibling-substring "nil")))
-             (princ "Error: --before/--after requires a sibling substring\n")
+             (org-gtd-cli/error "Error: --before/--after requires a sibling substring")
              (kill-emacs 1))
            (let* ((level (org-current-level))
                   (task-beg (point))
@@ -1572,7 +1586,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                                (downcase (org-get-heading t t t t))))
                      (setq sibling-pos (line-beginning-position))))))
              (unless sibling-pos
-               (princ (format "Error: sibling \"%s\" not found\n" sibling-substring))
+               (org-gtd-cli/error "Error: sibling \"%s\" not found" sibling-substring)
                (kill-emacs 1))
              ;; Delete the task
              (goto-char task-beg)
@@ -1601,7 +1615,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
            (princ (format "Moved: \"%s\" %s \"%s\" (%s)\n"
                           heading direction sibling-substring rel-file)))
           (t
-           (princ (format "Error: unknown direction \"%s\"\n" direction))
+           (org-gtd-cli/error "Error: unknown direction \"%s\"" direction)
            (kill-emacs 1)))
          (save-buffer)))))
   (kill-emacs 0))
@@ -1669,7 +1683,7 @@ Preserves TODO state, priority, and tags."
                (princ (format "Scheduled: \"%s\" %s (%s)\n"
                               heading ts rel-file)))))
           (t
-           (princ "Error: provide a DATE or --clear\n")
+           (org-gtd-cli/error "Error: provide a DATE or --clear")
            (kill-emacs 1)))))))
   (kill-emacs 0))
 
@@ -1713,7 +1727,7 @@ Preserves TODO state, priority, and tags."
                (princ (format "Deadline: \"%s\" %s (%s)\n"
                               heading ts rel-file)))))
           (t
-           (princ "Error: provide a DATE or --clear\n")
+           (org-gtd-cli/error "Error: provide a DATE or --clear")
            (kill-emacs 1)))))))
   (kill-emacs 0))
 
@@ -1734,8 +1748,8 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
     ;; Validate priority value
     (when (and (not is-clear) priority
                (not (member priority '("A" "B" "C"))))
-      (princ (format "Error: \"%s\" is not a valid priority\nValid priorities: A, B, C\n"
-                     priority))
+      (org-gtd-cli/error "Error: \"%s\" is not a valid priority\nValid priorities: A, B, C"
+                         priority)
       (kill-emacs 1))
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
@@ -1763,7 +1777,7 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
              (princ (format "Priority: \"%s\" [#%s] -> [#%s] (%s)\n"
                             heading (or old-priority "B") priority rel-file))))
           (t
-           (princ "Error: provide a PRIORITY (A, B, or C) or --clear\n")
+           (org-gtd-cli/error "Error: provide a PRIORITY (A, B, or C) or --clear")
            (kill-emacs 1)))))))
   (kill-emacs 0))
 
@@ -1858,19 +1872,19 @@ a TODO keyword that is NOT in `org-done-keywords'."
               (state (org-get-todo-state)))
          ;; Rule 1: must be done
          (unless (member state org-done-keywords)
-           (princ (format "Not archivable: \"%s\" is still active (%s) (%s)\n"
-                          heading state rel-file))
+           (org-gtd-cli/error "Not archivable: \"%s\" is still active (%s) (%s)"
+                             heading state rel-file)
            (kill-emacs 1))
          ;; Rule 2b: no recent dates
          (when (org-gtd-cli/subtree-has-recent-dates-p)
-           (princ (format "Not archivable: \"%s\" has recent dates (%s)\n"
-                          heading rel-file))
+           (org-gtd-cli/error "Not archivable: \"%s\" has recent dates (%s)"
+                              heading rel-file)
            (kill-emacs 1))
          ;; Rule 3: not inside active project
          (let ((active-parent (org-gtd-cli/inside-active-project-p)))
            (when active-parent
-             (princ (format "Not archivable: \"%s\" is inside active project \"%s\" (%s)\n"
-                            heading active-parent rel-file))
+             (org-gtd-cli/error "Not archivable: \"%s\" is inside active project \"%s\" (%s)"
+                                heading active-parent rel-file)
              (kill-emacs 1)))
          ;; All checks passed
          (if is-dry-run
@@ -1928,8 +1942,8 @@ a TODO keyword that is NOT in `org-done-keywords'."
               ;; Rule 2a: no dates at all → skip with message
               ((not (org-gtd-cli/subtree-has-any-dates-p))
                (cl-incf skipped)
-               (princ (format "Skipped (no dates): \"%s\" (%s)\n"
-                              heading rel-file)))
+               (org-gtd-cli/error "Skipped (no dates): \"%s\" (%s)"
+                                  heading rel-file))
               ;; All rules pass
               (t
                (push (list buf pos heading rel-file) archivable)))))))
@@ -1937,8 +1951,8 @@ a TODO keyword that is NOT in `org-done-keywords'."
       (if (null archivable)
           (progn
             (when (> skipped 0)
-              (princ (format "%d tasks skipped\n" skipped)))
-            (princ "No archivable tasks found\n")
+              (org-gtd-cli/error "%d tasks skipped" skipped))
+            (org-gtd-cli/error "No archivable tasks found")
             (kill-emacs 0))
         ;; Sort: within each file, process bottom-up (highest position first)
         ;; Group by buffer, reverse position order within each group
@@ -2003,8 +2017,8 @@ Refuses to delete projects (tasks with subtasks)."
              (when (= (org-current-level) child-level)
                (setq has-children t))))
          (when has-children
-           (princ (format "Cannot delete: \"%s\" is a project with subtasks (%s)\n"
-                          task-heading rel-file))
+           (org-gtd-cli/error "Cannot delete: \"%s\" is a project with subtasks (%s)"
+                              task-heading rel-file)
            (kill-emacs 1))
          (if is-dry-run
              (progn
@@ -2063,7 +2077,7 @@ in their body, and inserts one using the current date/time."
     (setq candidates (nreverse candidates))
     (if (null candidates)
         (progn
-          (princ "All headings have timestamps, nothing to fix\n")
+          (org-gtd-cli/error "All headings have timestamps, nothing to fix")
           (kill-emacs 0))
       ;; Sort bottom-up within each buffer to avoid position invalidation
       (let ((by-buffer (make-hash-table :test 'eq)))
@@ -2119,10 +2133,10 @@ KEY defaults to \" \" (the full GTD dashboard).
 Task lines include (file) for source identification."
   (let ((cmd-key (or key " ")))
     (unless (assoc cmd-key org-agenda-custom-commands)
-      (princ (format "Unknown agenda view key: \"%s\"\nAvailable views:\n" cmd-key))
+      (org-gtd-cli/error "Unknown agenda view key: \"%s\"\nAvailable views:" cmd-key)
       (dolist (cmd org-agenda-custom-commands)
         (when (stringp (car cmd))
-          (princ (format "  \"%s\"  %s\n" (car cmd) (or (nth 1 cmd) "")))))
+          (org-gtd-cli/error "  \"%s\"  %s" (car cmd) (or (nth 1 cmd) ""))))
       (kill-emacs 1))
     ;; Build the agenda buffer
     (let ((org-agenda-window-setup 'current-window))
