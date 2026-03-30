@@ -2788,3 +2788,63 @@ class TestJsonShow:
             # No file or parent (redundant in subtask context)
             assert "file" not in child
             assert "parent" not in child
+
+
+# ===========================================================================
+# JSON: subtasks command
+# ===========================================================================
+
+class TestJsonSubtasks:
+    """Tests for --json subtasks output."""
+
+    def test_subtasks_returns_valid_json(self, org_dir):
+        """Find a project and check its subtasks JSON."""
+        # First find a project
+        search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        project = None
+        for task in search_data["tasks"]:
+            if task["is_project"]:
+                project = task
+                break
+        if project is None:
+            pytest.skip("No projects in fixture data")
+        data, _, rc = run_cli_json("subtasks", project["heading"], org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "subtasks"
+        assert data["heading"] == project["heading"]
+        assert isinstance(data["subtasks"], list)
+        assert len(data["subtasks"]) > 0
+
+    def test_subtasks_progress(self, org_dir):
+        """Progress should have done and total counts."""
+        search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        project = None
+        for task in search_data["tasks"]:
+            if task["is_project"]:
+                project = task
+                break
+        if project is None:
+            pytest.skip("No projects in fixture data")
+        data, _, rc = run_cli_json("subtasks", project["heading"], org_dir=org_dir)
+        assert rc == 0
+        assert "done" in data["progress"]
+        assert "total" in data["progress"]
+        assert data["progress"]["total"] == len(data["subtasks"])
+
+    def test_subtasks_child_fields(self, org_dir):
+        """Subtask objects should have correct fields."""
+        search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        project = None
+        for task in search_data["tasks"]:
+            if task["is_project"]:
+                project = task
+                break
+        if project is None:
+            pytest.skip("No projects in fixture data")
+        data, _, rc = run_cli_json("subtasks", project["heading"], org_dir=org_dir)
+        assert rc == 0
+        child = data["subtasks"][0]
+        for field in ["heading", "state", "priority", "tags",
+                       "scheduled", "deadline", "is_project"]:
+            assert field in child, f"Missing field: {field}"

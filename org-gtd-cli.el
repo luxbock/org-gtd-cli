@@ -782,7 +782,9 @@ state and priority — no tags, body, drawers, or planning lines."
                       (child-heading (org-get-heading t t t t))
                       (child-scheduled (org-entry-get nil "SCHEDULED"))
                       (child-deadline (org-entry-get nil "DEADLINE"))
-                      (child-priority (org-entry-get nil "PRIORITY")))
+                      (child-priority (org-entry-get nil "PRIORITY"))
+                      (child-tags (org-get-tags nil t))
+                      (child-is-project (org-gtd-cli/has-todo-children-p)))
                  (cl-incf total-count)
                  (when (and child-state (member child-state org-done-keywords))
                    (cl-incf done-count))
@@ -790,25 +792,58 @@ state and priority — no tags, body, drawers, or planning lines."
                              child-heading
                              child-scheduled
                              child-deadline
-                             child-priority)
+                             child-priority
+                             child-tags
+                             child-is-project)
                        children)))))
          (if (= total-count 0)
              (progn
                (org-gtd-cli/error "Task \"%s\" has no subtasks" heading)
                (kill-emacs 1))
-           (princ (format "Project: %s (%s)\n" heading rel-file))
-           (dolist (child (nreverse children))
-             (let ((line-str (concat "  " (nth 0 child) " " (nth 1 child)
-                                     " (" rel-file ")")))
-               (when (and (nth 4 child) (not (string= (nth 4 child) "B")))
-                 (setq line-str (concat line-str " [#" (nth 4 child) "]")))
-               (when (nth 3 child)
-                 (setq line-str (concat line-str "  D:" (nth 3 child))))
-               (when (nth 2 child)
-                 (setq line-str (concat line-str "  S:" (nth 2 child))))
-               (princ (concat line-str "\n"))))
-           (princ (format "\nProgress: %d/%d done\n" done-count total-count)))))))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output-subtasks-json
+                heading (org-get-todo-state) rel-file
+                (save-excursion
+                  (if (org-up-heading-safe)
+                      (org-get-heading t t t t)
+                    nil))
+                children done-count total-count)
+             (princ (format "Project: %s (%s)\n" heading rel-file))
+             (dolist (child (nreverse children))
+               (let ((line-str (concat "  " (nth 0 child) " " (nth 1 child)
+                                       " (" rel-file ")")))
+                 (when (and (nth 4 child) (not (string= (nth 4 child) "B")))
+                   (setq line-str (concat line-str " [#" (nth 4 child) "]")))
+                 (when (nth 3 child)
+                   (setq line-str (concat line-str "  D:" (nth 3 child))))
+                 (when (nth 2 child)
+                   (setq line-str (concat line-str "  S:" (nth 2 child))))
+                 (princ (concat line-str "\n"))))
+             (princ (format "\nProgress: %d/%d done\n" done-count total-count))))))))
   (kill-emacs 0))
+
+(defun org-gtd-cli/output-subtasks-json (heading state rel-file parent children done-count total-count)
+  "Output JSON for the subtasks command."
+  (let ((subtask-list '()))
+    (dolist (child (nreverse children))
+      (push `((heading . ,(nth 1 child))
+              (state . ,(or (nth 0 child) :null))
+              (priority . ,(let ((p (nth 4 child)))
+                             (if (and p (not (string-empty-p p))) p :null)))
+              (tags . ,(vconcat (mapcar #'identity (nth 5 child))))
+              (scheduled . ,(or (nth 2 child) :null))
+              (deadline . ,(or (nth 3 child) :null))
+              (is_project . ,(if (nth 6 child) t :false)))
+            subtask-list))
+    (org-gtd-cli/output
+     `((version . 1)
+       (command . "subtasks")
+       (heading . ,heading)
+       (state . ,(or state :null))
+       (file . ,rel-file)
+       (parent . ,(or parent :null))
+       (progress . ((done . ,done-count) (total . ,total-count)))
+       (subtasks . ,(apply #'vector (nreverse subtask-list)))))))
 
 ;; --- categories ---
 
