@@ -2372,20 +2372,64 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
            (kill-emacs 1)))))))
   (kill-emacs 0))
 
-;; --- set-tags ---
+;; --- set-tags (replace all) ---
 
-(defun org-gtd-cli/set-tags (substring add-csv remove-csv &optional index dry-run)
-  "Add and/or remove tags on an existing task.
-ADD-CSV and REMOVE-CSV are comma-separated tag strings."
+(defun org-gtd-cli/set-tags (substring tags-csv &optional index dry-run)
+  "Replace all tags on an existing task.
+TAGS-CSV is a comma-separated string of tags. Empty string clears all tags."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))
-         (add-tags (when (and add-csv (not (string-empty-p add-csv))
-                              (not (equal add-csv "nil")))
-                     (split-string add-csv ",")))
-         (remove-tags (when (and remove-csv (not (string-empty-p remove-csv))
-                                 (not (equal remove-csv "nil")))
-                        (split-string remove-csv ",")))
+         (new-tags (if (or (null tags-csv) (string-empty-p tags-csv)
+                           (equal tags-csv "nil"))
+                       '()
+                     (split-string tags-csv ",")))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (old-tags (org-get-tags nil t)))
+         (if is-dry-run
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1) (command . "set-tags")
+                    (heading . ,heading) (file . ,rel-file)
+                    (old_tags . ,(vconcat old-tags))
+                    (new_tags . ,(vconcat new-tags))
+                    (dry_run . t)))
+               (princ (format "Would set tags: \"%s\" %s -> %s (%s)\n"
+                              heading
+                              (org-gtd-cli/format-tag-str old-tags)
+                              (org-gtd-cli/format-tag-str new-tags)
+                              rel-file)))
+           (org-set-tags new-tags)
+           (save-buffer)
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "set-tags")
+                  (heading . ,heading) (file . ,rel-file)
+                  (old_tags . ,(vconcat old-tags))
+                  (new_tags . ,(vconcat new-tags))))
+             (princ (format "Tags: \"%s\" %s -> %s (%s)\n"
+                            heading
+                            (org-gtd-cli/format-tag-str old-tags)
+                            (org-gtd-cli/format-tag-str new-tags)
+                            rel-file))))))))
+  (kill-emacs 0))
+
+;; --- add-tags (append) ---
+
+(defun org-gtd-cli/add-tags (substring tags-csv &optional index dry-run)
+  "Append tags to an existing task (no duplicates).
+TAGS-CSV is a comma-separated string of tags to add."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (add-list (when (and tags-csv (not (string-empty-p tags-csv))
+                              (not (equal tags-csv "nil")))
+                     (split-string tags-csv ",")))
          (buf-pos (org-gtd-cli/find-task substring idx t)))
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
@@ -2395,22 +2439,40 @@ ADD-CSV and REMOVE-CSV are comma-separated tag strings."
               (old-tags (org-get-tags nil t))
               (new-tags (copy-sequence old-tags)))
          ;; Add tags (skip duplicates)
-         (dolist (tag add-tags)
+         (dolist (tag add-list)
            (unless (member tag new-tags)
              (setq new-tags (append new-tags (list tag)))))
-         ;; Remove tags
-         (dolist (tag remove-tags)
-           (setq new-tags (cl-remove tag new-tags :test #'string=)))
-         (let ((old-str (if old-tags (concat ":" (mapconcat #'identity old-tags ":") ":") ""))
-               (new-str (if new-tags (concat ":" (mapconcat #'identity new-tags ":") ":") "")))
-           (if is-dry-run
-               (princ (format "Would set tags: \"%s\" %s -> %s (%s)\n"
-                              heading old-str new-str rel-file))
-             (org-set-tags new-tags)
-             (save-buffer)
+         (if is-dry-run
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1) (command . "add-tags")
+                    (heading . ,heading) (file . ,rel-file)
+                    (old_tags . ,(vconcat old-tags))
+                    (new_tags . ,(vconcat new-tags))
+                    (dry_run . t)))
+               (princ (format "Would add tags: \"%s\" %s -> %s (%s)\n"
+                              heading
+                              (org-gtd-cli/format-tag-str old-tags)
+                              (org-gtd-cli/format-tag-str new-tags)
+                              rel-file)))
+           (org-set-tags new-tags)
+           (save-buffer)
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "add-tags")
+                  (heading . ,heading) (file . ,rel-file)
+                  (old_tags . ,(vconcat old-tags))
+                  (new_tags . ,(vconcat new-tags))))
              (princ (format "Tags: \"%s\" %s -> %s (%s)\n"
-                            heading old-str new-str rel-file))))))))
+                            heading
+                            (org-gtd-cli/format-tag-str old-tags)
+                            (org-gtd-cli/format-tag-str new-tags)
+                            rel-file))))))))
   (kill-emacs 0))
+
+(defun org-gtd-cli/format-tag-str (tags)
+  "Format TAGS list as :tag1:tag2: string, or empty string if nil."
+  (if tags (concat ":" (mapconcat #'identity tags ":") ":") ""))
 
 ;; --- archive helpers ---
 

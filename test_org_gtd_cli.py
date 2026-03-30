@@ -672,17 +672,11 @@ class TestProjects:
 # ===========================================================================
 
 class TestProcessAgentTasks:
-    def test_finds_agent_tasks(self, org_dir):
+    def test_removed(self, org_dir):
+        """process-agent-tasks is removed; use search --tag @agent instead."""
         stdout, stderr, rc = run_cli("process-agent-tasks", org_dir=org_dir)
-        assert rc == 0
-        assert "Set up automated backups" in stdout
-        assert "Improve agent workflow" in stdout
-        assert "Buy a formicarium" in stdout
-        assert "Found 3 agent tasks" in stdout
-        assert "research backup strategies" in stdout
-        assert "2/5 done" in stdout
-        assert "Project: Agents" not in stdout
-        assert "Project: Pet Ants" not in stdout
+        assert rc == 1
+        assert "removed" in stderr.lower()
 
 
 # ===========================================================================
@@ -1368,10 +1362,10 @@ class TestSubproject:
         assert "TODO Design CLI tool" in stdout
         assert "TODO Implement CLI tool" in stdout
 
-    def test_process_agent_tasks_subtask_count_and_file_ref(self, org_dir):
+    def test_process_agent_tasks_removed(self, org_dir):
+        """process-agent-tasks is removed."""
         stdout, stderr, rc = run_cli("process-agent-tasks", org_dir=org_dir)
-        assert "2/5 done" in stdout
-        assert "DONE What are the current pain points? (tasks.org)" in stdout
+        assert rc == 1
 
 
 # ===========================================================================
@@ -1635,47 +1629,47 @@ class TestSetDeadline:
 # ===========================================================================
 
 class TestSetTags:
-    def test_add_tag(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--add", "urgent", org_dir=org_dir)
+    def test_set_tags_replace(self, org_dir):
+        """set-tags --tags replaces all tags."""
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--tags", "urgent,shopping", org_dir=org_dir)
         assert rc == 0
         assert "Tags:" in stdout
         text = (org_dir / "inbox.org").read_text()
         assert ":urgent:" in text
-        assert ":buy:" in text
-        assert ":@errand:" in text
+        assert ":shopping:" in text
+        # Old tags should be gone
+        assert ":buy:" not in text
+        assert ":@errand:" not in text
 
-    def test_remove_tag(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--remove", "@errand", org_dir=org_dir)
+    def test_set_tags_clear(self, org_dir):
+        """set-tags --tags '' clears all tags."""
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--tags", "", org_dir=org_dir)
         assert rc == 0
-        assert ":buy:" in (org_dir / "inbox.org").read_text()
 
-    def test_add_and_remove_in_one_call(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--add", "urgent,@home", "--remove", "@errand", org_dir=org_dir)
+    def test_add_tags_append(self, org_dir):
+        """add-tags --tags appends without duplicates."""
+        stdout, stderr, rc = run_cli("add-tags", "Buy groceries", "--tags", "urgent", org_dir=org_dir)
         assert rc == 0
         text = (org_dir / "inbox.org").read_text()
         assert ":urgent:" in text
-        assert ":@home:" in text
-
-    def test_remove_nonexistent(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--remove", "nonexistent", org_dir=org_dir)
-        assert rc == 0
-        text = (org_dir / "inbox.org").read_text()
+        # Old tags preserved
         assert ":buy:" in text
         assert ":@errand:" in text
 
-    def test_add_existing(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--add", "buy", org_dir=org_dir)
+    def test_add_tags_no_duplicates(self, org_dir):
+        """add-tags with existing tag is a no-op for that tag."""
+        stdout, stderr, rc = run_cli("add-tags", "Buy groceries", "--tags", "buy", org_dir=org_dir)
         assert rc == 0
         assert ":buy:" in (org_dir / "inbox.org").read_text()
 
-    def test_dry_run(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--add", "urgent", "--dry-run", org_dir=org_dir)
+    def test_set_tags_dry_run(self, org_dir):
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--tags", "urgent", "--dry-run", org_dir=org_dir)
         assert rc == 0
         assert "Would set tags" in stdout
         assert ":urgent:" not in (org_dir / "inbox.org").read_text()
 
-    def test_ambiguous(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "Buy", "--add", "urgent", org_dir=org_dir)
+    def test_set_tags_ambiguous(self, org_dir):
+        stdout, stderr, rc = run_cli("set-tags", "Buy", "--tags", "urgent", org_dir=org_dir)
         assert rc == 2
 
 
@@ -1704,7 +1698,7 @@ class TestEdgeCasesNewCommandsOobIndex:
 
     def test_set_tags_oob(self, org_dir):
         before = md5(org_dir / "tasks.org")
-        stdout, stderr, rc = run_cli("set-tags", "Buy", "--add", "urgent", "--index", "999", org_dir=org_dir)
+        stdout, stderr, rc = run_cli("set-tags", "Buy", "--tags", "urgent", "--index", "999", org_dir=org_dir)
         assert rc == 1
         assert md5(org_dir / "tasks.org") == before
 
@@ -1727,7 +1721,7 @@ class TestEdgeCasesNewCommandsNoMatch:
         assert rc == 1
 
     def test_set_tags_nonexistent(self, org_dir):
-        stdout, stderr, rc = run_cli("set-tags", "xyznonexistent", "--add", "urgent", org_dir=org_dir)
+        stdout, stderr, rc = run_cli("set-tags", "xyznonexistent", "--tags", "urgent", org_dir=org_dir)
         assert rc == 1
 
 
@@ -1956,51 +1950,11 @@ class TestAgendaView:
 # ===========================================================================
 
 class TestFixTimestamps:
-    def test_adds_missing_timestamps(self, org_dir):
+    def test_removed(self, org_dir):
+        """fix-timestamps is removed."""
         stdout, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
-        assert rc == 0
-        assert "Fixed" in stdout
-        assert "Bare heading no body" in stdout
-        assert "Mystery task" in stdout
-        tasks = org_dir / "tasks.org"
-        assert "Bare heading no body" in tasks.read_text()
-        # Timestamp should be right after the bare heading
-        bare_line = line_number_of(tasks, "Bare heading no body")
-        assert bare_line is not None
-        next_content = get_line(tasks, bare_line + 1)
-        assert next_content is not None
-        assert re.match(r'^\[[-0-9]+ [A-Z][a-z]+( [0-9:]+)?\]$', next_content)
-
-    def test_dry_run(self, org_dir):
-        # Take snapshot before
-        before_text = (org_dir / "tasks.org").read_text()
-        stdout, stderr, rc = run_cli("fix-timestamps", "--dry-run", org_dir=org_dir)
-        assert rc == 0
-        assert "Would fix" in stdout
-        assert (org_dir / "tasks.org").read_text() == before_text
-
-    def test_idempotent(self, org_dir):
-        run_cli("fix-timestamps", org_dir=org_dir)
-        stdout, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
-        assert rc == 0
-        assert "nothing to fix" in stderr
-
-    def test_preserves_body_text(self, org_dir):
-        stdout, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
-        assert rc == 0
-        tasks = org_dir / "tasks.org"
-        assert "Some old task with no dates at all" in tasks.read_text()
-        mystery_line = line_number_of(tasks, "Mystery task")
-        assert mystery_line is not None
-        ts_line_no = mystery_line + 2  # body is at +1, timestamp at +2
-        ts_content = get_line(tasks, ts_line_no)
-        assert ts_content is not None
-        assert re.match(r'^\[[-0-9]+ [A-Z][a-z]+( [0-9:]+)?\]$', ts_content)
-
-    def test_skips_non_todo_headings(self, org_dir):
-        stdout, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
-        assert "Agents" not in stdout
-        assert "Pet Ants" not in stdout
+        assert rc == 1
+        assert "removed" in stderr.lower()
 
 
 # ===========================================================================
@@ -3106,3 +3060,50 @@ class TestJsonMutations:
         )
         assert rc == 0
         assert data["dry_run"] is True
+
+    def test_set_tags_replace_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "set-tags", "Buy groceries", "--tags", "shopping,urgent",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["command"] == "set-tags"
+        assert set(data["new_tags"]) == {"shopping", "urgent"}
+
+    def test_set_tags_clear_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "set-tags", "Buy groceries", "--tags", "",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["new_tags"] == []
+
+    def test_add_tags_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "add-tags", "Buy groceries", "--tags", "newone",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["command"] == "add-tags"
+        assert "newone" in data["new_tags"]
+        # Old tags should be preserved
+        for tag in data["old_tags"]:
+            assert tag in data["new_tags"]
+
+
+# ===========================================================================
+# Removed commands
+# ===========================================================================
+
+class TestRemovedCommands:
+    """Tests for commands that have been removed."""
+
+    def test_process_agent_tasks_removed(self, org_dir):
+        _, stderr, rc = run_cli("process-agent-tasks", org_dir=org_dir)
+        assert rc == 1
+        assert "removed" in stderr.lower()
+
+    def test_fix_timestamps_removed(self, org_dir):
+        _, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
+        assert rc == 1
+        assert "removed" in stderr.lower()

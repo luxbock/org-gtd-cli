@@ -179,8 +179,11 @@ def cmd_projects(args):
     return run_elisp("(org-gtd-cli/projects)", json_mode=args.json)
 
 
-def cmd_process_agent_tasks(args):
-    return run_elisp("(org-gtd-cli/process-agent-tasks)", json_mode=args.json)
+def cmd_process_agent_tasks(_args):
+    print("Error: process-agent-tasks has been removed. "
+          "Use: search --tag @agent --state TODO,NEXT [--json]",
+          file=sys.stderr)
+    return 1
 
 
 def cmd_add_task(args):
@@ -360,12 +363,21 @@ def cmd_set_deadline(args):
 
 
 def cmd_set_tags(args):
-    if not args.add and not args.remove:
-        print("Error: at least one of --add or --remove is required",
-              file=sys.stderr)
+    if args.tags is None:
+        print("Error: --tags is required", file=sys.stderr)
         return 1
     expr = (f'(org-gtd-cli/set-tags {to_elisp(args.substr)} '
-            f'{to_elisp(args.add)} {to_elisp(args.remove)} '
+            f'{to_elisp(args.tags)} '
+            f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    return run_elisp(expr, json_mode=args.json)
+
+
+def cmd_add_tags(args):
+    if args.tags is None:
+        print("Error: --tags is required", file=sys.stderr)
+        return 1
+    expr = (f'(org-gtd-cli/add-tags {to_elisp(args.substr)} '
+            f'{to_elisp(args.tags)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
     return run_elisp(expr, json_mode=args.json)
 
@@ -402,9 +414,9 @@ def cmd_delete(args):
     return run_elisp(expr, json_mode=args.json)
 
 
-def cmd_fix_timestamps(args):  # noqa: unused 'args' used for dry_run
-    expr = f'(org-gtd-cli/fix-timestamps {to_elisp("t" if args.dry_run else None)})'
-    return run_elisp(expr, json_mode=args.json)
+def cmd_fix_timestamps(_args):
+    print("Error: fix-timestamps has been removed.", file=sys.stderr)
+    return 1
 
 
 # --- Parser construction ---
@@ -419,7 +431,7 @@ Querying:
   subtasks          List children of a project
   categories        Show category tree for refile targets
   projects          List active projects with progress
-  process-agent-tasks  Structured work queue for @agent tasks
+  process-agent-tasks  (removed, use: search --tag @agent --state TODO,NEXT)
 
 Creating:
   add-task          Add a task (default: inbox)
@@ -438,14 +450,15 @@ Modifying:
   rename            Change task heading text
   set-schedule      Set/clear SCHEDULED timestamp
   set-deadline      Set/clear DEADLINE timestamp
-  set-tags          Add/remove tags
+  set-tags          Replace all tags
+  add-tags          Append tags (no duplicates)
   append-body       Append text to task body
   set-body          Replace task body
 
 Maintenance:
   archive           Archive completed tasks
   delete            Delete a task (exact match, no projects)
-  fix-timestamps    Add missing creation timestamps
+  fix-timestamps    (removed)
   org-timestamp     Generate formatted org timestamp
 
 Environment:
@@ -509,7 +522,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_projects)
 
     p = sub.add_parser("process-agent-tasks",
-                       help="Structured work queue for @agent tasks")
+                       help="(removed) Use: search --tag @agent --state TODO,NEXT")
     p.set_defaults(func=cmd_process_agent_tasks)
 
     # --- Creating ---
@@ -644,13 +657,19 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_deadline)
 
-    p = sub.add_parser("set-tags", help="Add/remove tags")
+    p = sub.add_parser("set-tags", help="Replace all tags")
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("--add", help="Tags to add (comma-separated)")
-    p.add_argument("--remove", help="Tags to remove (comma-separated)")
+    p.add_argument("--tags", required=True, help="Tags to set (comma-separated, empty string to clear)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_tags)
+
+    p = sub.add_parser("add-tags", help="Append tags (no duplicates)")
+    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("--tags", required=True, help="Tags to add (comma-separated)")
+    p.add_argument("--index", help="Disambiguate with 1-based index")
+    p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
+    p.set_defaults(func=cmd_add_tags)
 
     p = sub.add_parser("append-body", help="Append text to task body")
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
@@ -687,8 +706,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_delete)
 
-    p = sub.add_parser("fix-timestamps", help="Add missing creation timestamps")
-    p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
+    p = sub.add_parser("fix-timestamps", help="(removed)")
     p.set_defaults(func=cmd_fix_timestamps)
 
     p = sub.add_parser("org-timestamp",
