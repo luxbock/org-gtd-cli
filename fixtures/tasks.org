@@ -208,4 +208,6 @@ CLOSED: [2026-01-20 Tue 14:00]
 [2026-01-18 Sun]
 ** Tools
 ** Resources
+** TODO Read [[http://example.com/bare-link]] about networking
+[2026-03-11 Wed 13:00]
 ** TODO Bare heading no body

@@ -125,9 +125,18 @@ Walks up the org tree to build a path like \"Computers/NixOS/epiphyte\"."
     (mapconcat #'identity path "/")))
 
 (defun org-gtd-cli/strip-markup (s)
-  "Strip org emphasis markers from S for fuzzy matching.
-Removes paired markers: *bold*, /italic/, _underline_, =verbatim=, ~code~, +strikethrough+."
+  "Strip org markup from S for fuzzy matching.
+Strips org links and paired emphasis markers."
   (let ((result s))
+    ;; Strip org links: two-part links keep description, bare links keep target
+    (setq result (replace-regexp-in-string
+                  (concat "\\[" "\\[" "\\([^][]*\\)" "\\]"
+                          "\\[" "\\([^][]*\\)" "\\]" "\\]")
+                  "\\2" result))
+    (setq result (replace-regexp-in-string
+                  (concat "\\[" "\\[" "\\([^][]*\\)" "\\]" "\\]")
+                  "\\1" result))
+    ;; Strip paired emphasis markers
     (dolist (marker '("*" "/" "_" "=" "~" "+"))
       (setq result
             (replace-regexp-in-string

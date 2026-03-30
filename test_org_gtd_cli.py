@@ -474,6 +474,24 @@ class TestShow:
         assert rc == 0
         assert "[[https://example.com" in stdout
 
+    def test_find_task_with_described_link_by_description(self, org_dir):
+        """search/show finds a task with [[url][desc]] by the description text."""
+        stdout, stderr, rc = run_cli("search", "Interesting Project", "--state", "all", org_dir=org_dir)
+        assert rc == 0
+        assert "Interesting Project" in stdout
+
+    def test_find_task_with_described_link_by_show(self, org_dir):
+        """show finds [[url][desc]] heading via plain-text description."""
+        stdout, stderr, rc = run_cli("show", "Interesting Project", org_dir=org_dir)
+        assert rc == 0
+        assert "connections to my work" in stdout
+
+    def test_find_task_with_bare_link_by_url(self, org_dir):
+        """show finds [[url]] heading via url text."""
+        stdout, stderr, rc = run_cli("show", "bare-link", org_dir=org_dir)
+        assert rc == 0
+        assert "networking" in stdout
+
     def test_plain_shows_heading_hierarchy(self, org_dir):
         stdout, stderr, rc = run_cli("show", "Improve agent workflow", "--plain", org_dir=org_dir)
         assert rc == 0
