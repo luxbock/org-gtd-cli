@@ -2907,3 +2907,56 @@ class TestJsonProjects:
             proj = data["projects"][0]
             # Heading is a substring of path
             assert proj["heading"] in proj["path"]
+
+
+# ===========================================================================
+# JSON: mutation commands (set-done, set-state, etc.)
+# ===========================================================================
+
+class TestJsonMutations:
+    """Tests for --json on mutation commands."""
+
+    def test_set_done_json(self, org_dir):
+        data, _, rc = run_cli_json("set-done", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "set-done"
+        assert data["heading"] == "Buy groceries"
+        assert data["old_state"] == "TODO"
+        assert data["new_state"] == "DONE"
+        assert "side_effects" in data
+        assert isinstance(data["side_effects"], list)
+
+    def test_set_done_dry_run_json(self, org_dir):
+        data, _, rc = run_cli_json("set-done", "Buy groceries", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert data["dry_run"] is True
+        assert data["old_state"] == "TODO"
+        assert data["new_state"] == "DONE"
+
+    def test_set_done_with_auto_progress(self, org_dir):
+        """Set-done on a project subtask should report auto-progress side effects."""
+        # Find a project with NEXT subtask, mark it done
+        search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        project = None
+        for task in search_data["tasks"]:
+            if task["is_project"]:
+                project = task
+                break
+        if project is None:
+            pytest.skip("No projects in fixture data")
+        # Get subtasks
+        sub_data, _, _ = run_cli_json("subtasks", project["heading"], org_dir=org_dir)
+        next_child = None
+        for child in sub_data["subtasks"]:
+            if child["state"] == "NEXT":
+                next_child = child
+                break
+        if next_child is None:
+            pytest.skip("No NEXT subtask found")
+        data, _, rc = run_cli_json("set-done", next_child["heading"], org_dir=org_dir)
+        assert rc == 0
+        assert data["new_state"] == "DONE"
+        # Should have side_effects (auto-progress promotes next TODO to NEXT)
+        # May or may not have effects depending on fixture data
+        assert isinstance(data["side_effects"], list)

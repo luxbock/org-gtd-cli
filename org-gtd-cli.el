@@ -1565,7 +1565,16 @@ Returns a list of message strings in printing order."
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
               (old-state (org-get-todo-state)))
          (if is-dry-run
-             (progn
+             (if org-gtd-cli/json-mode
+                 (let ((result `((version . 1)
+                                 (command . "set-done")
+                                 (heading . ,heading)
+                                 (file . ,rel-file)
+                                 (old_state . ,old-state)
+                                 (new_state . "DONE")
+                                 (dry_run . t)
+                                 (side_effects . []))))
+                   (org-gtd-cli/output result))
                (princ (format "Would mark done: %s (%s)\n" heading rel-file))
                (dolist (msg (org-gtd-cli/auto-progress-preview rel-file))
                  (princ msg)))
@@ -1577,10 +1586,47 @@ Returns a list of message strings in printing order."
                (goto-char (cdr buf-pos))
                (org-gtd-cli/reorder-siblings-by-state))
              (save-buffer)
-             (princ (format "Done: %s (%s)\n" heading rel-file))
-             (dolist (msg auto-msgs)
-               (princ msg))))))))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "set-done")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (old_state . ,old-state)
+                    (new_state . "DONE")
+                    (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs))))
+               (princ (format "Done: %s (%s)\n" heading rel-file))
+               (dolist (msg auto-msgs)
+                 (princ msg)))))))))
   (kill-emacs 0))
+
+(defun org-gtd-cli/parse-side-effects (msgs)
+  "Parse auto-progress message strings into a JSON-serializable side_effects vector."
+  (let ((effects '()))
+    (dolist (msg msgs)
+      (cond
+       ((string-match "Auto-completed project: \"\\([^\"]+\\)\" (\\([^)]+\\))" msg)
+        (push `((action . "state-change")
+                (heading . ,(match-string 1 msg))
+                (old_state . "TODO")
+                (new_state . "DONE")
+                (file . ,(match-string 2 msg)))
+              effects))
+       ((string-match "Auto-progressed: \"\\([^\"]+\\)\" -> NEXT (\\([^)]+\\))" msg)
+        (push `((action . "state-change")
+                (heading . ,(match-string 1 msg))
+                (old_state . "TODO")
+                (new_state . "NEXT")
+                (file . ,(match-string 2 msg)))
+              effects))
+       ((string-match "Auto-progressed: \"\\([^\"]+\\)\" -> NEXT (in subproject \"\\([^\"]+\\)\") (\\([^)]+\\))" msg)
+        (push `((action . "state-change")
+                (heading . ,(match-string 1 msg))
+                (old_state . "TODO")
+                (new_state . "NEXT")
+                (file . ,(match-string 3 msg)))
+              effects))))
+    (apply #'vector (nreverse effects))))
 
 ;; --- set-state ---
 
