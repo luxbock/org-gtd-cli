@@ -2702,3 +2702,89 @@ class TestJsonAgenda:
         assert rc == 0
         for task in data["tasks"]:
             assert task["priority"] is None or isinstance(task["priority"], str)
+
+
+# ===========================================================================
+# JSON: show command
+# ===========================================================================
+
+class TestJsonShow:
+    """Tests for --json show output."""
+
+    def test_show_returns_valid_json(self, org_dir):
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "show"
+        assert data["heading"] == "Buy groceries"
+        assert data["state"] == "TODO"
+        assert data["file"] == "inbox.org"
+
+    def test_show_task_all_fields(self, org_dir):
+        """Show should include all required fields."""
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        for field in ["heading", "state", "priority", "tags", "file",
+                       "scheduled", "deadline", "parent", "is_project",
+                       "body", "subtasks", "progress"]:
+            assert field in data, f"Missing field: {field}"
+
+    def test_show_project_with_subtasks(self, org_dir):
+        """Show on a project should include subtasks and progress."""
+        # First find a project
+        search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        project = None
+        for task in search_data["tasks"]:
+            if task["is_project"]:
+                project = task
+                break
+        if project is None:
+            pytest.skip("No projects in fixture data")
+        data, _, rc = run_cli_json("show", project["heading"], org_dir=org_dir)
+        assert rc == 0
+        assert data["is_project"] is True
+        assert isinstance(data["subtasks"], list)
+        assert len(data["subtasks"]) > 0
+        assert data["progress"] is not None
+        assert "done" in data["progress"]
+        assert "total" in data["progress"]
+
+    def test_show_leaf_task(self, org_dir):
+        """Show on a leaf task should have empty subtasks and null progress."""
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["is_project"] is False
+        assert data["subtasks"] == []
+        assert data["progress"] is None
+
+    def test_show_plain_ignored_in_json(self, org_dir):
+        """--plain flag should be ignored in JSON mode."""
+        data, _, rc = run_cli_json("show", "Buy groceries", "--plain", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["heading"] == "Buy groceries"
+
+    def test_show_subtask_fields(self, org_dir):
+        """Subtask objects should have correct fields."""
+        search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
+        project = None
+        for task in search_data["tasks"]:
+            if task["is_project"]:
+                project = task
+                break
+        if project is None:
+            pytest.skip("No projects in fixture data")
+        data, _, rc = run_cli_json("show", project["heading"], org_dir=org_dir)
+        assert rc == 0
+        if data["subtasks"]:
+            child = data["subtasks"][0]
+            assert "heading" in child
+            assert "state" in child
+            assert "priority" in child
+            assert "tags" in child
+            assert "scheduled" in child
+            assert "deadline" in child
+            assert "is_project" in child
+            # No file or parent (redundant in subtask context)
+            assert "file" not in child
+            assert "parent" not in child
