@@ -466,10 +466,9 @@ search intentionally returns all matches with exit code 0.
 STATES-CSV defaults to \"TODO,NEXT\".  \"all\" means no state filter.
 TAG-FILTER limits to tasks with that tag (supports inheritance).
 FILE-NAME restricts search to a single file in org-directory."
-  (when (or (null substring) (string-empty-p substring))
-    (org-gtd-cli/error "Error: search requires a SUBSTR argument")
-    (kill-emacs 1))
-  (setq substring (org-gtd-cli/strip-priority-cookie substring))
+  ;; Normalize: nil/empty SUBSTR means match all headings (filter-only mode)
+  (when (and substring (not (string-empty-p substring)))
+    (setq substring (org-gtd-cli/strip-priority-cookie substring)))
   (let* ((state-filter
           (cond
            ((or (null states-csv) (string-empty-p states-csv)
@@ -502,7 +501,9 @@ FILE-NAME restricts search to a single file in org-directory."
                (when (and state
                           (or (null state-filter)
                               (member state state-filter))
-                          (or (string-match-p (regexp-quote substring)
+                          ;; Substring filter (skip when no SUBSTR)
+                          (or (null substring) (string-empty-p substring)
+                              (string-match-p (regexp-quote substring)
                                               heading)
                               (string-match-p (regexp-quote substring)
                                               (org-gtd-cli/strip-markup heading)))

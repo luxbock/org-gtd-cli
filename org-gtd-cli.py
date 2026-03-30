@@ -121,6 +121,9 @@ def cmd_agenda(args):
 
 def cmd_search(args):
     tag = normalize_tags(args.tag)
+    if not args.substr and not tag and not args.state:
+        print("Error: provide SUBSTR, --tag, or --state", file=sys.stderr)
+        return 1
     expr = (f'(org-gtd-cli/search {to_elisp(args.substr)} '
             f'{to_elisp(args.state)} {to_elisp(tag)} {to_elisp(args.file)})')
     return run_elisp(expr)
@@ -415,7 +418,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser("search", help="Find tasks by heading substring")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring to match")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring to match (optional when --tag or --state is provided)")
     p.add_argument("--state", help="Filter by state (comma-separated, or 'all')")
     p.add_argument("--tag", "--tags", action="append", dest="tag",
                    help="Filter by tag (repeat for AND, comma within for OR)")

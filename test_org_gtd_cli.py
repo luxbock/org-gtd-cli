@@ -475,6 +475,24 @@ class TestSearch:
         assert rc == 0
         assert "No matches." in stderr
 
+    def test_search_without_substr_with_tag(self, org_dir):
+        """search --tag @agent returns agent tasks without requiring SUBSTR."""
+        stdout, stderr, rc = run_cli("search", "--tag", "@agent", "--state", "all", org_dir=org_dir)
+        assert rc == 0
+        assert "Set up automated backups" in stdout
+        assert "Buy a formicarium" in stdout
+
+    def test_search_without_substr_with_state(self, org_dir):
+        """search --state WAITING returns waiting tasks without requiring SUBSTR."""
+        stdout, stderr, rc = run_cli("search", "--state", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        assert "Consider buying a new monitor" in stdout
+
+    def test_search_without_substr_or_filters_fails(self, org_dir):
+        """Bare search with no SUBSTR and no filters should fail."""
+        stdout, stderr, rc = run_cli("search", org_dir=org_dir)
+        assert rc != 0
+
 
 # ===========================================================================
 # 8. show
