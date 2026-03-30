@@ -2647,3 +2647,58 @@ class TestJsonSearch:
         assert rc == 0
         for task in data["tasks"]:
             assert task["state"] == "TODO"
+
+
+# ===========================================================================
+# JSON: agenda command
+# ===========================================================================
+
+class TestJsonAgenda:
+    """Tests for --json agenda output."""
+
+    def test_agenda_returns_valid_json(self, org_dir):
+        data, _, rc = run_cli_json("agenda", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "agenda"
+        assert isinstance(data["tasks"], list)
+        assert data["count"] == len(data["tasks"])
+
+    def test_agenda_task_fields(self, org_dir):
+        """Each task should have required fields."""
+        data, _, rc = run_cli_json("agenda", org_dir=org_dir)
+        assert rc == 0
+        if data["count"] > 0:
+            task = data["tasks"][0]
+            assert "heading" in task
+            assert "state" in task
+            assert "priority" in task
+            assert "tags" in task
+            assert "file" in task
+            assert "scheduled" in task
+            assert "deadline" in task
+            assert "parent" in task
+            assert "is_project" in task
+            # No index field in agenda
+            assert "index" not in task
+
+    def test_agenda_with_state_filter(self, org_dir):
+        data, _, rc = run_cli_json("agenda", "--state", "TODO", org_dir=org_dir)
+        assert rc == 0
+        for task in data["tasks"]:
+            assert task["state"] == "TODO"
+
+    def test_agenda_scheduled_deadline_fields(self, org_dir):
+        """Scheduled/deadline should be string or null."""
+        data, _, rc = run_cli_json("agenda", org_dir=org_dir)
+        assert rc == 0
+        for task in data["tasks"]:
+            assert task["scheduled"] is None or isinstance(task["scheduled"], str)
+            assert task["deadline"] is None or isinstance(task["deadline"], str)
+
+    def test_agenda_priority_field(self, org_dir):
+        """Priority should be string or null."""
+        data, _, rc = run_cli_json("agenda", org_dir=org_dir)
+        assert rc == 0
+        for task in data["tasks"]:
+            assert task["priority"] is None or isinstance(task["priority"], str)

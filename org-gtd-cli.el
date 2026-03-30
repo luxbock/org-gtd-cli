@@ -425,7 +425,6 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
              (while (re-search-forward org-heading-regexp nil t)
                (let* ((state (org-get-todo-state))
                       (heading (org-get-heading t t t t))
-                      (priority (org-get-priority (thing-at-point 'line t)))
                       (priority-char (org-entry-get nil "PRIORITY"))
                       (tags (org-get-tags))
                       (tags-str (when tags (concat ":" (mapconcat #'identity tags ":") ":")))
@@ -461,21 +460,77 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                                                                (time-add to-time (seconds-to-time 86400))))
                                       (and d-time (time-less-p d-time
                                                                (time-add to-time (seconds-to-time 86400))))))))
-                   (let ((line-str
-                          (concat state
-                                  (when (and priority-char
-                                             (not (string= priority-char "B")))
-                                    ;; Only show non-default priority
-                                    (concat " [#" priority-char "]"))
-                                  " " heading
-                                  (when tags-str (concat " " tags-str))
-                                  " (" rel-file ")"
-                                  (when scheduled (concat " S:" scheduled))
-                                  (when deadline (concat " D:" deadline)))))
-                     (push line-str results))))))))))
-    (dolist (line (nreverse results))
-      (princ (concat line "\n")))
+                   (let ((parent-heading
+                          (save-excursion
+                            (if (org-up-heading-safe)
+                                (org-get-heading t t t t)
+                              nil)))
+                         (is-project
+                          (org-gtd-cli/has-todo-children-p)))
+                     (push (list state heading priority-char
+                                 (vconcat (mapcar #'identity tags))
+                                 tags-str rel-file scheduled deadline
+                                 parent-heading is-project)
+                           results))))))))))
+    (setq results (nreverse results))
+    (if org-gtd-cli/json-mode
+        (org-gtd-cli/output-agenda-json results)
+      (dolist (r results)
+        (princ (org-gtd-cli/format-agenda-line r))))
     (kill-emacs 0)))
+
+(defun org-gtd-cli/has-todo-children-p ()
+  "Check if heading at point has direct children with TODO keywords."
+  (let ((child-level (1+ (org-current-level)))
+        (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+        (found nil))
+    (save-excursion
+      (forward-line 1)
+      (while (and (not found) (< (point) subtree-end)
+                  (re-search-forward org-heading-regexp subtree-end t))
+        (when (and (= (org-current-level) child-level)
+                   (org-get-todo-state))
+          (setq found t))))
+    found))
+
+(defun org-gtd-cli/output-agenda-json (results)
+  "Output RESULTS as JSON for the agenda command."
+  (let ((tasks '()))
+    (dolist (r results)
+      (push `((heading . ,(nth 1 r))
+              (state . ,(nth 0 r))
+              (priority . ,(or (nth 2 r) :null))
+              (tags . ,(or (nth 3 r) []))
+              (file . ,(nth 5 r))
+              (scheduled . ,(or (nth 6 r) :null))
+              (deadline . ,(or (nth 7 r) :null))
+              (parent . ,(or (nth 8 r) :null))
+              (is_project . ,(if (nth 9 r) t :false)))
+            tasks))
+    (org-gtd-cli/output
+     `((version . 1)
+       (command . "agenda")
+       (tasks . ,(apply #'vector (nreverse tasks)))
+       (count . ,(length results))))))
+
+(defun org-gtd-cli/format-agenda-line (r)
+  "Format a single agenda result R as a text line."
+  (let ((state (nth 0 r))
+        (heading (nth 1 r))
+        (priority-char (nth 2 r))
+        (tags-str (nth 4 r))
+        (rel-file (nth 5 r))
+        (scheduled (nth 6 r))
+        (deadline (nth 7 r)))
+    (concat state
+            (when (and priority-char (not (string= priority-char "B")))
+              (concat " [#" priority-char "]"))
+            " " heading
+            (when tags-str (concat " " tags-str))
+            (format " (%s)" rel-file)
+            (when scheduled (concat " S:" scheduled))
+            (when deadline (concat " D:" deadline))
+            "\n")))
 
 ;; --- search ---
 
