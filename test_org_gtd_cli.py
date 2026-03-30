@@ -3025,3 +3025,84 @@ class TestJsonMutations:
         assert rc == 0
         assert data["command"] == "set-body"
         assert data["heading"] == "Buy groceries"
+
+    def test_set_next_leaf_json(self, org_dir):
+        data, _, rc = run_cli_json("set-next", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-next"
+        assert data["new_state"] == "NEXT"
+        assert isinstance(data["side_effects"], list)
+
+    def test_refile_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "refile", "Buy groceries", "--category", "Shopping",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["command"] == "refile"
+        assert "target_heading" in data
+        assert "target_file" in data
+
+    def test_refile_dry_run_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "refile", "Buy groceries", "--category", "Shopping", "--dry-run",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["dry_run"] is True
+
+    def test_add_task_json(self, org_dir):
+        data, _, rc = run_cli_json("add-task", "Test JSON task", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "add-task"
+        assert data["heading"] == "Test JSON task"
+        assert data["state"] == "TODO"
+
+    def test_add_task_with_category_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "add-task", "Categorized task", "--category", "Shopping",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["category"] is not None
+
+    def test_add_subtask_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", "Sub item",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["command"] == "add-subtask"
+        assert data["heading"] == "Sub item"
+        assert "parent" in data
+        assert isinstance(data["side_effects"], list)
+
+    def test_add_event_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "add-event", "Doctor visit", "--date", "2026-04-15",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["command"] == "add-event"
+        assert data["date"] == "2026-04-15"
+        assert data["tag"] == "calpersonal"
+
+    def test_add_note_json(self, org_dir):
+        data, _, rc = run_cli_json("add-note", "Test research", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "add-note"
+        assert isinstance(data["sections"], list)
+
+    def test_delete_json(self, org_dir):
+        run_cli("add-task", "Delete me test", org_dir=org_dir)
+        data, _, rc = run_cli_json("delete", "Delete me test", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "delete"
+        assert data["heading"] == "Delete me test"
+
+    def test_delete_dry_run_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "delete", "Buy groceries", "--dry-run", org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["dry_run"] is True

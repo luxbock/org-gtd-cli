@@ -1163,14 +1163,20 @@ at least one direct child with a TODO keyword."
                          priority tags-csv schedule deadline body))
            (insert "\n")))
         (save-buffer))
-      (let ((display-target
-             (if use-category
-                 (format "%s/%s"
-                         (org-gtd-cli/relative-filename target-file)
-                         matched-path)
-               (org-gtd-cli/relative-filename target-file))))
-        (princ (format "Added: %s -> %s (%s)\n" title display-target
-                       (org-gtd-cli/relative-filename target-file))))))
+      (if org-gtd-cli/json-mode
+          (org-gtd-cli/output
+           `((version . 1) (command . "add-task")
+             (heading . ,title) (state . ,todo-state)
+             (file . ,(org-gtd-cli/relative-filename target-file))
+             (category . ,(or matched-path :null))))
+        (let ((display-target
+               (if use-category
+                   (format "%s/%s"
+                           (org-gtd-cli/relative-filename target-file)
+                           matched-path)
+                 (org-gtd-cli/relative-filename target-file))))
+          (princ (format "Added: %s -> %s (%s)\n" title display-target
+                         (org-gtd-cli/relative-filename target-file)))))))
   (kill-emacs 0))
 
 ;; --- add-subtask ---
@@ -1207,9 +1213,10 @@ at least one direct child with a TODO keyword."
        (let* ((parent-heading (org-get-heading t t t t))
               (parent-level (org-current-level))
               (child-level (1+ parent-level))
-              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (parent-was-next (string= (org-get-todo-state) "NEXT")))
          ;; Demote NEXT parent to TODO (a NEXT task becoming a project should be TODO)
-         (when (string= (org-get-todo-state) "NEXT")
+         (when parent-was-next
            (let ((org-inhibit-logging nil))
              (org-todo "TODO")))
          ;; Go to end of subtree
@@ -1223,8 +1230,19 @@ at least one direct child with a TODO keyword."
          (while (and (not (eobp)) (looking-at-p "\n"))
            (delete-char 1))
          (save-buffer)
-         (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
-                        title parent-heading rel-file))))))
+         (if org-gtd-cli/json-mode
+             (org-gtd-cli/output
+              `((version . 1) (command . "add-subtask")
+                (heading . ,title) (state . ,todo-state)
+                (file . ,rel-file) (parent . ,parent-heading)
+                (side_effects . ,(if parent-was-next
+                                     (vector `((action . "state-change")
+                                               (heading . ,parent-heading)
+                                               (old_state . "NEXT")
+                                               (new_state . "TODO")))
+                                   []))))
+           (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
+                          title parent-heading rel-file)))))))
   (kill-emacs 0))
 
 ;; --- add-event ---
@@ -1273,8 +1291,20 @@ at least one direct child with a TODO keyword."
                          (if cal-tag (format " :%s:" cal-tag) "")
                          timestamp))))
       (save-buffer))
-    (princ (format "Added event: %s -> %s\n"
-                   title (org-gtd-cli/relative-filename target-file))))
+    (if org-gtd-cli/json-mode
+        (let ((end-date-val (when (and end-date (not (string-empty-p end-date))
+                                       (not (equal end-date "nil")))
+                              end-date)))
+          (org-gtd-cli/output
+           `((version . 1) (command . "add-event")
+             (heading . ,title)
+             (file . ,(org-gtd-cli/relative-filename target-file))
+             (date . ,date)
+             (time . ,(or time-str :null))
+             (end_date . ,(or end-date-val :null))
+             (tag . ,(or cal-tag :null)))))
+      (princ (format "Added event: %s -> %s\n"
+                     title (org-gtd-cli/relative-filename target-file)))))
   (kill-emacs 0))
 
 ;; --- add-note ---
@@ -1327,7 +1357,21 @@ at least one direct child with a TODO keyword."
                (goto-char insert-point)
                (insert (format "Research file: [[file:agent-notes/%s.org]]\n" slug))))
           (save-buffer)))))
-    (princ (format "Created: %s\n" note-file)))
+    (if org-gtd-cli/json-mode
+        (let ((linked (and link-task (not (string-empty-p link-task))
+                           (not (equal link-task "nil"))))
+              (rel-note (org-gtd-cli/relative-filename note-file)))
+          (org-gtd-cli/output
+           `((version . 1) (command . "add-note")
+             (heading . ,title) (file . ,rel-note)
+             (sections . ,(vconcat sections))
+             (linked_task . ,(if linked link-task :null))
+             (side_effects . ,(if linked
+                                  (vector `((action . "append-body")
+                                            (heading . ,link-task)
+                                            (text . ,(format "Research file: [[file:agent-notes/%s.org]]" slug))))
+                                [])))))
+      (princ (format "Created: %s\n" note-file))))
   (kill-emacs 0))
 
 ;; --- append-body ---
@@ -1833,17 +1877,33 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
          (let* ((heading (org-get-heading t t t t))
                 (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
                 (rel-target (org-gtd-cli/relative-filename target-file)))
-           (if is-dry-run
-               (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
-                              heading rel-target target-name rel-file))
-             ;; Perform the refile
-             (let ((rfloc (list (org-get-heading t t t t)
-                                target-file nil target-pos)))
-               (org-refile nil nil rfloc))
-             (save-buffer)
-             (with-current-buffer target-buf (save-buffer))
-             (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
-                            heading rel-target target-name rel-file)))))))
+           (let ((target-heading (with-current-buffer target-buf
+                                    (org-with-wide-buffer
+                                     (goto-char target-pos)
+                                     (org-get-heading t t t t)))))
+             (if is-dry-run
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/output
+                      `((version . 1) (command . "refile")
+                        (heading . ,heading) (file . ,rel-file)
+                        (target_heading . ,target-heading)
+                        (target_file . ,rel-target) (dry_run . t)))
+                   (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
+                                  heading rel-target target-name rel-file)))
+               ;; Perform the refile
+               (let ((rfloc (list (org-get-heading t t t t)
+                                  target-file nil target-pos)))
+                 (org-refile nil nil rfloc))
+               (save-buffer)
+               (with-current-buffer target-buf (save-buffer))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1) (command . "refile")
+                      (heading . ,heading) (file . ,rel-file)
+                      (target_heading . ,target-heading)
+                      (target_file . ,rel-target)))
+                 (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
+                                heading rel-target target-name rel-file)))))))))
     (kill-emacs 0)))
 
 ;; --- set-next ---
@@ -1880,11 +1940,17 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                    (setq first-todo-pos (point)))))))
          (cond
           ((not has-children)
-           ;; Leaf task: set it to NEXT directly (like set-state SUBSTR NEXT)
+           ;; Leaf task: set it to NEXT directly
            (let ((current-state (org-get-todo-state)))
              (cond
               ((string= current-state "NEXT")
-               (org-gtd-cli/error "Already NEXT: \"%s\" (%s)" heading rel-file))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1) (command . "set-next")
+                      (heading . ,heading) (file . ,rel-file)
+                      (old_state . "NEXT") (new_state . "NEXT")
+                      (side_effects . [])))
+                 (org-gtd-cli/error "Already NEXT: \"%s\" (%s)" heading rel-file)))
               ((not (member current-state org-not-done-keywords))
                (org-gtd-cli/error "Error: \"%s\" is in done state %s" heading current-state)
                (kill-emacs 1))
@@ -1892,23 +1958,50 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                (let ((org-inhibit-logging nil))
                  (org-todo "NEXT"))
                (save-buffer)
-               (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file))))))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1) (command . "set-next")
+                      (heading . ,heading) (file . ,rel-file)
+                      (old_state . ,current-state) (new_state . "NEXT")
+                      (side_effects . [])))
+                 (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file)))))))
           (existing-next
-           (org-gtd-cli/error "Already has NEXT: \"%s\" (%s)"
-                              existing-next rel-file)
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "set-next")
+                  (heading . ,heading) (file . ,rel-file)
+                  (old_state . ,(org-get-todo-state))
+                  (new_state . ,(org-get-todo-state))
+                  (side_effects . [])))
+             (org-gtd-cli/error "Already has NEXT: \"%s\" (%s)"
+                                existing-next rel-file))
            (kill-emacs 0))
           ((not first-todo-pos)
            (org-gtd-cli/error "Error: \"%s\" has no TODO children to promote" heading)
            (kill-emacs 1))
           (t
            (goto-char first-todo-pos)
-           (let ((child-heading (org-get-heading t t t t)))
+           (let* ((child-heading (org-get-heading t t t t))
+                  (project-state (save-excursion
+                                   (goto-char (cdr buf-pos))
+                                   (org-get-todo-state))))
              (let ((org-inhibit-logging nil))
                (org-todo "NEXT"))
              (org-gtd-cli/reorder-siblings-by-state)
              (save-buffer)
-             (princ (format "Set NEXT: \"%s\" (%s)\n"
-                            child-heading rel-file)))))))))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1) (command . "set-next")
+                    (heading . ,heading) (file . ,rel-file)
+                    (old_state . ,project-state) (new_state . ,project-state)
+                    (side_effects . ,(vector
+                                     `((action . "state-change")
+                                       (heading . ,child-heading)
+                                       (old_state . "TODO")
+                                       (new_state . "NEXT")
+                                       (file . ,rel-file))))))
+               (princ (format "Set NEXT: \"%s\" (%s)\n"
+                              child-heading rel-file))))))))))
   (kill-emacs 0))
 
 ;; --- move ---
@@ -1925,10 +2018,20 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
          (cond
           ((string= direction "up")
            (org-move-subtree-up)
-           (princ (format "Moved: \"%s\" up (%s)\n" heading rel-file)))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "move")
+                  (heading . ,heading) (file . ,rel-file)
+                  (direction . "up") (sibling . :null)))
+             (princ (format "Moved: \"%s\" up (%s)\n" heading rel-file))))
           ((string= direction "down")
            (org-move-subtree-down)
-           (princ (format "Moved: \"%s\" down (%s)\n" heading rel-file)))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "move")
+                  (heading . ,heading) (file . ,rel-file)
+                  (direction . "down") (sibling . :null)))
+             (princ (format "Moved: \"%s\" down (%s)\n" heading rel-file))))
           ((or (string= direction "before") (string= direction "after"))
            ;; Find sibling
            (unless (and sibling-substring
@@ -1986,8 +2089,13 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                  (org-end-of-subtree t)
                  (unless (eobp) (forward-char))
                  (insert task-text "\n"))))
-           (princ (format "Moved: \"%s\" %s \"%s\" (%s)\n"
-                          heading direction sibling-substring rel-file)))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "move")
+                  (heading . ,heading) (file . ,rel-file)
+                  (direction . ,direction) (sibling . ,sibling-substring)))
+             (princ (format "Moved: \"%s\" %s \"%s\" (%s)\n"
+                            heading direction sibling-substring rel-file))))
           (t
            (org-gtd-cli/error "Error: unknown direction \"%s\"" direction)
            (kill-emacs 1)))
@@ -2372,7 +2480,11 @@ a TODO keyword that is NOT in `org-done-keywords'."
          ;; All checks passed
          (if is-dry-run
              (progn
-               (princ (format "Would archive: \"%s\" (%s)\n" heading rel-file))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1) (command . "archive")
+                      (heading . ,heading) (file . ,rel-file) (dry_run . t)))
+                 (princ (format "Would archive: \"%s\" (%s)\n" heading rel-file)))
                (kill-emacs 0))
            ;; Archive
            (org-archive-subtree)
@@ -2381,7 +2493,11 @@ a TODO keyword that is NOT in `org-done-keywords'."
              (when (and (buffer-file-name buf)
                         (buffer-modified-p buf))
                (with-current-buffer buf (save-buffer))))
-           (princ (format "Archived: \"%s\" (%s)\n" heading rel-file)))))))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "archive")
+                  (heading . ,heading) (file . ,rel-file)))
+             (princ (format "Archived: \"%s\" (%s)\n" heading rel-file))))))))
   (kill-emacs 0))
 
 ;; --- archive-all (batch) ---
@@ -2448,29 +2564,38 @@ a TODO keyword that is NOT in `org-done-keywords'."
           (setq archivable '())
           (maphash (lambda (_buf items) (setq archivable (append items archivable)))
                    by-buffer))
-        (dolist (item archivable)
-          (cl-destructuring-bind (buf pos heading rel-file) item
-            (if is-dry-run
-                (progn
-                  (princ (format "Would archive: \"%s\" (%s)\n"
-                                 heading rel-file))
-                  (cl-incf archived))
-              (with-current-buffer buf
-                (org-with-wide-buffer
-                 (goto-char pos)
-                 ;; Verify we're still at the right heading (positions may shift)
-                 (org-back-to-heading t)
-                 (org-archive-subtree)
-                 (cl-incf archived))))))
-        ;; Save all modified buffers
-        (unless is-dry-run
-          (dolist (buf (buffer-list))
-            (when (and (buffer-file-name buf)
-                       (buffer-modified-p buf))
-              (with-current-buffer buf (save-buffer)))))
-        (princ (format "%s %d tasks, %d skipped\n"
-                       (if is-dry-run "Would archive" "Archived")
-                       archived skipped)))))
+        (let ((archived-items '()))
+          (dolist (item archivable)
+            (cl-destructuring-bind (buf pos heading rel-file) item
+              (if is-dry-run
+                  (progn
+                    (push (list heading rel-file) archived-items)
+                    (cl-incf archived))
+                (with-current-buffer buf
+                  (org-with-wide-buffer
+                   (goto-char pos)
+                   (org-back-to-heading t)
+                   (org-archive-subtree)
+                   (push (list heading rel-file) archived-items)
+                   (cl-incf archived))))))
+          ;; Save all modified buffers
+          (unless is-dry-run
+            (dolist (buf (buffer-list))
+              (when (and (buffer-file-name buf)
+                         (buffer-modified-p buf))
+                (with-current-buffer buf (save-buffer)))))
+          (if org-gtd-cli/json-mode
+              (let ((items '()))
+                (dolist (a (nreverse archived-items))
+                  (push `((heading . ,(nth 0 a)) (file . ,(nth 1 a))) items))
+                (org-gtd-cli/output
+                 `((version . 1) (command . "archive")
+                   (archived . ,(apply #'vector (nreverse items)))
+                   (skipped . ,skipped) (count . ,archived)
+                   ,@(when is-dry-run '((dry_run . t))))))
+            (princ (format "%s %d tasks, %d skipped\n"
+                           (if is-dry-run "Would archive" "Archived")
+                           archived skipped)))))))
   (kill-emacs 0))
 
 ;; --- delete ---
@@ -2505,11 +2630,19 @@ Refuses to delete projects (tasks with subtasks)."
            (kill-emacs 1))
          (if is-dry-run
              (progn
-               (princ (format "Would delete: \"%s\" (%s)\n" task-heading rel-file))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1) (command . "delete")
+                      (heading . ,task-heading) (file . ,rel-file) (dry_run . t)))
+                 (princ (format "Would delete: \"%s\" (%s)\n" task-heading rel-file)))
                (kill-emacs 0))
            (org-cut-subtree)
            (save-buffer)
-           (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file))))))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "delete")
+                  (heading . ,task-heading) (file . ,rel-file)))
+             (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file)))))))
     (kill-emacs 0)))
 
 ;; --- fix-timestamps (batch) ---
