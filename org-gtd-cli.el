@@ -146,6 +146,21 @@ Strips org links and paired emphasis markers."
              "\\1" result)))
     result))
 
+(defun org-gtd-cli/match-tag-filter (tag-filter tags)
+  "Check if TAGS satisfy TAG-FILTER.
+TAG-FILTER wire format: AND groups joined by |, OR alternatives
+within a group joined by comma.  + within a group is equivalent
+to |.  Example: \"@agent|@errand,@phone\" means the task must have
+@agent AND must have either @errand or @phone.
+TAGS is a list of tag strings for the heading."
+  (let ((and-groups (split-string tag-filter "[|+]")))
+    (cl-every (lambda (group)
+                (let ((or-tags (split-string group ",")))
+                  (cl-some (lambda (tag)
+                             (member tag tags))
+                           or-tags)))
+              and-groups)))
+
 (defun org-gtd-cli/strip-priority-cookie (s)
   "Strip priority cookies like [#A], [#B], [#C] from S.
 Agents sometimes paste headings including the priority cookie."
@@ -404,12 +419,9 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                                 (member state state-filter)
                               ;; Default: non-done
                               (not (member state org-done-keywords)))
-                            ;; Tag filter
+                            ;; Tag filter (AND/OR: | for AND groups, , for OR within group)
                             (or (not tag-filter)
-                                (let ((tag-list (split-string tag-filter "[+]")))
-                                  (cl-every (lambda (tag)
-                                              (member tag tags))
-                                            tag-list)))
+                                (org-gtd-cli/match-tag-filter tag-filter tags))
                             ;; Date range filter (on scheduled or deadline)
                             ;; When date filters are active, tasks without
                             ;; any date are excluded (they can't be in range)
@@ -495,10 +507,7 @@ FILE-NAME restricts search to a single file in org-directory."
                               (string-match-p (regexp-quote substring)
                                               (org-gtd-cli/strip-markup heading)))
                           (or (not tag-filter)
-                              (let ((tag-list (split-string tag-filter "[+]")))
-                                (cl-every (lambda (tag)
-                                            (member tag tags))
-                                          tag-list))))
+                              (org-gtd-cli/match-tag-filter tag-filter tags)))
                  (push (list state heading rel-file) matches))))))))
     (setq matches (nreverse matches))
     (if (null matches)

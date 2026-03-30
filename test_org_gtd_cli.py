@@ -360,6 +360,30 @@ class TestAgenda:
         assert "Buy a formicarium" in stdout
         assert "Pay quarterly taxes" not in stdout
 
+    def test_tag_filter_and_via_repeated_flag(self, org_dir):
+        """--tag @agent --tag family returns only tasks with both tags."""
+        stdout, stderr, rc = run_cli("agenda", "--tag", "@agent", "--tag", "family", org_dir=org_dir)
+        assert rc == 0
+        assert "Buy a formicarium" in stdout
+        # These are @agent but not family:
+        assert "Set up automated backups" not in stdout
+
+    def test_tag_filter_and_via_plus(self, org_dir):
+        """--tag @agent+family is equivalent to two --tag flags (backwards compat)."""
+        stdout, stderr, rc = run_cli("agenda", "--tag", "@agent+family", org_dir=org_dir)
+        assert rc == 0
+        assert "Buy a formicarium" in stdout
+        assert "Set up automated backups" not in stdout
+
+    def test_tag_filter_or_via_comma(self, org_dir):
+        """--tag buy,travel returns tasks with either tag."""
+        stdout, stderr, rc = run_cli("agenda", "--tag", "buy,travel", org_dir=org_dir)
+        assert rc == 0
+        assert "Buy a small UPS" in stdout
+        assert "Holiday pre-trip tasks" in stdout
+        # Not in buy or travel:
+        assert "Pay quarterly taxes" not in stdout
+
     def test_date_range_filter(self, org_dir):
         stdout, stderr, rc = run_cli("agenda", "--from", "2026-03-10", "--to", "2026-03-15", org_dir=org_dir)
         assert rc == 0
