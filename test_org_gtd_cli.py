@@ -2936,7 +2936,6 @@ class TestJsonMutations:
 
     def test_set_done_with_auto_progress(self, org_dir):
         """Set-done on a project subtask should report auto-progress side effects."""
-        # Find a project with NEXT subtask, mark it done
         search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
         project = None
         for task in search_data["tasks"]:
@@ -2945,7 +2944,6 @@ class TestJsonMutations:
                 break
         if project is None:
             pytest.skip("No projects in fixture data")
-        # Get subtasks
         sub_data, _, _ = run_cli_json("subtasks", project["heading"], org_dir=org_dir)
         next_child = None
         for child in sub_data["subtasks"]:
@@ -2957,6 +2955,73 @@ class TestJsonMutations:
         data, _, rc = run_cli_json("set-done", next_child["heading"], org_dir=org_dir)
         assert rc == 0
         assert data["new_state"] == "DONE"
-        # Should have side_effects (auto-progress promotes next TODO to NEXT)
-        # May or may not have effects depending on fixture data
         assert isinstance(data["side_effects"], list)
+
+    def test_set_state_json(self, org_dir):
+        data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-state"
+        assert data["old_state"] == "TODO"
+        assert data["new_state"] == "WAITING"
+
+    def test_set_state_dry_run_json(self, org_dir):
+        data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert data["dry_run"] is True
+
+    def test_set_cancelled_json(self, org_dir):
+        """set-cancelled delegates to set-state, should produce JSON."""
+        data, _, rc = run_cli_json("set-cancelled", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-state"
+        assert data["new_state"] == "CANCELLED"
+
+    def test_set_priority_json(self, org_dir):
+        data, _, rc = run_cli_json("set-priority", "Buy groceries", "A", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-priority"
+        assert data["new_priority"] == "A"
+
+    def test_set_priority_clear_json(self, org_dir):
+        data, _, rc = run_cli_json("set-priority", "Buy groceries", "--clear", org_dir=org_dir)
+        assert rc == 0
+        assert data["new_priority"] is None
+
+    def test_rename_json(self, org_dir):
+        data, _, rc = run_cli_json("rename", "Buy groceries", "Buy food", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "rename"
+        assert data["heading"] == "Buy food"
+        assert data["old_heading"] == "Buy groceries"
+
+    def test_set_schedule_json(self, org_dir):
+        data, _, rc = run_cli_json("set-schedule", "Buy groceries", "2026-04-01", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-schedule"
+        assert data["scheduled"] is not None
+        assert "2026-04-01" in data["scheduled"]
+
+    def test_set_schedule_clear_json(self, org_dir):
+        # First schedule, then clear
+        run_cli_json("set-schedule", "Buy groceries", "2026-04-01", org_dir=org_dir)
+        data, _, rc = run_cli_json("set-schedule", "Buy groceries", "--clear", org_dir=org_dir)
+        assert rc == 0
+        assert data["scheduled"] is None
+
+    def test_set_deadline_json(self, org_dir):
+        data, _, rc = run_cli_json("set-deadline", "Buy groceries", "2026-04-15", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-deadline"
+        assert "2026-04-15" in data["deadline"]
+
+    def test_append_body_json(self, org_dir):
+        data, _, rc = run_cli_json("append-body", "Buy groceries", "Extra info", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "append-body"
+        assert data["heading"] == "Buy groceries"
+
+    def test_set_body_json(self, org_dir):
+        data, _, rc = run_cli_json("set-body", "Buy groceries", "New body text", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-body"
+        assert data["heading"] == "Buy groceries"

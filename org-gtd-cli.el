@@ -1376,7 +1376,13 @@ at least one direct child with a TODO keyword."
            (unless (bolp) (insert "\n"))
            (insert text "\n"))
          (save-buffer)
-         (princ (format "Appended to: \"%s\" (%s)\n" heading rel-file))))))
+         (if org-gtd-cli/json-mode
+             (org-gtd-cli/output
+              `((version . 1)
+                (command . "append-body")
+                (heading . ,heading)
+                (file . ,rel-file)))
+           (princ (format "Appended to: \"%s\" (%s)\n" heading rel-file)))))))
   (kill-emacs 0))
 
 ;; --- set-body ---
@@ -1429,7 +1435,13 @@ at least one direct child with a TODO keyword."
              (unless (bolp) (insert "\n"))
              (insert text "\n")))
          (save-buffer)
-         (princ (format "Set body: \"%s\" (%s)\n" heading rel-file))))))
+         (if org-gtd-cli/json-mode
+             (org-gtd-cli/output
+              `((version . 1)
+                (command . "set-body")
+                (heading . ,heading)
+                (file . ,rel-file)))
+           (princ (format "Set body: \"%s\" (%s)\n" heading rel-file)))))))
   (kill-emacs 0))
 
 ;; --- done: auto-progress helpers ---
@@ -1656,14 +1668,31 @@ Returns a list of message strings in printing order."
               (old-state (org-get-todo-state))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (if is-dry-run
-             (princ (format "Would change: \"%s\" %s -> %s (%s)\n"
-                            heading old-state new-state rel-file))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "set-state")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (old_state . ,(or old-state :null))
+                    (new_state . ,new-state)
+                    (dry_run . t)))
+               (princ (format "Would change: \"%s\" %s -> %s (%s)\n"
+                              heading old-state new-state rel-file)))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
            (org-gtd-cli/reorder-siblings-by-state)
            (save-buffer)
-           (princ (format "State change: \"%s\" %s -> %s (%s)\n"
-                          heading old-state new-state rel-file)))))))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1)
+                  (command . "set-state")
+                  (heading . ,heading)
+                  (file . ,rel-file)
+                  (old_state . ,(or old-state :null))
+                  (new_state . ,new-state)))
+             (princ (format "State change: \"%s\" %s -> %s (%s)\n"
+                            heading old-state new-state rel-file))))))))
   (kill-emacs 0))
 
 ;; --- refile ---
@@ -1980,12 +2009,27 @@ Preserves TODO state, priority, and tags."
        (let* ((old-heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (if is-dry-run
-             (princ (format "Would rename: \"%s\" -> \"%s\" (%s)\n"
-                            old-heading new-title rel-file))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "rename")
+                    (heading . ,new-title)
+                    (old_heading . ,old-heading)
+                    (file . ,rel-file)
+                    (dry_run . t)))
+               (princ (format "Would rename: \"%s\" -> \"%s\" (%s)\n"
+                              old-heading new-title rel-file)))
            (org-edit-headline new-title)
            (save-buffer)
-           (princ (format "Renamed: \"%s\" -> \"%s\" (%s)\n"
-                          old-heading new-title rel-file)))))))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1)
+                  (command . "rename")
+                  (heading . ,new-title)
+                  (old_heading . ,old-heading)
+                  (file . ,rel-file)))
+             (princ (format "Renamed: \"%s\" -> \"%s\" (%s)\n"
+                            old-heading new-title rel-file))))))))
   (kill-emacs 0))
 
 ;; --- set-schedule ---
@@ -2012,21 +2056,51 @@ Preserves TODO state, priority, and tags."
          (cond
           (is-clear
            (if is-dry-run
-               (princ (format "Would clear schedule: \"%s\" (%s)\n"
-                              heading rel-file))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-schedule")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (scheduled . :null)
+                      (dry_run . t)))
+                 (princ (format "Would clear schedule: \"%s\" (%s)\n"
+                                heading rel-file)))
              (org-schedule '(4))
              (save-buffer)
-             (princ (format "Cleared schedule: \"%s\" (%s)\n"
-                            heading rel-file))))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "set-schedule")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (scheduled . :null)))
+               (princ (format "Cleared schedule: \"%s\" (%s)\n"
+                              heading rel-file)))))
           (date-str
            (let ((ts (org-gtd-cli/make-timestamp date-str time-str t)))
              (if is-dry-run
-                 (princ (format "Would schedule: \"%s\" %s (%s)\n"
-                                heading ts rel-file))
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/output
+                      `((version . 1)
+                        (command . "set-schedule")
+                        (heading . ,heading)
+                        (file . ,rel-file)
+                        (scheduled . ,ts)
+                        (dry_run . t)))
+                   (princ (format "Would schedule: \"%s\" %s (%s)\n"
+                                  heading ts rel-file)))
                (org-schedule nil ts)
                (save-buffer)
-               (princ (format "Scheduled: \"%s\" %s (%s)\n"
-                              heading ts rel-file)))))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-schedule")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (scheduled . ,ts)))
+                 (princ (format "Scheduled: \"%s\" %s (%s)\n"
+                                heading ts rel-file))))))
           (t
            (org-gtd-cli/error "Error: provide a DATE or --clear")
            (kill-emacs 1)))))))
@@ -2056,21 +2130,51 @@ Preserves TODO state, priority, and tags."
          (cond
           (is-clear
            (if is-dry-run
-               (princ (format "Would clear deadline: \"%s\" (%s)\n"
-                              heading rel-file))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-deadline")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (deadline . :null)
+                      (dry_run . t)))
+                 (princ (format "Would clear deadline: \"%s\" (%s)\n"
+                                heading rel-file)))
              (org-deadline '(4))
              (save-buffer)
-             (princ (format "Cleared deadline: \"%s\" (%s)\n"
-                            heading rel-file))))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "set-deadline")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (deadline . :null)))
+               (princ (format "Cleared deadline: \"%s\" (%s)\n"
+                              heading rel-file)))))
           (date-str
            (let ((ts (org-gtd-cli/make-timestamp date-str time-str t)))
              (if is-dry-run
-                 (princ (format "Would set deadline: \"%s\" %s (%s)\n"
-                                heading ts rel-file))
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/output
+                      `((version . 1)
+                        (command . "set-deadline")
+                        (heading . ,heading)
+                        (file . ,rel-file)
+                        (deadline . ,ts)
+                        (dry_run . t)))
+                   (princ (format "Would set deadline: \"%s\" %s (%s)\n"
+                                  heading ts rel-file)))
                (org-deadline nil ts)
                (save-buffer)
-               (princ (format "Deadline: \"%s\" %s (%s)\n"
-                              heading ts rel-file)))))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-deadline")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (deadline . ,ts)))
+                 (princ (format "Deadline: \"%s\" %s (%s)\n"
+                                heading ts rel-file))))))
           (t
            (org-gtd-cli/error "Error: provide a DATE or --clear")
            (kill-emacs 1)))))))
@@ -2105,22 +2209,56 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
          (cond
           (is-clear
            (if is-dry-run
-               (princ (format "Would clear priority: \"%s\" (%s)\n"
-                              heading rel-file))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-priority")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_priority . ,(or old-priority :null))
+                      (new_priority . :null)
+                      (dry_run . t)))
+                 (princ (format "Would clear priority: \"%s\" (%s)\n"
+                                heading rel-file)))
              (condition-case nil
                  (org-priority 'remove)
                (user-error nil))  ; no-op if no priority cookie
              (save-buffer)
-             (princ (format "Cleared priority: \"%s\" (%s)\n"
-                            heading rel-file))))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "set-priority")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (old_priority . ,(or old-priority :null))
+                    (new_priority . :null)))
+               (princ (format "Cleared priority: \"%s\" (%s)\n"
+                              heading rel-file)))))
           (priority
            (if is-dry-run
-               (princ (format "Would set priority: \"%s\" [#%s] -> [#%s] (%s)\n"
-                              heading (or old-priority "B") priority rel-file))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-priority")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_priority . ,(or old-priority :null))
+                      (new_priority . ,priority)
+                      (dry_run . t)))
+                 (princ (format "Would set priority: \"%s\" [#%s] -> [#%s] (%s)\n"
+                                heading (or old-priority "B") priority rel-file)))
              (org-priority (string-to-char priority))
              (save-buffer)
-             (princ (format "Priority: \"%s\" [#%s] -> [#%s] (%s)\n"
-                            heading (or old-priority "B") priority rel-file))))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "set-priority")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (old_priority . ,(or old-priority :null))
+                    (new_priority . ,priority)))
+               (princ (format "Priority: \"%s\" [#%s] -> [#%s] (%s)\n"
+                              heading (or old-priority "B") priority rel-file)))))
           (t
            (org-gtd-cli/error "Error: provide a PRIORITY (A, B, or C) or --clear")
            (kill-emacs 1)))))))
