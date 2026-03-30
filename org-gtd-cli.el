@@ -146,12 +146,18 @@ Strips org links and paired emphasis markers."
              "\\1" result)))
     result))
 
+(defun org-gtd-cli/strip-priority-cookie (s)
+  "Strip priority cookies like [#A], [#B], [#C] from S.
+Agents sometimes paste headings including the priority cookie."
+  (replace-regexp-in-string "\\[#[A-C]\\] ?" "" s))
+
 (defun org-gtd-cli/find-task (substring &optional index include-done exact)
   "Find a task by SUBSTRING match across all agenda files.
 Returns a cons (buffer . position) or exits with appropriate code.
 If INDEX is non-nil, select the Nth match (1-based).
 If INCLUDE-DONE is non-nil, also match done tasks.
 If EXACT is non-nil, require full heading match instead of substring."
+  (setq substring (org-gtd-cli/strip-priority-cookie substring))
   (let ((matches '()))
     (dolist (file (org-agenda-files))
       (when (file-exists-p file)
@@ -451,6 +457,7 @@ FILE-NAME restricts search to a single file in org-directory."
   (when (or (null substring) (string-empty-p substring))
     (org-gtd-cli/error "Error: search requires a SUBSTR argument")
     (kill-emacs 1))
+  (setq substring (org-gtd-cli/strip-priority-cookie substring))
   (let* ((state-filter
           (cond
            ((or (null states-csv) (string-empty-p states-csv)

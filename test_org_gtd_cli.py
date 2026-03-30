@@ -508,6 +508,18 @@ class TestShow:
         assert "TODO [#A] Pay quarterly taxes" in stdout
         assert "DEADLINE" not in stdout
 
+    def test_show_strips_priority_cookie_from_substr(self, org_dir):
+        """show '[#A] Pay quarterly taxes' finds the task (strips priority cookie)."""
+        stdout, stderr, rc = run_cli("show", "[#A] Pay quarterly taxes", org_dir=org_dir)
+        assert rc == 0
+        assert "Pay quarterly taxes" in stdout
+
+    def test_search_strips_priority_cookie(self, org_dir):
+        """search '[#A] Pay quarterly' finds the task."""
+        stdout, stderr, rc = run_cli("search", "[#A] Pay quarterly", "--state", "all", org_dir=org_dir)
+        assert rc == 0
+        assert "Pay quarterly taxes" in stdout
+
 
 # ===========================================================================
 # 9. subtasks
