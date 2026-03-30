@@ -2848,3 +2848,62 @@ class TestJsonSubtasks:
         for field in ["heading", "state", "priority", "tags",
                        "scheduled", "deadline", "is_project"]:
             assert field in child, f"Missing field: {field}"
+
+
+# ===========================================================================
+# JSON: categories command
+# ===========================================================================
+
+class TestJsonCategories:
+    """Tests for --json categories output."""
+
+    def test_categories_returns_valid_json(self, org_dir):
+        data, _, rc = run_cli_json("categories", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "categories"
+        assert isinstance(data["categories"], list)
+        assert len(data["categories"]) > 0
+        assert "file" in data
+
+    def test_categories_are_path_strings(self, org_dir):
+        data, _, rc = run_cli_json("categories", org_dir=org_dir)
+        assert rc == 0
+        for cat in data["categories"]:
+            assert isinstance(cat, str)
+
+
+# ===========================================================================
+# JSON: projects command
+# ===========================================================================
+
+class TestJsonProjects:
+    """Tests for --json projects output."""
+
+    def test_projects_returns_valid_json(self, org_dir):
+        data, _, rc = run_cli_json("projects", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "projects"
+        assert isinstance(data["projects"], list)
+        assert data["count"] == len(data["projects"])
+
+    def test_project_fields(self, org_dir):
+        data, _, rc = run_cli_json("projects", org_dir=org_dir)
+        assert rc == 0
+        if data["count"] > 0:
+            proj = data["projects"][0]
+            for field in ["heading", "path", "state", "tags", "file",
+                           "parent", "progress"]:
+                assert field in proj, f"Missing field: {field}"
+            assert "done" in proj["progress"]
+            assert "total" in proj["progress"]
+
+    def test_project_path_vs_heading(self, org_dir):
+        """Path should be full category path, heading should be just the name."""
+        data, _, rc = run_cli_json("projects", org_dir=org_dir)
+        assert rc == 0
+        if data["count"] > 0:
+            proj = data["projects"][0]
+            # Heading is a substring of path
+            assert proj["heading"] in proj["path"]

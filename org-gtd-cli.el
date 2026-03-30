@@ -862,19 +862,29 @@ FILE-NAME defaults to \"tasks.org\"."
     (unless (file-exists-p file)
       (org-gtd-cli/error "File not found: %s" target)
       (kill-emacs 1))
-    (with-current-buffer (find-file-noselect file)
-      (org-with-wide-buffer
-       (let ((rel-file (org-gtd-cli/relative-filename file)))
-         (goto-char (point-min))
-         (while (re-search-forward org-heading-regexp nil t)
-           (let ((state (org-get-todo-state)))
-             (unless state
-               (setq found t)
-               (princ (format "%s (%s)\n"
-                              (org-gtd-cli/heading-path-at-point)
-                              rel-file))))))))
-    (unless found
-      (org-gtd-cli/error "No categories found")))
+    (let ((categories '()))
+      (with-current-buffer (find-file-noselect file)
+        (org-with-wide-buffer
+         (let ((rel-file (org-gtd-cli/relative-filename file)))
+           (goto-char (point-min))
+           (while (re-search-forward org-heading-regexp nil t)
+             (let ((state (org-get-todo-state)))
+               (unless state
+                 (setq found t)
+                 (push (org-gtd-cli/heading-path-at-point) categories)))))))
+      (if org-gtd-cli/json-mode
+          (org-gtd-cli/output
+           `((version . 1)
+             (command . "categories")
+             (file . ,(if found
+                          (org-gtd-cli/relative-filename file)
+                        target))
+             (categories . ,(apply #'vector (nreverse categories)))))
+        (if found
+            (let ((rel-file (org-gtd-cli/relative-filename file)))
+              (dolist (cat (nreverse categories))
+                (princ (format "%s (%s)\n" cat rel-file))))
+          (org-gtd-cli/error "No categories found")))))
   (kill-emacs 0))
 
 ;; --- projects ---
@@ -912,17 +922,43 @@ at least one direct child with a TODO keyword."
                                (when (member child-state org-done-keywords)
                                  (cl-incf done-count)))))))
                      (when (> total-count 0)
-                       (push (format "%s (%s) [%d/%d]"
-                                     (org-gtd-cli/heading-path-at-point)
-                                     rel-file
-                                     done-count total-count)
-                             results)))))))))))
-    (if results
-        (dolist (line (nreverse results))
-          (princ (concat line "\n")))
-      (org-gtd-cli/error "No projects."))
-)
+                       (let ((heading (org-get-heading t t t t))
+                             (path (org-gtd-cli/heading-path-at-point))
+                             (tags (org-get-tags nil t))
+                             (parent (save-excursion
+                                       (if (org-up-heading-safe)
+                                           (org-get-heading t t t t)
+                                         nil))))
+                         (push (list heading path state tags
+                                     rel-file parent done-count total-count)
+                               results))))))))))))
+    (setq results (nreverse results))
+    (if org-gtd-cli/json-mode
+        (org-gtd-cli/output-projects-json results)
+      (if results
+          (dolist (r results)
+            (princ (format "%s (%s) [%d/%d]\n"
+                           (nth 1 r) (nth 4 r) (nth 6 r) (nth 7 r))))
+        (org-gtd-cli/error "No projects."))))
   (kill-emacs 0))
+
+(defun org-gtd-cli/output-projects-json (results)
+  "Output RESULTS as JSON for the projects command."
+  (let ((projects '()))
+    (dolist (r results)
+      (push `((heading . ,(nth 0 r))
+              (path . ,(nth 1 r))
+              (state . ,(nth 2 r))
+              (tags . ,(vconcat (mapcar #'identity (nth 3 r))))
+              (file . ,(nth 4 r))
+              (parent . ,(or (nth 5 r) :null))
+              (progress . ((done . ,(nth 6 r)) (total . ,(nth 7 r)))))
+            projects))
+    (org-gtd-cli/output
+     `((version . 1)
+       (command . "projects")
+       (projects . ,(apply #'vector (nreverse projects)))
+       (count . ,(length results))))))
 
 ;; --- process-agent-tasks ---
 
