@@ -3107,3 +3107,108 @@ class TestRemovedCommands:
         _, stderr, rc = run_cli("fix-timestamps", org_dir=org_dir)
         assert rc == 1
         assert "removed" in stderr.lower()
+
+
+# ===========================================================================
+# set-tags --add / --remove convenience flags
+# ===========================================================================
+
+class TestSetTagsAddRemoveFlags:
+    def test_set_tags_add_flag(self, org_dir):
+        """set-tags --add appends tags (routes to add-tags)."""
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--add", "urgent", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "inbox.org").read_text()
+        assert ":urgent:" in text
+        # Old tags preserved
+        assert ":buy:" in text
+        assert ":@errand:" in text
+
+    def test_set_tags_remove_flag(self, org_dir):
+        """set-tags --remove removes specific tags."""
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--remove", "buy", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "inbox.org").read_text()
+        assert ":buy:" not in text
+        # Other tags preserved
+        assert ":@errand:" in text
+
+    def test_set_tags_remove_nonexistent_tag(self, org_dir):
+        """set-tags --remove with tag not present is a no-op."""
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--remove", "nonexistent", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "inbox.org").read_text()
+        assert ":buy:" in text
+        assert ":@errand:" in text
+
+    def test_set_tags_add_dry_run(self, org_dir):
+        """set-tags --add with --dry-run does not modify."""
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--add", "urgent", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert ":urgent:" not in (org_dir / "inbox.org").read_text()
+
+    def test_set_tags_remove_dry_run(self, org_dir):
+        """set-tags --remove with --dry-run does not modify."""
+        stdout, stderr, rc = run_cli("set-tags", "Buy groceries", "--remove", "buy", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert ":buy:" in (org_dir / "inbox.org").read_text()
+
+    def test_set_tags_add_json(self, org_dir):
+        """set-tags --add with --json returns add-tags JSON."""
+        data, _, rc = run_cli_json("set-tags", "Buy groceries", "--add", "urgent", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "add-tags"
+        assert "urgent" in data["new_tags"]
+        assert "buy" in data["new_tags"]
+
+    def test_set_tags_remove_json(self, org_dir):
+        """set-tags --remove with --json returns set-tags JSON."""
+        data, _, rc = run_cli_json("set-tags", "Buy groceries", "--remove", "buy", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-tags"
+        assert "buy" not in data["new_tags"]
+        assert "@errand" in data["new_tags"]
+
+    def test_set_tags_mutual_exclusion(self, org_dir):
+        """--tags, --add, --remove are mutually exclusive."""
+        _, stderr, rc = run_cli("set-tags", "Buy groceries", "--tags", "x", "--add", "y", org_dir=org_dir)
+        assert rc != 0
+
+
+# ===========================================================================
+# set-next: reject leaf tasks under non-project parents
+# ===========================================================================
+
+class TestSetNextNonProjectParent:
+    def test_set_next_leaf_under_organizational_heading(self, org_dir):
+        """set-next on a leaf under an organizational heading should fail."""
+        # "Write quarterly report" is under "Work" (no TODO keyword)
+        stdout, stderr, rc = run_cli("set-next", "Write quarterly report", org_dir=org_dir)
+        assert rc == 1
+        assert "not inside a project" in stderr
+
+    def test_set_next_leaf_under_organizational_heading_json(self, org_dir):
+        """set-next on a leaf under organizational heading returns JSON error."""
+        data, stderr, rc = run_cli_json("set-next", "Write quarterly report", org_dir=org_dir)
+        assert rc == 1
+        # Extract JSON line from stderr (may contain Emacs loading messages)
+        err = None
+        for line in stderr.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                err = json.loads(line)
+                break
+        assert err is not None, f"No JSON found in stderr: {stderr}"
+        assert "not inside a project" in err["error"]
+        assert "set-state" in err["hint"]
+
+    def test_set_next_leaf_under_project_still_works(self, org_dir):
+        """set-next on a leaf under a project (parent has TODO keyword) works."""
+        # "Test on actual project" is under "Design CLI tool" (TODO keyword)
+        stdout, stderr, rc = run_cli("set-next", "Test on actual project", org_dir=org_dir)
+        assert rc == 0
+
+    def test_set_next_top_level_task_still_works(self, org_dir):
+        """set-next on an inbox task (no parent heading) works."""
+        stdout, stderr, rc = run_cli("set-next", "Buy groceries", org_dir=org_dir)
+        assert rc == 0

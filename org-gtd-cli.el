@@ -1940,6 +1940,23 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                    (setq first-todo-pos (point)))))))
          (cond
           ((not has-children)
+           ;; Leaf task: reject if parent is organizational (no TODO keyword)
+           (let ((parent-is-project
+                  (save-excursion
+                    (when (org-up-heading-safe)
+                      (org-get-todo-state)))))
+             (when (and (save-excursion (org-up-heading-safe))
+                        (not parent-is-project))
+               (if org-gtd-cli/json-mode
+                   (message "%s"
+                            (json-serialize
+                             `((error . ,(format "Cannot set-next: \"%s\" is not inside a project" heading))
+                               (hint . "Use set-state SUBSTR NEXT to set state directly.")
+                               (exit_code . 1))))
+                 (org-gtd-cli/error
+                  "Cannot set-next: \"%s\" is not inside a project\nHint: Use set-state SUBSTR NEXT to set state directly."
+                  heading))
+               (kill-emacs 1)))
            ;; Leaf task: set it to NEXT directly
            (let ((current-state (org-get-todo-state)))
              (cond
@@ -2460,6 +2477,53 @@ TAGS-CSV is a comma-separated string of tags to add."
            (if org-gtd-cli/json-mode
                (org-gtd-cli/output
                 `((version . 1) (command . "add-tags")
+                  (heading . ,heading) (file . ,rel-file)
+                  (old_tags . ,(vconcat old-tags))
+                  (new_tags . ,(vconcat new-tags))))
+             (princ (format "Tags: \"%s\" %s -> %s (%s)\n"
+                            heading
+                            (org-gtd-cli/format-tag-str old-tags)
+                            (org-gtd-cli/format-tag-str new-tags)
+                            rel-file))))))))
+  (kill-emacs 0))
+
+;; --- remove-tags ---
+
+(defun org-gtd-cli/remove-tags (substring tags-csv &optional index dry-run)
+  "Remove specific tags from an existing task.
+TAGS-CSV is a comma-separated string of tags to remove."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (remove-list (when (and tags-csv (not (string-empty-p tags-csv))
+                                 (not (equal tags-csv "nil")))
+                        (split-string tags-csv ",")))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (old-tags (org-get-tags nil t))
+              (new-tags (seq-remove (lambda (tag) (member tag remove-list)) old-tags)))
+         (if is-dry-run
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1) (command . "set-tags")
+                    (heading . ,heading) (file . ,rel-file)
+                    (old_tags . ,(vconcat old-tags))
+                    (new_tags . ,(vconcat new-tags))
+                    (dry_run . t)))
+               (princ (format "Would remove tags: \"%s\" %s -> %s (%s)\n"
+                              heading
+                              (org-gtd-cli/format-tag-str old-tags)
+                              (org-gtd-cli/format-tag-str new-tags)
+                              rel-file)))
+           (org-set-tags new-tags)
+           (save-buffer)
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1) (command . "set-tags")
                   (heading . ,heading) (file . ,rel-file)
                   (old_tags . ,(vconcat old-tags))
                   (new_tags . ,(vconcat new-tags))))

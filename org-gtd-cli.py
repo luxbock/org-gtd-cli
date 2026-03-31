@@ -363,8 +363,22 @@ def cmd_set_deadline(args):
 
 
 def cmd_set_tags(args):
+    add_flag = getattr(args, 'add', None)
+    remove_flag = getattr(args, 'remove', None)
+    if add_flag:
+        # Route --add to add-tags
+        expr = (f'(org-gtd-cli/add-tags {to_elisp(args.substr)} '
+                f'{to_elisp(add_flag)} '
+                f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+        return run_elisp(expr, json_mode=args.json)
+    if remove_flag:
+        # Route --remove to remove-tags
+        expr = (f'(org-gtd-cli/remove-tags {to_elisp(args.substr)} '
+                f'{to_elisp(remove_flag)} '
+                f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+        return run_elisp(expr, json_mode=args.json)
     if args.tags is None:
-        print("Error: --tags is required", file=sys.stderr)
+        print("Error: --tags, --add, or --remove is required", file=sys.stderr)
         return 1
     expr = (f'(org-gtd-cli/set-tags {to_elisp(args.substr)} '
             f'{to_elisp(args.tags)} '
@@ -659,7 +673,10 @@ Run 'org-gtd-cli <command> -h' for command details."""
 
     p = sub.add_parser("set-tags", help="Replace all tags")
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("--tags", required=True, help="Tags to set (comma-separated, empty string to clear)")
+    tag_group = p.add_mutually_exclusive_group(required=True)
+    tag_group.add_argument("--tags", help="Tags to set (comma-separated, empty string to clear)")
+    tag_group.add_argument("--add", help="Tags to add (comma-separated)")
+    tag_group.add_argument("--remove", help="Tags to remove (comma-separated)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_tags)
