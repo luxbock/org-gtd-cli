@@ -181,6 +181,13 @@ TAGS is a list of tag strings for the heading."
                            or-tags)))
               and-groups)))
 
+(defun org-gtd-cli/get-explicit-priority ()
+  "Return the priority letter if explicitly set on heading at point, or nil.
+`org-entry-get' returns the default priority (B) even when no cookie is set;
+this function only returns a value when a [#X] cookie is actually present."
+  (let ((pri (nth 3 (org-heading-components))))
+    (when pri (char-to-string pri))))
+
 (defun org-gtd-cli/strip-priority-cookie (s)
   "Strip priority cookies like [#A], [#B], [#C] from S.
 Agents sometimes paste headings including the priority cookie."
@@ -425,7 +432,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
              (while (re-search-forward org-heading-regexp nil t)
                (let* ((state (org-get-todo-state))
                       (heading (org-get-heading t t t t))
-                      (priority-char (org-entry-get nil "PRIORITY"))
+                      (priority-char (org-gtd-cli/get-explicit-priority))
                       (tags (org-get-tags))
                       (tags-str (when tags (concat ":" (mapconcat #'identity tags ":") ":")))
                       (scheduled (org-entry-get nil "SCHEDULED"))
@@ -680,7 +687,7 @@ state and priority — no tags, body, drawers, or planning lines."
   "Output JSON for the show command from point."
   (let* ((heading (org-get-heading t t t t))
          (state (org-get-todo-state))
-         (priority-char (org-entry-get nil "PRIORITY"))
+         (priority-char (org-gtd-cli/get-explicit-priority))
          (tags (org-get-tags nil t))
          (file (buffer-file-name))
          (rel-file (org-gtd-cli/relative-filename file))
@@ -719,7 +726,7 @@ state and priority — no tags, body, drawers, or planning lines."
         (when (= (org-current-level) child-level)
           (let* ((child-state (org-get-todo-state))
                  (child-heading (org-get-heading t t t t))
-                 (child-priority (org-entry-get nil "PRIORITY"))
+                 (child-priority (org-gtd-cli/get-explicit-priority))
                  (child-tags (org-get-tags nil t))
                  (child-scheduled (org-entry-get nil "SCHEDULED"))
                  (child-deadline (org-entry-get nil "DEADLINE"))
@@ -782,7 +789,7 @@ state and priority — no tags, body, drawers, or planning lines."
                       (child-heading (org-get-heading t t t t))
                       (child-scheduled (org-entry-get nil "SCHEDULED"))
                       (child-deadline (org-entry-get nil "DEADLINE"))
-                      (child-priority (org-entry-get nil "PRIORITY"))
+                      (child-priority (org-gtd-cli/get-explicit-priority))
                       (child-tags (org-get-tags nil t))
                       (child-is-project (org-gtd-cli/has-todo-children-p)))
                  (cl-incf total-count)
@@ -1938,6 +1945,23 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                    (setq existing-next (org-get-heading t t t t)))
                  (when (and child-state (string= child-state "TODO") (not first-todo-pos))
                    (setq first-todo-pos (point)))))))
+         ;; Subproject guard: project headings can't be NEXT.
+         ;; A subproject is a heading that has children AND whose parent
+         ;; also has a TODO keyword (i.e. it's nested inside a project).
+         (when (and has-children
+                   (save-excursion
+                     (when (org-up-heading-safe)
+                       (org-get-todo-state))))
+           (if org-gtd-cli/json-mode
+               (message "%s"
+                        (json-serialize
+                         `((error . ,(format "Cannot set-next on subproject: \"%s\" has subtasks" heading))
+                           (hint . "Use set-next on the parent project, or set-state on a specific subtask.")
+                           (exit_code . 1))))
+             (org-gtd-cli/error
+              "Cannot set-next on subproject: \"%s\" has subtasks\nHint: Use set-next on the parent project, or set-state on a specific subtask."
+              heading))
+           (kill-emacs 1))
          (cond
           ((not has-children)
            ;; Leaf task: reject if parent is organizational (no TODO keyword)
@@ -2330,7 +2354,7 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (old-priority (org-entry-get nil "PRIORITY")))
+              (old-priority (org-gtd-cli/get-explicit-priority)))
          (cond
           (is-clear
            (if is-dry-run

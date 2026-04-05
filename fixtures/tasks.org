@@ -15,6 +15,12 @@ CLOSED: [2026-03-05 Thu 16:00] SCHEDULED: <2026-03-05 Thu>
 - State "DONE"       from "TODO"       [2026-03-05 Thu 16:00]
 :END:
 [2026-03-03 Tue 09:00]
+** TODO Prepare onboarding guide
+[2026-03-12 Thu 10:00]
+*** TODO Draft outline
+[2026-03-12 Thu 10:00]
+*** TODO Write first chapter
+[2026-03-12 Thu 10:00]
 * Computers                                                               :computers:
 :PROPERTIES:
 :ID:       test-id-computers

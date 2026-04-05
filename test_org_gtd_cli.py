@@ -1326,21 +1326,46 @@ class TestSetNext:
         assert rc == 0
 
     def test_leaf_task_sets_to_next(self, org_dir):
-        stdout, stderr, rc = run_cli("set-next", "Pay quarterly taxes", org_dir=org_dir)
+        stdout, stderr, rc = run_cli("set-next", "Draft outline", org_dir=org_dir)
         assert rc == 0
         assert "Set NEXT" in stdout
-        assert "NEXT [#A] Pay quarterly taxes" in (org_dir / "tasks.org").read_text()
+        assert "NEXT Draft outline" in (org_dir / "tasks.org").read_text()
 
     def test_leaf_task_already_next_noop(self, org_dir):
-        run_cli("set-next", "Pay quarterly taxes", org_dir=org_dir)
-        stdout, stderr, rc = run_cli("set-next", "Pay quarterly taxes", org_dir=org_dir)
+        run_cli("set-next", "Draft outline", org_dir=org_dir)
+        stdout, stderr, rc = run_cli("set-next", "Draft outline", org_dir=org_dir)
         assert rc == 0
         assert "Already NEXT" in stderr
 
-    def test_subproject_set_next(self, org_dir):
-        stdout, stderr, rc = run_cli("set-next", "Design CLI tool", org_dir=org_dir)
+    def test_set_next_leaf_with_existing_next_sibling(self, org_dir):
+        """set-next on a leaf in a project that already has NEXT via subproject — succeeds."""
+        stdout, stderr, rc = run_cli("set-next", "Run smoke tests", org_dir=org_dir)
         assert rc == 0
-        assert "Already has NEXT" in stderr
+        assert "Set NEXT" in stdout
+
+    def test_subproject_set_next_fails(self, org_dir):
+        stdout, stderr, rc = run_cli("set-next", "Design CLI tool", org_dir=org_dir)
+        assert rc == 1
+        assert "has subtasks" in stderr
+
+    def test_subproject_without_next_set_next_fails(self, org_dir):
+        """set-next on a subproject with no NEXT children also fails."""
+        stdout, stderr, rc = run_cli("set-next", "Implement CLI tool", org_dir=org_dir)
+        assert rc == 1
+        assert "has subtasks" in stderr
+
+    def test_subproject_set_next_json_error(self, org_dir):
+        data, stderr, rc = run_cli_json("set-next", "Implement CLI tool", org_dir=org_dir)
+        assert rc == 1
+        err = None
+        for line in stderr.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                err = json.loads(line)
+                break
+        assert err is not None, f"No JSON found in stderr: {stderr}"
+        assert "has subtasks" in err["error"]
+        assert "hint" in err
 
 
 # ===========================================================================
@@ -3208,7 +3233,3 @@ class TestSetNextNonProjectParent:
         stdout, stderr, rc = run_cli("set-next", "Test on actual project", org_dir=org_dir)
         assert rc == 0
 
-    def test_set_next_top_level_task_still_works(self, org_dir):
-        """set-next on an inbox task (no parent heading) works."""
-        stdout, stderr, rc = run_cli("set-next", "Buy groceries", org_dir=org_dir)
-        assert rc == 0
