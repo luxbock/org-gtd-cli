@@ -31,7 +31,9 @@ ELISP_FILE = Path(__file__).parent / "org-gtd-cli.el"
 def org_dir(tmp_path):
     """Copy fixture org files to a temp directory."""
     for f in FIXTURES_DIR.glob("*.org"):
-        shutil.copy(f, tmp_path / f.name)
+        dest = tmp_path / f.name
+        shutil.copy(f, dest)
+        dest.chmod(0o644)
     (tmp_path / "agent-notes").mkdir(exist_ok=True)
     return tmp_path
 
@@ -68,7 +70,9 @@ def reset_fixtures(org_dir):
         else:
             item.unlink()
     for f in FIXTURES_DIR.glob("*.org"):
-        shutil.copy(f, org_dir / f.name)
+        dest = org_dir / f.name
+        shutil.copy(f, dest)
+        dest.chmod(0o644)
     (org_dir / "agent-notes").mkdir(exist_ok=True)
 
 
