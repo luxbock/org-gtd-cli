@@ -69,13 +69,19 @@ Called before each daemon-dispatch to ensure fresh file contents."
       (with-current-buffer buf
         (revert-buffer t t t)))))
 
-(defun org-gtd-cli/daemon-dispatch (body-fn json-mode-p stdout-file stderr-file exit-file)
+(defun org-gtd-cli/daemon-dispatch (body-fn json-mode-p org-dir stdout-file stderr-file exit-file)
   "Evaluate BODY-FN with output captured to temp files.
 Used by emacsclient --eval in daemon mode.
 
 JSON-MODE-P sets `org-gtd-cli/json-mode' for this call.
+ORG-DIR sets `org-directory' and `org-agenda-files' for this call.
 STDOUT-FILE receives princ output, STDERR-FILE receives message output,
 EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
+  ;; Update org-directory per call (may differ between invocations)
+  (setq org-directory org-dir)
+  (unless (string-suffix-p "/" org-directory)
+    (setq org-directory (concat org-directory "/")))
+  (setq org-agenda-files (list org-directory))
   (org-gtd-cli/revert-org-buffers)
   (setq org-gtd-cli/json-mode json-mode-p)
   (let ((org-gtd-cli--exit-code 0)

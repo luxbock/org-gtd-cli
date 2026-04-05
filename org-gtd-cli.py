@@ -22,7 +22,9 @@ EMACSCLIENT_BIN = "emacsclient"
 # Daemon mode: opt-in via ORG_GTD_CLI_DAEMON=1
 DAEMON_ENABLED = os.environ.get("ORG_GTD_CLI_DAEMON") == "1"
 _TMPDIR = os.environ.get("TMPDIR", "/tmp")
-SOCKET_PATH = os.path.join(_TMPDIR, "org-gtd-cli-socket")
+# Socket dir needs 700 permissions (Emacs server security requirement)
+_SOCKET_DIR = os.path.join(_TMPDIR, "org-gtd-cli")
+SOCKET_PATH = os.path.join(_SOCKET_DIR, "server")
 
 
 # --- Helpers ---
@@ -128,6 +130,7 @@ def _ensure_daemon() -> None:
     """Start the Emacs daemon if it's not already running."""
     if os.path.exists(SOCKET_PATH):
         return
+    os.makedirs(_SOCKET_DIR, mode=0o700, exist_ok=True)
     user_emacs_dir = os.path.join(_TMPDIR, "org-gtd-cli-emacs.d")
     os.makedirs(user_emacs_dir, exist_ok=True)
     cmd = [
@@ -168,6 +171,7 @@ def _run_daemon(expr: str, json_mode: bool = False, *, _retried: bool = False) -
     wrapped = (f'(org-gtd-cli/daemon-dispatch'
                f' (lambda () {expr})'
                f' {json_flag}'
+               f' "{escape_elisp(ORG_DIR)}"'
                f' "{escape_elisp(stdout_file)}"'
                f' "{escape_elisp(stderr_file)}"'
                f' "{escape_elisp(exit_file)}")')
