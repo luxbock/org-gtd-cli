@@ -10,12 +10,19 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 # --- Paths (set by Nix wrapper or environment) ---
 CORE_FILE = os.environ.get("ORG_GTD_CORE_FILE", "")
 ELISP_FILE = os.environ.get("ORG_GTD_ELISP_FILE", "")
 ORG_DIR = os.environ.get("ORG_DIRECTORY", os.path.expanduser("~/Nextcloud/org/"))
 EMACS_BIN = "emacs"
+EMACSCLIENT_BIN = "emacsclient"
+
+# Daemon mode: opt-in via ORG_GTD_CLI_DAEMON=1
+DAEMON_ENABLED = os.environ.get("ORG_GTD_CLI_DAEMON") == "1"
+_TMPDIR = os.environ.get("TMPDIR", "/tmp")
+SOCKET_PATH = os.path.join(_TMPDIR, "org-gtd-cli-socket")
 
 
 # --- Helpers ---
@@ -98,7 +105,7 @@ def normalize_tags(tag_list: list[str] | None) -> str | None:
     return "|".join(and_groups)
 
 
-def run_elisp(expr: str, json_mode: bool = False) -> int:
+def _run_batch(expr: str, json_mode: bool = False) -> int:
     """Run an elisp expression in batch Emacs. Returns exit code."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cmd = [
@@ -115,6 +122,93 @@ def run_elisp(expr: str, json_mode: bool = False) -> int:
         # Emacs --batch sends its own diagnostics to stderr; let them through
         result = subprocess.run(cmd, capture_output=False, env=env)
         return result.returncode
+
+
+def _ensure_daemon() -> None:
+    """Start the Emacs daemon if it's not already running."""
+    if os.path.exists(SOCKET_PATH):
+        return
+    user_emacs_dir = os.path.join(_TMPDIR, "org-gtd-cli-emacs.d")
+    os.makedirs(user_emacs_dir, exist_ok=True)
+    cmd = [
+        EMACS_BIN, "--daemon", "-q",
+        "--eval", f'(setq server-name "{escape_elisp(SOCKET_PATH)}")',
+        "--eval", f'(setq user-emacs-directory "{user_emacs_dir}/")',
+        "--eval", f'(setenv "ORG_DIRECTORY" "{ORG_DIR}")',
+        "-l", CORE_FILE,
+        "-l", ELISP_FILE,
+    ]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Wait for socket to appear
+    for _ in range(200):  # 200 * 50ms = 10s
+        if os.path.exists(SOCKET_PATH):
+            return
+        time.sleep(0.05)
+    print("Error: Emacs daemon failed to start (timeout)", file=sys.stderr)
+
+
+def _read_file_safe(path: str) -> str:
+    """Read a file's contents, returning empty string if missing."""
+    try:
+        with open(path) as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def _run_daemon(expr: str, json_mode: bool = False, *, _retried: bool = False) -> int:
+    """Run an elisp expression via emacsclient against the daemon."""
+    _ensure_daemon()
+
+    stdout_file = os.path.join(_TMPDIR, "org-gtd-cli-stdout")
+    stderr_file = os.path.join(_TMPDIR, "org-gtd-cli-stderr")
+    exit_file = os.path.join(_TMPDIR, "org-gtd-cli-exit")
+
+    json_flag = "t" if json_mode else "nil"
+    wrapped = (f'(org-gtd-cli/daemon-dispatch'
+               f' (lambda () {expr})'
+               f' {json_flag}'
+               f' "{escape_elisp(stdout_file)}"'
+               f' "{escape_elisp(stderr_file)}"'
+               f' "{escape_elisp(exit_file)}")')
+
+    result = subprocess.run(
+        [EMACSCLIENT_BIN, "--socket-name", SOCKET_PATH, "--eval", wrapped],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode != 0 and not _retried:
+        # Stale socket or daemon died — clean up and retry once
+        try:
+            os.unlink(SOCKET_PATH)
+        except FileNotFoundError:
+            pass
+        return _run_daemon(expr, json_mode, _retried=True)
+
+    if result.returncode != 0:
+        print(f"Error: emacsclient failed: {result.stderr.strip()}", file=sys.stderr)
+        return 1
+
+    stdout = _read_file_safe(stdout_file)
+    stderr = _read_file_safe(stderr_file)
+    exit_code_str = _read_file_safe(exit_file).strip()
+
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+
+    try:
+        return int(exit_code_str)
+    except ValueError:
+        return 0
+
+
+def run_elisp(expr: str, json_mode: bool = False) -> int:
+    """Run an elisp expression. Uses daemon if enabled, otherwise batch."""
+    if DAEMON_ENABLED:
+        return _run_daemon(expr, json_mode)
+    return _run_batch(expr, json_mode)
 
 
 # --- Grouped help formatter ---
