@@ -46,6 +46,10 @@
   (equal (getenv "ORG_GTD_CLI_JSON") "1")
   "When non-nil, output JSON instead of human-readable text.")
 
+(defvar org-gtd-cli/full-mode
+  (equal (getenv "ORG_GTD_CLI_FULL") "1")
+  "When non-nil, include body text in list commands (search, subtasks, agenda).")
+
 (defun org-gtd-cli/output (alist)
   "Output ALIST as JSON (json-mode) or do nothing (text mode).
 In JSON mode, serializes ALIST with `json-serialize' and prints to stdout.
@@ -69,11 +73,12 @@ Called before each daemon-dispatch to ensure fresh file contents."
       (with-current-buffer buf
         (revert-buffer t t t)))))
 
-(defun org-gtd-cli/daemon-dispatch (body-fn json-mode-p org-dir stdout-file stderr-file exit-file)
+(defun org-gtd-cli/daemon-dispatch (body-fn json-mode-p full-mode-p org-dir stdout-file stderr-file exit-file)
   "Evaluate BODY-FN with output captured to temp files.
 Used by emacsclient --eval in daemon mode.
 
 JSON-MODE-P sets `org-gtd-cli/json-mode' for this call.
+FULL-MODE-P sets `org-gtd-cli/full-mode' for this call.
 ORG-DIR sets `org-directory' and `org-agenda-files' for this call.
 STDOUT-FILE receives princ output, STDERR-FILE receives message output,
 EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
@@ -84,6 +89,7 @@ EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
   (setq org-agenda-files (list org-directory))
   (org-gtd-cli/revert-org-buffers)
   (setq org-gtd-cli/json-mode json-mode-p)
+  (setq org-gtd-cli/full-mode full-mode-p)
   (let ((org-gtd-cli--exit-code 0)
         (stderr-msgs '()))
     (with-temp-file stdout-file
@@ -244,6 +250,28 @@ this function only returns a value when a [#X] cookie is actually present."
 Agents sometimes paste headings including the priority cookie."
   (replace-regexp-in-string "\\[#[A-C]\\] ?" "" s))
 
+(defun org-gtd-cli/get-body-at-point ()
+  "Extract body text of heading at point.
+Returns the body string, or nil if empty.  Strips trailing creation
+timestamp.  Point must be on a heading line."
+  (let* ((level (org-current-level))
+         (child-level (1+ level))
+         (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+         (body-start (save-excursion (org-end-of-meta-data t) (point)))
+         (body-end (save-excursion
+                     (goto-char (if (> body-start subtree-end) subtree-end body-start))
+                     (if (re-search-forward
+                          (format "^\\*\\{%d,\\} " child-level)
+                          subtree-end t)
+                         (line-beginning-position)
+                       subtree-end)))
+         (raw-body (string-trim (buffer-substring-no-properties
+                                 (min body-start body-end) body-end)))
+         (body (if (string-match "\\[[-0-9]+ [A-Z][a-z]+\\( [0-9:]+\\)?\\]\\'" raw-body)
+                   (string-trim (substring raw-body 0 (match-beginning 0)))
+                 raw-body)))
+    (if (string-empty-p body) nil body)))
+
 (defun org-gtd-cli/find-task (substring &optional index include-done exact)
   "Find a task by SUBSTRING match across all agenda files.
 Returns a cons (buffer . position) or exits with appropriate code.
@@ -279,8 +307,12 @@ If EXACT is non-nil, require full heading match instead of substring."
     (setq matches (nreverse matches))
     (cond
      ((null matches)
-      (org-gtd-cli/error "No task found matching \"%s\"" substring)
-      (org-gtd-cli/error "Hint: use the full heading text from previous CLI output. Use 'search' for partial matches.")
+      (if org-gtd-cli/json-mode
+          (message "%s" (json-serialize
+                         `((error . ,(format "No task found matching \"%s\"" substring))
+                           (hint . "Try a shorter substring, or use 'search' for partial matches."))))
+        (org-gtd-cli/error "No task found matching \"%s\"" substring)
+        (org-gtd-cli/error "Hint: try a shorter substring, or use 'search' for partial matches."))
       (kill-emacs 1))
      ((and (= (length matches) 1) (not index))
       (cons (nth 0 (car matches)) (nth 1 (car matches))))
@@ -291,13 +323,28 @@ If EXACT is non-nil, require full heading match instead of substring."
       (org-gtd-cli/error "Index %d out of range (1-%d)" index (length matches))
       (kill-emacs 1))
      (t
-      (org-gtd-cli/error "Multiple matches:")
-      (let ((i 1))
-        (dolist (m matches)
-          (org-gtd-cli/error "[%d] %s %s (%s)"
-                             i (nth 2 m) (nth 3 m) (nth 4 m))
-          (cl-incf i)))
-      (org-gtd-cli/error "\nUse --index N to select one.")
+      (if org-gtd-cli/json-mode
+          ;; JSON: match list on stdout, hint on stderr
+          (let ((match-list '())
+                (i 1))
+            (dolist (m matches)
+              (push `((index . ,i) (heading . ,(nth 3 m))
+                      (state . ,(nth 2 m))
+                      (file . ,(nth 4 m)))
+                    match-list)
+              (cl-incf i))
+            (org-gtd-cli/output
+             `((error . "Multiple matches")
+               (matches . ,(apply #'vector (nreverse match-list)))
+               (hint . "Use --index N to select one."))))
+        ;; Text: all on stderr
+        (org-gtd-cli/error "Multiple matches:")
+        (let ((i 1))
+          (dolist (m matches)
+            (org-gtd-cli/error "[%d] %s %s (%s)"
+                               i (nth 2 m) (nth 3 m) (nth 4 m))
+            (cl-incf i)))
+        (org-gtd-cli/error "\nUse --index N to select one."))
       (kill-emacs 2)))))
 
 (defun org-gtd-cli/make-timestamp (date-str &optional time-str active)
@@ -525,16 +572,22 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                               nil)))
                          (is-project
                           (org-gtd-cli/has-todo-children-p)))
-                     (push (list state heading priority-char
-                                 (vconcat (mapcar #'identity tags))
-                                 tags-str rel-file scheduled deadline
-                                 parent-heading is-project)
-                           results))))))))))
+                     (let ((body-text (when org-gtd-cli/full-mode
+                                        (org-gtd-cli/get-body-at-point))))
+                       (push (list state heading priority-char
+                                   (vconcat (mapcar #'identity tags))
+                                   tags-str rel-file scheduled deadline
+                                   parent-heading is-project body-text)
+                             results)))))))))))
     (setq results (nreverse results))
     (if org-gtd-cli/json-mode
         (org-gtd-cli/output-agenda-json results)
       (dolist (r results)
-        (princ (org-gtd-cli/format-agenda-line r))))
+        (princ (org-gtd-cli/format-agenda-line r))
+        (when (and org-gtd-cli/full-mode (nth 10 r))
+          (princ (concat "    " (replace-regexp-in-string
+                                 "\n" "\n    " (nth 10 r))
+                         "\n\n")))))
     (kill-emacs 0)))
 
 (defun org-gtd-cli/has-todo-children-p ()
@@ -555,16 +608,18 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
   "Output RESULTS as JSON for the agenda command."
   (let ((tasks '()))
     (dolist (r results)
-      (push `((heading . ,(nth 1 r))
-              (state . ,(nth 0 r))
-              (priority . ,(or (nth 2 r) :null))
-              (tags . ,(or (nth 3 r) []))
-              (file . ,(nth 5 r))
-              (scheduled . ,(or (nth 6 r) :null))
-              (deadline . ,(or (nth 7 r) :null))
-              (parent . ,(or (nth 8 r) :null))
-              (is_project . ,(if (nth 9 r) t :false)))
-            tasks))
+      (let ((task `((heading . ,(nth 1 r))
+                    (state . ,(nth 0 r))
+                    (priority . ,(or (nth 2 r) :null))
+                    (tags . ,(or (nth 3 r) []))
+                    (file . ,(nth 5 r))
+                    (scheduled . ,(or (nth 6 r) :null))
+                    (deadline . ,(or (nth 7 r) :null))
+                    (parent . ,(or (nth 8 r) :null))
+                    (is_project . ,(if (nth 9 r) t :false)))))
+        (when org-gtd-cli/full-mode
+          (setq task (append task `((body . ,(or (nth 10 r) :null))))))
+        (push task tasks)))
     (org-gtd-cli/output
      `((version . 1)
        (command . "agenda")
@@ -660,10 +715,12 @@ FILE-NAME restricts search to a single file in org-directory."
                                            (org-get-todo-state))
                                   (setq found t))))
                             found))))
-                   (push (list state heading rel-file
-                               (vconcat (mapcar #'identity tags))
-                               parent-heading is-project)
-                         matches)))))))))
+                   (let ((body-text (when org-gtd-cli/full-mode
+                                      (org-gtd-cli/get-body-at-point))))
+                     (push (list state heading rel-file
+                                 (vconcat (mapcar #'identity tags))
+                                 parent-heading is-project body-text)
+                           matches))))))))))
     (setq matches (nreverse matches))
     (if org-gtd-cli/json-mode
         (let ((tasks '())
@@ -674,15 +731,18 @@ FILE-NAME restricts search to a single file in org-directory."
                    (rel-file (nth 2 m))
                    (tags (nth 3 m))
                    (parent (nth 4 m))
-                   (is-project (nth 5 m)))
-              (push `((index . ,i)
-                      (heading . ,heading)
-                      (state . ,state)
-                      (tags . ,(or tags []))
-                      (file . ,rel-file)
-                      (parent . ,(or parent :null))
-                      (is_project . ,(if is-project t :false)))
-                    tasks)
+                   (is-project (nth 5 m))
+                   (body (nth 6 m))
+                   (task `((index . ,i)
+                           (heading . ,heading)
+                           (state . ,state)
+                           (tags . ,(or tags []))
+                           (file . ,rel-file)
+                           (parent . ,(or parent :null))
+                           (is_project . ,(if is-project t :false)))))
+              (when org-gtd-cli/full-mode
+                (setq task (append task `((body . ,(or body :null))))))
+              (push task tasks)
               (cl-incf i)))
           (org-gtd-cli/output
            `((version . 1)
@@ -696,6 +756,10 @@ FILE-NAME restricts search to a single file in org-directory."
           (dolist (m matches)
             (princ (format "[%d] %s %s (%s)\n"
                            i (nth 0 m) (nth 1 m) (nth 2 m)))
+            (when (and org-gtd-cli/full-mode (nth 6 m))
+              (princ (concat "    " (replace-regexp-in-string
+                                     "\n" "\n    " (nth 6 m))
+                             "\n\n")))
             (cl-incf i))))))
   (kill-emacs 0))
 
@@ -734,8 +798,10 @@ state and priority — no tags, body, drawers, or planning lines."
                (princ "\n"))))))))
   (kill-emacs 0))
 
-(defun org-gtd-cli/show-json ()
-  "Output JSON for the show command from point."
+(defun org-gtd-cli/task-alist-at-point ()
+  "Build a full task alist for the heading at point.
+Returns an alist with the same schema as show --json output,
+minus the version/command wrapper."
   (let* ((heading (org-get-heading t t t t))
          (state (org-get-todo-state))
          (priority-char (org-gtd-cli/get-explicit-priority))
@@ -751,21 +817,7 @@ state and priority — no tags, body, drawers, or planning lines."
          (level (org-current-level))
          (child-level (1+ level))
          (subtree-end (save-excursion (org-end-of-subtree t) (point)))
-         ;; Extract body text
-         (body-start (save-excursion (org-end-of-meta-data t) (point)))
-         (body-end (save-excursion
-                     (goto-char (if (> body-start subtree-end) subtree-end body-start))
-                     (if (re-search-forward
-                          (format "^\\*\\{%d,\\} " child-level)
-                          subtree-end t)
-                         (line-beginning-position)
-                       subtree-end)))
-         (raw-body (string-trim (buffer-substring-no-properties
-                                 (min body-start body-end) body-end)))
-         ;; Strip trailing creation timestamp from body
-         (body (if (string-match "\\[[-0-9]+ [A-Z][a-z]+\\( [0-9:]+\\)?\\]\\'" raw-body)
-                   (string-trim (substring raw-body 0 (match-beginning 0)))
-                 raw-body))
+         (body (org-gtd-cli/get-body-at-point))
          ;; Collect subtasks
          (children '())
          (done-count 0)
@@ -795,23 +847,56 @@ state and priority — no tags, body, drawers, or planning lines."
                     (is_project . ,(if child-is-project t :false)))
                   children)))))
     (let ((is-project (> total-count 0)))
+      `((heading . ,heading)
+        (state . ,(or state :null))
+        (priority . ,(or priority-char :null))
+        (tags . ,(vconcat (mapcar #'identity tags)))
+        (file . ,rel-file)
+        (scheduled . ,(or scheduled :null))
+        (deadline . ,(or deadline :null))
+        (parent . ,(or parent-heading :null))
+        (is_project . ,(if is-project t :false))
+        (body . ,(or body :null))
+        (subtasks . ,(apply #'vector (nreverse children)))
+        (progress . ,(if is-project
+                         `((done . ,done-count) (total . ,total-count))
+                       :null))))))
+
+(defun org-gtd-cli/show-json ()
+  "Output JSON for the show command from point."
+  (org-gtd-cli/output
+   (append `((version . 1) (command . "show"))
+           (org-gtd-cli/task-alist-at-point))))
+
+(defun org-gtd-cli/mutation-output (alist heading-or-buf-pos)
+  "Output ALIST as JSON mutation response, enriched with full task state.
+HEADING-OR-BUF-POS is either a heading string (used to re-find the
+task after mutations that may reorder entries) or a (buffer . position)
+cons.  Pass nil to skip the task field.  In JSON mode, adds a `task'
+field with the full task state (same schema as show --json)."
+  (when org-gtd-cli/json-mode
+    (let ((task-data
+           (cond
+            ((null heading-or-buf-pos) nil)
+            ((stringp heading-or-buf-pos)
+             ;; Re-find by heading text (handles reordering)
+             (condition-case nil
+                 (let ((bp (org-gtd-cli/find-task heading-or-buf-pos nil t)))
+                   (with-current-buffer (car bp)
+                     (org-with-wide-buffer
+                      (goto-char (cdr bp))
+                      (org-gtd-cli/task-alist-at-point))))
+               (error nil)))
+            (t
+             ;; Direct buf-pos
+             (with-current-buffer (car heading-or-buf-pos)
+               (org-with-wide-buffer
+                (goto-char (cdr heading-or-buf-pos))
+                (org-gtd-cli/task-alist-at-point)))))))
       (org-gtd-cli/output
-       `((version . 1)
-         (command . "show")
-         (heading . ,heading)
-         (state . ,(or state :null))
-         (priority . ,(or priority-char :null))
-         (tags . ,(vconcat (mapcar #'identity tags)))
-         (file . ,rel-file)
-         (scheduled . ,(or scheduled :null))
-         (deadline . ,(or deadline :null))
-         (parent . ,(or parent-heading :null))
-         (is_project . ,(if is-project t :false))
-         (body . ,(if (string-empty-p body) :null body))
-         (subtasks . ,(apply #'vector (nreverse children)))
-         (progress . ,(if is-project
-                          `((done . ,done-count) (total . ,total-count))
-                        :null)))))))
+       (if task-data
+           (append alist `((task . ,task-data)))
+         alist)))))
 
 ;; --- subtasks ---
 
@@ -846,14 +931,17 @@ state and priority — no tags, body, drawers, or planning lines."
                  (cl-incf total-count)
                  (when (and child-state (member child-state org-done-keywords))
                    (cl-incf done-count))
-                 (push (list (or child-state "")
-                             child-heading
-                             child-scheduled
-                             child-deadline
-                             child-priority
-                             child-tags
-                             child-is-project)
-                       children)))))
+                 (let ((child-body (when org-gtd-cli/full-mode
+                                     (org-gtd-cli/get-body-at-point))))
+                   (push (list (or child-state "")
+                               child-heading
+                               child-scheduled
+                               child-deadline
+                               child-priority
+                               child-tags
+                               child-is-project
+                               child-body)
+                         children))))))
          (if (= total-count 0)
              (progn
                (org-gtd-cli/error "Task \"%s\" has no subtasks" heading)
@@ -876,7 +964,11 @@ state and priority — no tags, body, drawers, or planning lines."
                    (setq line-str (concat line-str "  D:" (nth 3 child))))
                  (when (nth 2 child)
                    (setq line-str (concat line-str "  S:" (nth 2 child))))
-                 (princ (concat line-str "\n"))))
+                 (princ (concat line-str "\n"))
+                 (when (and org-gtd-cli/full-mode (nth 7 child))
+                   (princ (concat "      " (replace-regexp-in-string
+                                            "\n" "\n      " (nth 7 child))
+                                  "\n\n")))))
              (princ (format "\nProgress: %d/%d done\n" done-count total-count))))))))
   (kill-emacs 0))
 
@@ -884,15 +976,17 @@ state and priority — no tags, body, drawers, or planning lines."
   "Output JSON for the subtasks command."
   (let ((subtask-list '()))
     (dolist (child (nreverse children))
-      (push `((heading . ,(nth 1 child))
-              (state . ,(or (nth 0 child) :null))
-              (priority . ,(let ((p (nth 4 child)))
-                             (if (and p (not (string-empty-p p))) p :null)))
-              (tags . ,(vconcat (mapcar #'identity (nth 5 child))))
-              (scheduled . ,(or (nth 2 child) :null))
-              (deadline . ,(or (nth 3 child) :null))
-              (is_project . ,(if (nth 6 child) t :false)))
-            subtask-list))
+      (let ((subtask `((heading . ,(nth 1 child))
+                       (state . ,(or (nth 0 child) :null))
+                       (priority . ,(let ((p (nth 4 child)))
+                                      (if (and p (not (string-empty-p p))) p :null)))
+                       (tags . ,(vconcat (mapcar #'identity (nth 5 child))))
+                       (scheduled . ,(or (nth 2 child) :null))
+                       (deadline . ,(or (nth 3 child) :null))
+                       (is_project . ,(if (nth 6 child) t :false)))))
+        (when org-gtd-cli/full-mode
+          (setq subtask (append subtask `((body . ,(or (nth 7 child) :null))))))
+        (push subtask subtask-list)))
     (org-gtd-cli/output
      `((version . 1)
        (command . "subtasks")
@@ -1479,11 +1573,12 @@ at least one direct child with a TODO keyword."
            (insert text "\n"))
          (save-buffer)
          (if org-gtd-cli/json-mode
-             (org-gtd-cli/output
+             (org-gtd-cli/mutation-output
               `((version . 1)
                 (command . "append-body")
                 (heading . ,heading)
-                (file . ,rel-file)))
+                (file . ,rel-file))
+              buf-pos)
            (princ (format "Appended to: \"%s\" (%s)\n" heading rel-file)))))))
   (kill-emacs 0))
 
@@ -1538,11 +1633,12 @@ at least one direct child with a TODO keyword."
              (insert text "\n")))
          (save-buffer)
          (if org-gtd-cli/json-mode
-             (org-gtd-cli/output
+             (org-gtd-cli/mutation-output
               `((version . 1)
                 (command . "set-body")
                 (heading . ,heading)
-                (file . ,rel-file)))
+                (file . ,rel-file))
+              buf-pos)
            (princ (format "Set body: \"%s\" (%s)\n" heading rel-file)))))))
   (kill-emacs 0))
 
@@ -1701,14 +1797,15 @@ Returns a list of message strings in printing order."
                (org-gtd-cli/reorder-siblings-by-state))
              (save-buffer)
              (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
+                 (org-gtd-cli/mutation-output
                   `((version . 1)
                     (command . "set-done")
                     (heading . ,heading)
                     (file . ,rel-file)
                     (old_state . ,old-state)
                     (new_state . "DONE")
-                    (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs))))
+                    (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
+                  heading)
                (princ (format "Done: %s (%s)\n" heading rel-file))
                (dolist (msg auto-msgs)
                  (princ msg)))))))))
@@ -1756,8 +1853,13 @@ Returns a list of message strings in printing order."
                                               (cdr seq))))
                                    org-todo-keywords))))
     (unless (member new-state all-states)
-      (org-gtd-cli/error "Error: \"%s\" is not a valid state\nValid states: %s"
-                         new-state (mapconcat #'identity all-states ", "))
+      (let ((valid-str (mapconcat #'identity all-states ", ")))
+        (if org-gtd-cli/json-mode
+            (message "%s" (json-serialize
+                           `((error . ,(format "\"%s\" is not a valid state" new-state))
+                             (hint . ,(format "Valid states: %s" valid-str)))))
+          (org-gtd-cli/error "Error: \"%s\" is not a valid state" new-state)
+          (org-gtd-cli/error "Valid states: %s" valid-str)))
       (kill-emacs 1)))
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
@@ -1786,13 +1888,14 @@ Returns a list of message strings in printing order."
            (org-gtd-cli/reorder-siblings-by-state)
            (save-buffer)
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1)
                   (command . "set-state")
                   (heading . ,heading)
                   (file . ,rel-file)
                   (old_state . ,(or old-state :null))
-                  (new_state . ,new-state)))
+                  (new_state . ,new-state))
+                heading)
              (princ (format "State change: \"%s\" %s -> %s (%s)\n"
                             heading old-state new-state rel-file))))))))
   (kill-emacs 0))
@@ -1869,10 +1972,16 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                                        target-file file))))))))))))
             ;; Error handling for --to
             (unless target-pos
-              (if (> self-match-count 0)
-                  (org-gtd-cli/error "Error: no valid refile target for \"%s\" (skipped %d self-match%s inside source subtree)"
+              (let ((msg (if (> self-match-count 0)
+                             (format "No valid refile target for \"%s\" (skipped %d self-match%s inside source subtree)"
                                      target self-match-count (if (= self-match-count 1) "" "es"))
-                (org-gtd-cli/error "Error: target heading \"%s\" not found" target))
+                           (format "Target heading \"%s\" not found" target))))
+                (if org-gtd-cli/json-mode
+                    (message "%s" (json-serialize
+                                   `((error . ,msg)
+                                     (hint . "Use 'categories' to see available targets."))))
+                  (org-gtd-cli/error "Error: %s" msg)
+                  (org-gtd-cli/error "Hint: use 'categories' to see available targets.")))
               (kill-emacs 1)))
         ;; --category: substring match on non-TODO headings in tasks.org only
         (let* ((cat-parts (split-string category "/" t))
@@ -1912,7 +2021,12 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
           (setq matches (nreverse matches))
           (cond
            ((null matches)
-            (org-gtd-cli/error "Error: category heading \"%s\" not found" category)
+            (if org-gtd-cli/json-mode
+                (message "%s" (json-serialize
+                               `((error . ,(format "Category heading \"%s\" not found" category))
+                                 (hint . "Use 'categories' to see available targets."))))
+              (org-gtd-cli/error "Error: category heading \"%s\" not found" category)
+              (org-gtd-cli/error "Hint: use 'categories' to see available targets."))
             (kill-emacs 1))
            ((> (length matches) 1)
             (org-gtd-cli/error "Multiple category matches for \"%s\":" category)
@@ -1955,11 +2069,12 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                (save-buffer)
                (with-current-buffer target-buf (save-buffer))
                (if org-gtd-cli/json-mode
-                   (org-gtd-cli/output
+                   (org-gtd-cli/mutation-output
                     `((version . 1) (command . "refile")
                       (heading . ,heading) (file . ,rel-file)
                       (target_heading . ,target-heading)
-                      (target_file . ,rel-target)))
+                      (target_file . ,rel-target))
+                    nil)
                  (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
                                 heading rel-target target-name rel-file)))))))))
     (kill-emacs 0)))
@@ -2037,11 +2152,12 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
              (cond
               ((string= current-state "NEXT")
                (if org-gtd-cli/json-mode
-                   (org-gtd-cli/output
+                   (org-gtd-cli/mutation-output
                     `((version . 1) (command . "set-next")
                       (heading . ,heading) (file . ,rel-file)
                       (old_state . "NEXT") (new_state . "NEXT")
-                      (side_effects . [])))
+                      (side_effects . []))
+                    buf-pos)
                  (org-gtd-cli/error "Already NEXT: \"%s\" (%s)" heading rel-file)))
               ((not (member current-state org-not-done-keywords))
                (org-gtd-cli/error "Error: \"%s\" is in done state %s" heading current-state)
@@ -2051,20 +2167,22 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                  (org-todo "NEXT"))
                (save-buffer)
                (if org-gtd-cli/json-mode
-                   (org-gtd-cli/output
+                   (org-gtd-cli/mutation-output
                     `((version . 1) (command . "set-next")
                       (heading . ,heading) (file . ,rel-file)
                       (old_state . ,current-state) (new_state . "NEXT")
-                      (side_effects . [])))
+                      (side_effects . []))
+                    buf-pos)
                  (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file)))))))
           (existing-next
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1) (command . "set-next")
                   (heading . ,heading) (file . ,rel-file)
                   (old_state . ,(org-get-todo-state))
                   (new_state . ,(org-get-todo-state))
-                  (side_effects . [])))
+                  (side_effects . []))
+                buf-pos)
              (org-gtd-cli/error "Already has NEXT: \"%s\" (%s)"
                                 existing-next rel-file))
            (kill-emacs 0))
@@ -2082,7 +2200,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
              (org-gtd-cli/reorder-siblings-by-state)
              (save-buffer)
              (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
+                 (org-gtd-cli/mutation-output
                   `((version . 1) (command . "set-next")
                     (heading . ,heading) (file . ,rel-file)
                     (old_state . ,project-state) (new_state . ,project-state)
@@ -2091,7 +2209,8 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                                        (heading . ,child-heading)
                                        (old_state . "TODO")
                                        (new_state . "NEXT")
-                                       (file . ,rel-file))))))
+                                       (file . ,rel-file)))))
+                  heading)
                (princ (format "Set NEXT: \"%s\" (%s)\n"
                               child-heading rel-file))))))))))
   (kill-emacs 0))
@@ -2111,18 +2230,20 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
           ((string= direction "up")
            (org-move-subtree-up)
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1) (command . "move")
                   (heading . ,heading) (file . ,rel-file)
-                  (direction . "up") (sibling . :null)))
+                  (direction . "up") (sibling . :null))
+                buf-pos)
              (princ (format "Moved: \"%s\" up (%s)\n" heading rel-file))))
           ((string= direction "down")
            (org-move-subtree-down)
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1) (command . "move")
                   (heading . ,heading) (file . ,rel-file)
-                  (direction . "down") (sibling . :null)))
+                  (direction . "down") (sibling . :null))
+                buf-pos)
              (princ (format "Moved: \"%s\" down (%s)\n" heading rel-file))))
           ((or (string= direction "before") (string= direction "after"))
            ;; Find sibling
@@ -2182,10 +2303,11 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                  (unless (eobp) (forward-char))
                  (insert task-text "\n"))))
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1) (command . "move")
                   (heading . ,heading) (file . ,rel-file)
-                  (direction . ,direction) (sibling . ,sibling-substring)))
+                  (direction . ,direction) (sibling . ,sibling-substring))
+                buf-pos)
              (princ (format "Moved: \"%s\" %s \"%s\" (%s)\n"
                             heading direction sibling-substring rel-file))))
           (t
@@ -2222,12 +2344,13 @@ Preserves TODO state, priority, and tags."
            (org-edit-headline new-title)
            (save-buffer)
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1)
                   (command . "rename")
                   (heading . ,new-title)
                   (old_heading . ,old-heading)
-                  (file . ,rel-file)))
+                  (file . ,rel-file))
+                buf-pos)
              (princ (format "Renamed: \"%s\" -> \"%s\" (%s)\n"
                             old-heading new-title rel-file))))))))
   (kill-emacs 0))
@@ -2269,12 +2392,13 @@ Preserves TODO state, priority, and tags."
              (org-schedule '(4))
              (save-buffer)
              (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
+                 (org-gtd-cli/mutation-output
                   `((version . 1)
                     (command . "set-schedule")
                     (heading . ,heading)
                     (file . ,rel-file)
-                    (scheduled . :null)))
+                    (scheduled . :null))
+                  buf-pos)
                (princ (format "Cleared schedule: \"%s\" (%s)\n"
                               heading rel-file)))))
           (date-str
@@ -2293,12 +2417,13 @@ Preserves TODO state, priority, and tags."
                (org-schedule nil ts)
                (save-buffer)
                (if org-gtd-cli/json-mode
-                   (org-gtd-cli/output
+                   (org-gtd-cli/mutation-output
                     `((version . 1)
                       (command . "set-schedule")
                       (heading . ,heading)
                       (file . ,rel-file)
-                      (scheduled . ,ts)))
+                      (scheduled . ,ts))
+                    buf-pos)
                  (princ (format "Scheduled: \"%s\" %s (%s)\n"
                                 heading ts rel-file))))))
           (t
@@ -2343,12 +2468,13 @@ Preserves TODO state, priority, and tags."
              (org-deadline '(4))
              (save-buffer)
              (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
+                 (org-gtd-cli/mutation-output
                   `((version . 1)
                     (command . "set-deadline")
                     (heading . ,heading)
                     (file . ,rel-file)
-                    (deadline . :null)))
+                    (deadline . :null))
+                  buf-pos)
                (princ (format "Cleared deadline: \"%s\" (%s)\n"
                               heading rel-file)))))
           (date-str
@@ -2367,12 +2493,13 @@ Preserves TODO state, priority, and tags."
                (org-deadline nil ts)
                (save-buffer)
                (if org-gtd-cli/json-mode
-                   (org-gtd-cli/output
+                   (org-gtd-cli/mutation-output
                     `((version . 1)
                       (command . "set-deadline")
                       (heading . ,heading)
                       (file . ,rel-file)
-                      (deadline . ,ts)))
+                      (deadline . ,ts))
+                    buf-pos)
                  (princ (format "Deadline: \"%s\" %s (%s)\n"
                                 heading ts rel-file))))))
           (t
@@ -2425,13 +2552,14 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
                (user-error nil))  ; no-op if no priority cookie
              (save-buffer)
              (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
+                 (org-gtd-cli/mutation-output
                   `((version . 1)
                     (command . "set-priority")
                     (heading . ,heading)
                     (file . ,rel-file)
                     (old_priority . ,(or old-priority :null))
-                    (new_priority . :null)))
+                    (new_priority . :null))
+                  buf-pos)
                (princ (format "Cleared priority: \"%s\" (%s)\n"
                               heading rel-file)))))
           (priority
@@ -2450,13 +2578,14 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
              (org-priority (string-to-char priority))
              (save-buffer)
              (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
+                 (org-gtd-cli/mutation-output
                   `((version . 1)
                     (command . "set-priority")
                     (heading . ,heading)
                     (file . ,rel-file)
                     (old_priority . ,(or old-priority :null))
-                    (new_priority . ,priority)))
+                    (new_priority . ,priority))
+                  buf-pos)
                (princ (format "Priority: \"%s\" [#%s] -> [#%s] (%s)\n"
                               heading (or old-priority "B") priority rel-file)))))
           (t
@@ -2499,11 +2628,12 @@ TAGS-CSV is a comma-separated string of tags. Empty string clears all tags."
            (org-set-tags new-tags)
            (save-buffer)
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1) (command . "set-tags")
                   (heading . ,heading) (file . ,rel-file)
                   (old_tags . ,(vconcat old-tags))
-                  (new_tags . ,(vconcat new-tags))))
+                  (new_tags . ,(vconcat new-tags)))
+                buf-pos)
              (princ (format "Tags: \"%s\" %s -> %s (%s)\n"
                             heading
                             (org-gtd-cli/format-tag-str old-tags)
@@ -2550,11 +2680,12 @@ TAGS-CSV is a comma-separated string of tags to add."
            (org-set-tags new-tags)
            (save-buffer)
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1) (command . "add-tags")
                   (heading . ,heading) (file . ,rel-file)
                   (old_tags . ,(vconcat old-tags))
-                  (new_tags . ,(vconcat new-tags))))
+                  (new_tags . ,(vconcat new-tags)))
+                buf-pos)
              (princ (format "Tags: \"%s\" %s -> %s (%s)\n"
                             heading
                             (org-gtd-cli/format-tag-str old-tags)
@@ -2597,11 +2728,12 @@ TAGS-CSV is a comma-separated string of tags to remove."
            (org-set-tags new-tags)
            (save-buffer)
            (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
+               (org-gtd-cli/mutation-output
                 `((version . 1) (command . "set-tags")
                   (heading . ,heading) (file . ,rel-file)
                   (old_tags . ,(vconcat old-tags))
-                  (new_tags . ,(vconcat new-tags))))
+                  (new_tags . ,(vconcat new-tags)))
+                buf-pos)
              (princ (format "Tags: \"%s\" %s -> %s (%s)\n"
                             heading
                             (org-gtd-cli/format-tag-str old-tags)
@@ -2977,5 +3109,256 @@ Task lines include (file) for source identification."
             (princ (format "%s\n" line-text))))
         (forward-line 1)))
     (kill-emacs 0)))
+
+;; ══════════════════════════════════════════════════════════════════════════════
+;; Batch mode
+;; ══════════════════════════════════════════════════════════════════════════════
+
+(defun org-gtd-cli/batch (command json-str &optional shared-arg)
+  "Execute COMMAND in batch mode over items in JSON-STR.
+SHARED-ARG is a shared parameter (e.g. parent heading for add-subtask,
+category for refile).  JSON-STR is a JSON array.
+
+Outputs a JSON batch response with per-item results."
+  (let* ((items (condition-case err
+                    (json-parse-string json-str :object-type 'alist :array-type 'list)
+                  (json-parse-error
+                   (org-gtd-cli/error "Error: invalid JSON input: %s" (error-message-string err))
+                   (kill-emacs 1))))
+         (results '())
+         (succeeded 0)
+         (failed 0)
+         (idx 0))
+    (dolist (item items)
+      (let ((item-error nil)
+            (item-exit-code nil))
+        (cl-letf (((symbol-function 'kill-emacs)
+                   (lambda (&optional code)
+                     (setq item-exit-code (or code 0))
+                     (throw 'org-gtd-cli-batch-item nil)))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (when fmt
+                       (setq item-error (apply #'format fmt args))))))
+          (condition-case err
+              (let ((result (catch 'org-gtd-cli-batch-item
+                              (org-gtd-cli/batch-one command item shared-arg idx))))
+                (cond
+                 (result
+                  ;; batch-one returned a result alist directly
+                  (push result results)
+                  (cl-incf succeeded))
+                 ((and item-exit-code (> item-exit-code 0))
+                  ;; kill-emacs with non-zero = failure
+                  (push `((index . ,idx) (success . :false)
+                          (error . ,(or item-error "Command failed")))
+                        results)
+                  (cl-incf failed))
+                 (t
+                  ;; kill-emacs 0 but no result — function handled its own output
+                  ;; This happens for add-task/add-event which output + exit
+                  (push `((index . ,idx) (success . t)) results)
+                  (cl-incf succeeded))))
+            (error
+             (push `((index . ,idx) (success . :false)
+                     (error . ,(error-message-string err)))
+                   results)
+             (cl-incf failed)))))
+      (cl-incf idx))
+    (org-gtd-cli/output
+     `((version . 1)
+       (command . ,command)
+       (batch . t)
+       (results . ,(apply #'vector (nreverse results)))
+       (summary . ((total . ,(+ succeeded failed))
+                   (succeeded . ,succeeded)
+                   (failed . ,failed)))))
+    (kill-emacs (if (> succeeded 0) 0 1))))
+
+(defun org-gtd-cli/batch-one (command item shared-arg idx)
+  "Execute one batch ITEM for COMMAND. Returns result alist.
+SHARED-ARG is command-specific shared parameter.
+IDX is the 0-based index in the batch array."
+  (pcase command
+    ("set-done"
+     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
+            (buf-pos (org-gtd-cli/find-task heading nil t)))
+       (with-current-buffer (car buf-pos)
+         (org-with-wide-buffer
+          (goto-char (cdr buf-pos))
+          (let ((old-state (org-get-todo-state)))
+            (org-todo "DONE")
+            (save-buffer)
+            `((index . ,idx) (success . t)
+              (heading . ,heading)
+              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))
+              (old_state . ,old-state) (new_state . "DONE")))))))
+
+    ("delete"
+     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
+            (buf-pos (org-gtd-cli/find-task heading nil t t)))
+       (with-current-buffer (car buf-pos)
+         (org-with-wide-buffer
+          (goto-char (cdr buf-pos))
+          (let ((file (org-gtd-cli/relative-filename (buffer-file-name))))
+            (org-cut-subtree)
+            (save-buffer)
+            `((index . ,idx) (success . t)
+              (heading . ,heading) (file . ,file)))))))
+
+    ("refile"
+     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
+            (buf-pos (org-gtd-cli/find-task heading nil nil)))
+       (with-current-buffer (car buf-pos)
+         (org-with-wide-buffer
+          (goto-char (cdr buf-pos))
+          ;; Find refile target using shared-arg as category
+          (let* ((target (org-gtd-cli/find-refile-target nil shared-arg))
+                 (target-heading (nth 0 target))
+                 (target-file (nth 1 target))
+                 (target-pos (nth 2 target))
+                 (file (org-gtd-cli/relative-filename (buffer-file-name))))
+            (org-refile nil nil (list target-heading target-file nil target-pos))
+            (save-buffer)
+            (when (get-file-buffer target-file)
+              (with-current-buffer (get-file-buffer target-file) (save-buffer)))
+            `((index . ,idx) (success . t)
+              (heading . ,heading) (file . ,file)
+              (target_heading . ,target-heading)
+              (target_file . ,(org-gtd-cli/relative-filename target-file))))))))
+
+    ("add-subtask"
+     (let* ((title (alist-get 'title item))
+            (body (alist-get 'body item))
+            (tags (alist-get 'tags item))
+            (state (or (alist-get 'state item) "TODO"))
+            (parent-heading shared-arg)
+            (buf-pos (org-gtd-cli/find-task parent-heading nil t)))
+       (with-current-buffer (car buf-pos)
+         (org-with-wide-buffer
+          (goto-char (cdr buf-pos))
+          (let* ((level (org-current-level))
+                 (child-level (1+ level))
+                 (subtree-end (save-excursion (org-end-of-subtree t) (point))))
+            (goto-char subtree-end)
+            (insert "\n" (make-string child-level ?*) " " state " " title)
+            (when (and tags (not (string-empty-p tags)))
+              (org-set-tags tags))
+            (when (and body (not (string-empty-p body)))
+              (org-gtd-cli/validate-body-text body)
+              (insert "\n" body))
+            (save-buffer)
+            `((index . ,idx) (success . t)
+              (heading . ,title)
+              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))))))))
+
+    ("add-task"
+     (let* ((title (alist-get 'title item))
+            (body (alist-get 'body item))
+            (tags (alist-get 'tags item))
+            (category (alist-get 'category item))
+            (state (or (alist-get 'state item) "TODO"))
+            (target-file (if category
+                             (expand-file-name "tasks.org" org-directory)
+                           (expand-file-name "inbox.org" org-directory))))
+       (when (and body (not (string-empty-p body)))
+         (org-gtd-cli/validate-body-text body))
+       (with-current-buffer (find-file-noselect target-file)
+         (org-with-wide-buffer
+          (if category
+              ;; Find category heading and insert under it
+              (let ((found nil))
+                (goto-char (point-min))
+                (while (and (not found)
+                            (re-search-forward org-heading-regexp nil t))
+                  (unless (org-get-todo-state)
+                    (when (string-match-p (regexp-quote category)
+                                          (org-get-heading t t t t))
+                      (setq found t))))
+                (unless found
+                  (error "Category \"%s\" not found" category))
+                (org-end-of-subtree t)
+                (insert "\n** " state " " title))
+            ;; Insert at end of inbox
+            (goto-char (point-max))
+            (insert "\n* " state " " title))
+          (when (and tags (not (string-empty-p tags)))
+            (org-set-tags tags))
+          (when (and body (not (string-empty-p body)))
+            (insert "\n" body))
+          (save-buffer)))
+       `((index . ,idx) (success . t)
+         (heading . ,title)
+         (file . ,(org-gtd-cli/relative-filename target-file)))))
+
+    ("add-event"
+     (let* ((title (alist-get 'title item))
+            (date (alist-get 'date item))
+            (time-str (alist-get 'time item))
+            (end-date (or (alist-get 'end-date item) (alist-get 'end_date item)))
+            (target-file (expand-file-name "calendar.org" org-directory)))
+       (unless date (error "Missing required field: date"))
+       (unless title (error "Missing required field: title"))
+       (with-current-buffer (find-file-noselect target-file)
+         (org-with-wide-buffer
+          (goto-char (point-max))
+          (let ((ts (org-gtd-cli/make-timestamp date time-str t)))
+            (insert "\n* " title " :calpersonal:\n"
+                    (if end-date
+                        (format "%s--%s\n" ts
+                                (org-gtd-cli/make-timestamp end-date nil t))
+                      (format "%s\n" ts))))
+          (save-buffer)))
+       `((index . ,idx) (success . t)
+         (heading . ,title)
+         (file . ,(org-gtd-cli/relative-filename target-file)))))
+
+    ("show"
+     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
+            (buf-pos (org-gtd-cli/find-task heading nil t)))
+       (with-current-buffer (car buf-pos)
+         (org-with-wide-buffer
+          (goto-char (cdr buf-pos))
+          ;; Build the show response inline
+          (let* ((h (org-get-heading t t t t))
+                 (state (org-get-todo-state))
+                 (body (org-gtd-cli/get-body-at-point)))
+            `((index . ,idx) (success . t)
+              (heading . ,h) (state . ,(or state :null))
+              (body . ,(or body :null))
+              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))))))))
+
+    ("set-tags"
+     (let* ((heading (alist-get 'heading item))
+            (tags (alist-get 'tags item))
+            (buf-pos (org-gtd-cli/find-task heading nil t)))
+       (with-current-buffer (car buf-pos)
+         (org-with-wide-buffer
+          (goto-char (cdr buf-pos))
+          (org-set-tags tags)
+          (save-buffer)
+          `((index . ,idx) (success . t)
+            (heading . ,heading)
+            (tags . ,tags)
+            (file . ,(org-gtd-cli/relative-filename (buffer-file-name))))))))
+
+    ("add-tags"
+     (let* ((heading (alist-get 'heading item))
+            (tags-str (alist-get 'tags item))
+            (buf-pos (org-gtd-cli/find-task heading nil t)))
+       (with-current-buffer (car buf-pos)
+         (org-with-wide-buffer
+          (goto-char (cdr buf-pos))
+          (let* ((current-tags (org-get-tags nil t))
+                 (new-tags (split-string tags-str "," t))
+                 (merged (cl-union current-tags new-tags :test #'string=)))
+            (org-set-tags (mapconcat #'identity merged ":"))
+            (save-buffer)
+            `((index . ,idx) (success . t)
+              (heading . ,heading)
+              (tags . ,(mapconcat #'identity merged ","))
+              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))))))))
+
+    (_ (error "Unsupported batch command: %s" command))))
 
 ;;; org-gtd-cli.el ends here

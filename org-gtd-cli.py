@@ -43,12 +43,16 @@ def to_elisp(value: str | None) -> str:
     return f'"{escape_elisp(value)}"'
 
 
-def resolve_body_text(text: str | None, body_file: str | None) -> str | None:
+def resolve_body_text(text: str | None, body_file: str | None,
+                      auto_stdin: bool = False) -> str | None:
     """Resolve body text from positional arg, --body-file, or stdin.
 
-    Precedence: --body-file > positional text.
+    Precedence: --body-file > positional text > auto-stdin.
     --body-file with path "-" reads stdin.
     Rejects literal '-' as positional text (agent likely intended stdin).
+
+    When auto_stdin is True and neither text nor body_file is provided,
+    reads from stdin if it's a pipe (not a TTY).
     """
     if body_file is not None:
         if body_file == "-":
@@ -63,6 +67,8 @@ def resolve_body_text(text: str | None, body_file: str | None) -> str | None:
                   file=sys.stderr)
             return None  # sentinel — caller should exit 1
         return text
+    if auto_stdin and not sys.stdin.isatty():
+        return sys.stdin.read()
     return None
 
 
@@ -107,7 +113,7 @@ def normalize_tags(tag_list: list[str] | None) -> str | None:
     return "|".join(and_groups)
 
 
-def _run_batch(expr: str, json_mode: bool = False) -> int:
+def _run_batch(expr: str, json_mode: bool = False, full_mode: bool = False) -> int:
     """Run an elisp expression in batch Emacs. Returns exit code."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cmd = [
@@ -121,6 +127,8 @@ def _run_batch(expr: str, json_mode: bool = False) -> int:
         env = os.environ.copy()
         if json_mode:
             env["ORG_GTD_CLI_JSON"] = "1"
+        if full_mode:
+            env["ORG_GTD_CLI_FULL"] = "1"
         # Emacs --batch sends its own diagnostics to stderr; let them through
         result = subprocess.run(cmd, capture_output=False, env=env)
         return result.returncode
@@ -159,7 +167,7 @@ def _read_file_safe(path: str) -> str:
         return ""
 
 
-def _run_daemon(expr: str, json_mode: bool = False, *, _retried: bool = False) -> int:
+def _run_daemon(expr: str, json_mode: bool = False, full_mode: bool = False, *, _retried: bool = False) -> int:
     """Run an elisp expression via emacsclient against the daemon."""
     _ensure_daemon()
 
@@ -168,9 +176,11 @@ def _run_daemon(expr: str, json_mode: bool = False, *, _retried: bool = False) -
     exit_file = os.path.join(_TMPDIR, "org-gtd-cli-exit")
 
     json_flag = "t" if json_mode else "nil"
+    full_flag = "t" if full_mode else "nil"
     wrapped = (f'(org-gtd-cli/daemon-dispatch'
                f' (lambda () {expr})'
                f' {json_flag}'
+               f' {full_flag}'
                f' "{escape_elisp(ORG_DIR)}"'
                f' "{escape_elisp(stdout_file)}"'
                f' "{escape_elisp(stderr_file)}"'
@@ -187,7 +197,7 @@ def _run_daemon(expr: str, json_mode: bool = False, *, _retried: bool = False) -
             os.unlink(SOCKET_PATH)
         except FileNotFoundError:
             pass
-        return _run_daemon(expr, json_mode, _retried=True)
+        return _run_daemon(expr, json_mode, full_mode, _retried=True)
 
     if result.returncode != 0:
         print(f"Error: emacsclient failed: {result.stderr.strip()}", file=sys.stderr)
@@ -208,11 +218,11 @@ def _run_daemon(expr: str, json_mode: bool = False, *, _retried: bool = False) -
         return 0
 
 
-def run_elisp(expr: str, json_mode: bool = False) -> int:
+def run_elisp(expr: str, json_mode: bool = False, full_mode: bool = False) -> int:
     """Run an elisp expression. Uses daemon if enabled, otherwise batch."""
     if DAEMON_ENABLED:
-        return _run_daemon(expr, json_mode)
-    return _run_batch(expr, json_mode)
+        return _run_daemon(expr, json_mode, full_mode)
+    return _run_batch(expr, json_mode, full_mode)
 
 
 # --- Grouped help formatter ---
@@ -244,7 +254,7 @@ def cmd_agenda(args):
     tag = normalize_tags(args.tag)
     expr = (f'(org-gtd-cli/agenda {to_elisp(args.state)} '
             f'{to_elisp(tag)} {to_elisp(getattr(args, "from"))} {to_elisp(args.to)})')
-    return run_elisp(expr, json_mode=args.json)
+    return run_elisp(expr, json_mode=args.json, full_mode=getattr(args, 'full', False))
 
 
 def cmd_search(args):
@@ -254,7 +264,7 @@ def cmd_search(args):
         return 1
     expr = (f'(org-gtd-cli/search {to_elisp(args.substr)} '
             f'{to_elisp(args.state)} {to_elisp(tag)} {to_elisp(args.file)})')
-    return run_elisp(expr, json_mode=args.json)
+    return run_elisp(expr, json_mode=args.json, full_mode=getattr(args, 'full', False))
 
 
 def cmd_show(args):
@@ -265,7 +275,7 @@ def cmd_show(args):
 
 def cmd_subtasks(args):
     expr = f'(org-gtd-cli/subtasks {to_elisp(args.substr)} {to_elisp(args.index)})'
-    return run_elisp(expr, json_mode=args.json)
+    return run_elisp(expr, json_mode=args.json, full_mode=getattr(args, 'full', False))
 
 
 def cmd_categories(args):
@@ -302,6 +312,9 @@ def cmd_add_task(args):
 
 
 def cmd_add_subtask(args):
+    if not args.title:
+        print("Error: TITLE is required", file=sys.stderr)
+        return 1
     raw_body = resolve_body_text(args.body, args.body_file)
     if args.body == "-" and raw_body is None:
         return 1
@@ -315,6 +328,12 @@ def cmd_add_subtask(args):
 
 
 def cmd_add_event(args):
+    if not args.title:
+        print("Error: TITLE is required", file=sys.stderr)
+        return 1
+    if not args.date:
+        print("Error: --date is required", file=sys.stderr)
+        return 1
     expr = (f'(org-gtd-cli/add-event {to_elisp(args.title)} '
             f'{to_elisp(args.date)} {to_elisp(args.time)} '
             f'{to_elisp(args.tag)} {to_elisp(args.file)} '
@@ -334,11 +353,11 @@ def cmd_add_note(args):
 
 
 def cmd_append_body(args):
-    text = resolve_body_text(args.text, args.body_file)
+    text = resolve_body_text(args.text, args.body_file, auto_stdin=True)
     if args.text == "-" and text is None:
         return 1
     if text is None:
-        print("Error: provide TEXT or --body-file", file=sys.stderr)
+        print("Error: provide TEXT, --body-file, or pipe to stdin", file=sys.stderr)
         return 1
     text = unescape_body_newlines(text) if text else text
     expr = (f'(org-gtd-cli/append-body {to_elisp(args.substr)} '
@@ -347,11 +366,11 @@ def cmd_append_body(args):
 
 
 def cmd_set_body(args):
-    text = resolve_body_text(args.text, args.body_file)
+    text = resolve_body_text(args.text, args.body_file, auto_stdin=True)
     if args.text == "-" and text is None:
         return 1
     if text is None and args.body_file is None:
-        print("Error: provide TEXT or --body-file", file=sys.stderr)
+        print("Error: provide TEXT, --body-file, or pipe to stdin", file=sys.stderr)
         return 1
     text = unescape_body_newlines(text) if text else text
     # set-body allows empty string to remove body — pass "" not nil
@@ -362,6 +381,9 @@ def cmd_set_body(args):
 
 
 def cmd_set_done(args):
+    if not args.substr:
+        print("Error: SUBSTR is required", file=sys.stderr)
+        return 1
     expr = (f'(org-gtd-cli/set-done {to_elisp(args.substr)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
     return run_elisp(expr, json_mode=args.json)
@@ -397,6 +419,9 @@ def cmd_set_next(args):
 
 
 def cmd_refile(args):
+    if not args.substr:
+        print("Error: SUBSTR is required", file=sys.stderr)
+        return 1
     if args.to and args.category:
         print("Error: --to and --category are mutually exclusive", file=sys.stderr)
         return 1
@@ -521,6 +546,9 @@ def cmd_archive(args):
 
 
 def cmd_delete(args):
+    if not args.heading:
+        print("Error: HEADING is required", file=sys.stderr)
+        return 1
     expr = (f'(org-gtd-cli/delete {to_elisp(args.heading)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
     return run_elisp(expr, json_mode=args.json)
@@ -589,6 +617,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     )
     parser.add_argument("--json", action="store_true",
                         help="Output structured JSON instead of human-readable text")
+    parser.add_argument("--batch", action="store_true",
+                        help="Read JSON array from stdin, execute items in one process")
     sub = parser.add_subparsers(dest="command")
 
     # --- Querying ---
@@ -606,6 +636,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--tag", "--tags", action="append", dest="tag",
                    help="Filter by tag (repeat for AND, comma within for OR)")
     p.add_argument("--file", help="Restrict to a single file")
+    p.add_argument("--full", action="store_true",
+                   help="Include body text in results")
     p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("agenda", help="List tasks with state/tag/date filters")
@@ -614,6 +646,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
                    help="Filter by tag (repeat for AND, comma within for OR)")
     p.add_argument("--from", dest="from", help="Start date (YYYY-MM-DD)")
     p.add_argument("--to", help="End date (YYYY-MM-DD)")
+    p.add_argument("--full", action="store_true",
+                   help="Include body text in results")
     p.set_defaults(func=cmd_agenda)
 
     p = sub.add_parser("agenda-view", help="Run a pre-built agenda view")
@@ -624,6 +658,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("subtasks", help="List children of a project")
     p.add_argument("substr", metavar="SUBSTR", help="Parent heading substring")
     p.add_argument("--index", help="Disambiguate with 1-based index")
+    p.add_argument("--full", action="store_true",
+                   help="Include body text in results")
     p.set_defaults(func=cmd_subtasks)
 
     p = sub.add_parser("categories", help="Show category tree for refile targets")
@@ -658,7 +694,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
 
     p = sub.add_parser("add-subtask", help="Add a child task under a parent")
     p.add_argument("parent", metavar="SUBSTR", help="Parent heading substring")
-    p.add_argument("title", metavar="TITLE", help="Subtask title")
+    p.add_argument("title", nargs="?", default=None, metavar="TITLE",
+                   help="Subtask title (optional with --batch)")
     p.add_argument("--body", help="Body text")
     p.add_argument("--body-file", dest="body_file",
                    help="Read body from FILE (use - for stdin)")
@@ -671,8 +708,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_add_subtask)
 
     p = sub.add_parser("add-event", help="Add a calendar event")
-    p.add_argument("title", metavar="TITLE", help="Event title")
-    p.add_argument("--date", required=True, help="Event date (YYYY-MM-DD)")
+    p.add_argument("title", nargs="?", default=None, metavar="TITLE",
+                   help="Event title (optional with --batch)")
+    p.add_argument("--date", help="Event date (YYYY-MM-DD)")
     p.add_argument("--end-date", dest="end_date", help="End date for multi-day events")
     p.add_argument("--time", help="Event time (HH:MM or HH:MM-HH:MM)")
     p.add_argument("--tag", help="Tag (default: calpersonal)")
@@ -691,7 +729,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     # --- Modifying ---
 
     p = sub.add_parser("set-done", help="Mark task DONE (with auto-progress)")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring (optional with --batch)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_done)
@@ -725,7 +764,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_set_cancelled)
 
     p = sub.add_parser("refile", help="Move task to a different heading")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring (optional with --batch)")
     p.add_argument("--to", help="Exact match on heading text")
     p.add_argument("--category", help="Substring match on category headings")
     p.add_argument("--index", help="Disambiguate with 1-based index")
@@ -815,8 +855,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_archive)
 
     p = sub.add_parser("delete", help="Delete a task (exact match, no projects)")
-    p.add_argument("heading", metavar="HEADING",
-                   help="Exact heading text (case-insensitive)")
+    p.add_argument("heading", nargs="?", default=None, metavar="HEADING",
+                   help="Exact heading text (optional with --batch)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_delete)
@@ -836,6 +876,46 @@ Run 'org-gtd-cli <command> -h' for command details."""
     return parser
 
 
+BATCH_COMMANDS = {
+    "add-event", "add-subtask", "add-task", "delete", "refile",
+    "set-done", "show", "set-tags", "add-tags",
+}
+
+
+def cmd_batch(args):
+    """Handle --batch mode: read JSON array from stdin, execute in one Emacs process."""
+    command = args.command
+    if command not in BATCH_COMMANDS:
+        print(f"Error: --batch is not supported for '{command}'", file=sys.stderr)
+        return 1
+
+    if sys.stdin.isatty():
+        print("Error: --batch requires JSON input on stdin", file=sys.stderr)
+        return 1
+
+    json_str = sys.stdin.read().strip()
+    if not json_str:
+        print("Error: empty stdin (expected JSON array)", file=sys.stderr)
+        return 1
+
+    # Shared args for commands that need them
+    shared_arg = None
+    if command == "add-subtask":
+        shared_arg = getattr(args, 'parent', None)
+        if not shared_arg:
+            print("Error: --batch add-subtask requires parent SUBSTR positional", file=sys.stderr)
+            return 1
+    elif command == "refile":
+        shared_arg = getattr(args, 'category', None) or getattr(args, 'to', None)
+        if not shared_arg:
+            print("Error: --batch refile requires --to or --category", file=sys.stderr)
+            return 1
+
+    expr = (f'(org-gtd-cli/batch {to_elisp(command)} '
+            f'{to_elisp(json_str)} {to_elisp(shared_arg)})')
+    return run_elisp(expr, json_mode=True)
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -848,6 +928,11 @@ def main():
         print("Error: ORG_GTD_CORE_FILE and ORG_GTD_ELISP_FILE must be set",
               file=sys.stderr)
         sys.exit(1)
+
+    # Handle --batch mode
+    if getattr(args, 'batch', False):
+        rc = cmd_batch(args)
+        sys.exit(rc)
 
     rc = args.func(args)
     sys.exit(rc)

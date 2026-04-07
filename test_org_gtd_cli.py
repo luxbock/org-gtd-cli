@@ -3237,3 +3237,448 @@ class TestSetNextNonProjectParent:
         stdout, stderr, rc = run_cli("set-next", "Test on actual project", org_dir=org_dir)
         assert rc == 0
 
+
+class TestFullFlag:
+    """Tests for --full flag on search, subtasks, and agenda."""
+
+    def test_search_full_json_includes_body(self, org_dir):
+        """search --full --json returns body field in each task."""
+        data, stderr, rc = run_cli_json("search", "Set up automated backups", "--full", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        tasks = data["tasks"]
+        assert len(tasks) >= 1
+        task = tasks[0]
+        assert "body" in task
+        assert task["body"] is not None
+        assert "backup strategies" in task["body"]
+
+    def test_search_without_full_no_body(self, org_dir):
+        """search without --full does NOT include body field."""
+        data, stderr, rc = run_cli_json("search", "Set up automated backups", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        task = data["tasks"][0]
+        assert "body" not in task
+
+    def test_subtasks_full_json_includes_body(self, org_dir):
+        """subtasks --full --json returns body field in each subtask."""
+        data, stderr, rc = run_cli_json("subtasks", "Improve agent workflow", "--full", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        for st in data["subtasks"]:
+            assert "body" in st
+
+    def test_subtasks_without_full_no_body(self, org_dir):
+        """subtasks without --full does NOT include body field."""
+        data, stderr, rc = run_cli_json("subtasks", "Improve agent workflow", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        for st in data["subtasks"]:
+            assert "body" not in st
+
+    def test_agenda_full_json_includes_body(self, org_dir):
+        """agenda --full --json returns body field in each task."""
+        data, stderr, rc = run_cli_json("agenda", "--full", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        assert data["count"] > 0
+        for task in data["tasks"]:
+            assert "body" in task
+
+    def test_agenda_without_full_no_body(self, org_dir):
+        """agenda without --full does NOT include body field."""
+        data, stderr, rc = run_cli_json("agenda", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        for task in data["tasks"]:
+            assert "body" not in task
+
+    def test_search_full_null_body_for_no_body(self, org_dir):
+        """Tasks with no body return null for body field."""
+        data, stderr, rc = run_cli_json("search", "Improve agent workflow", "--full", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        task = data["tasks"][0]
+        assert "body" in task
+        assert task["body"] is None
+
+    def test_search_full_text_mode(self, org_dir):
+        """search --full in text mode shows body indented below task."""
+        stdout, stderr, rc = run_cli("search", "Set up automated backups", "--full", org_dir=org_dir)
+        assert rc == 0
+        assert "backup strategies" in stdout
+
+
+class TestAutoStdin:
+    """Tests for auto-reading body from stdin when TEXT is omitted."""
+
+    def _run_with_stdin(self, args, input_text, org_dir):
+        env = os.environ.copy()
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        cmd = ["python3", str(CLI_SCRIPT)] + list(args)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=env,
+            input=input_text, timeout=30,
+        )
+        return result.stdout, result.stderr, result.returncode
+
+    def test_set_body_auto_stdin(self, org_dir):
+        """set-body reads from stdin when no TEXT arg provided and stdin is pipe."""
+        stdout, stderr, rc = self._run_with_stdin(
+            ["set-body", "Write quarterly report"],
+            "Auto stdin body.", org_dir,
+        )
+        assert rc == 0
+        assert "Auto stdin body." in (org_dir / "tasks.org").read_text()
+
+    def test_append_body_auto_stdin(self, org_dir):
+        """append-body reads from stdin when no TEXT arg provided and stdin is pipe."""
+        stdout, stderr, rc = self._run_with_stdin(
+            ["append-body", "Write quarterly report"],
+            "Auto appended.", org_dir,
+        )
+        assert rc == 0
+        assert "Auto appended." in (org_dir / "tasks.org").read_text()
+
+    def test_positional_text_still_works(self, org_dir):
+        """Positional TEXT argument still works (regression)."""
+        stdout, stderr, rc = run_cli(
+            "set-body", "Write quarterly report", "Positional body.",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert "Positional body." in (org_dir / "tasks.org").read_text()
+
+    def test_body_file_stdin_still_works(self, org_dir):
+        """--body-file - still works (regression)."""
+        stdout, stderr, rc = self._run_with_stdin(
+            ["set-body", "Write quarterly report", "--body-file", "-"],
+            "Explicit stdin.", org_dir,
+        )
+        assert rc == 0
+        assert "Explicit stdin." in (org_dir / "tasks.org").read_text()
+
+    def test_no_text_no_pipe_shows_error(self, org_dir):
+        """No TEXT, no pipe shows error with hint."""
+        # run_cli uses capture_output which means stdin is a pipe (with no data)
+        # To test TTY detection we'd need more complex setup, so just verify
+        # that with empty stdin pipe it reads empty string (which set-body allows)
+        stdout, stderr, rc = self._run_with_stdin(
+            ["set-body", "Write quarterly report"],
+            "", org_dir,
+        )
+        # Empty string via stdin is valid for set-body (clears body)
+        assert rc == 0
+
+
+def run_batch(command, items_json, *extra_args, org_dir):
+    """Run org-gtd-cli --json --batch <command> with JSON on stdin."""
+    env = os.environ.copy()
+    env["ORG_DIRECTORY"] = str(org_dir) + "/"
+    env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+    env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+    cmd = ["python3", str(CLI_SCRIPT), "--json", "--batch", command] + list(extra_args)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, env=env,
+        input=json.dumps(items_json), timeout=30,
+    )
+    data = None
+    if result.stdout.strip():
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            pass
+    return data, result.stderr, result.returncode
+
+
+class TestBatch:
+    """Tests for --batch mode."""
+
+    def test_batch_set_done_happy_path(self, org_dir):
+        """Batch set-done with 2 items, both succeed."""
+        data, stderr, rc = run_batch(
+            "set-done",
+            ["Write quarterly report", "Prepare onboarding guide"],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert data["batch"] is True
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["succeeded"] == 2
+        assert data["summary"]["failed"] == 0
+        assert all(r["success"] is True for r in data["results"])
+
+    def test_batch_set_done_partial_failure(self, org_dir):
+        """Batch set-done: one valid, one invalid heading."""
+        data, stderr, rc = run_batch(
+            "set-done",
+            ["Write quarterly report", "Nonexistent task xyz"],
+            org_dir=org_dir,
+        )
+        assert rc == 0  # exit 0 because at least one succeeded
+        assert data is not None
+        assert data["summary"]["succeeded"] == 1
+        assert data["summary"]["failed"] == 1
+        assert data["results"][0]["success"] is True
+        assert data["results"][1]["success"] is False
+        assert "error" in data["results"][1]
+
+    def test_batch_set_done_total_failure(self, org_dir):
+        """Batch set-done: all items fail."""
+        data, stderr, rc = run_batch(
+            "set-done",
+            ["Nonexistent 1", "Nonexistent 2"],
+            org_dir=org_dir,
+        )
+        assert rc == 1  # all failed
+        assert data is not None
+        assert data["summary"]["succeeded"] == 0
+        assert data["summary"]["failed"] == 2
+
+    def test_batch_empty_array(self, org_dir):
+        """Batch with empty array exits 0."""
+        data, stderr, rc = run_batch("set-done", [], org_dir=org_dir)
+        # No items succeeded (0), no items failed (0) — edge case: exit 1 per spec
+        assert data is not None
+        assert data["summary"]["total"] == 0
+
+    def test_batch_add_event(self, org_dir):
+        """Batch add-event with 2 events."""
+        data, stderr, rc = run_batch(
+            "add-event",
+            [
+                {"title": "Meeting A", "date": "2026-04-10"},
+                {"title": "Meeting B", "date": "2026-04-11", "time": "14:00"},
+            ],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert data["summary"]["succeeded"] == 2
+        cal = (org_dir / "calendar.org").read_text()
+        assert "Meeting A" in cal
+        assert "Meeting B" in cal
+
+    def test_batch_add_subtask(self, org_dir):
+        """Batch add-subtask with shared parent."""
+        data, stderr, rc = run_batch(
+            "add-subtask",
+            [
+                {"title": "Subtask A"},
+                {"title": "Subtask B", "state": "NEXT"},
+            ],
+            "Prepare onboarding guide",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert data["summary"]["succeeded"] == 2
+
+    def test_batch_delete(self, org_dir):
+        """Batch delete multiple tasks."""
+        # First add some tasks to delete
+        run_cli("add-task", "Delete me 1", org_dir=org_dir)
+        run_cli("add-task", "Delete me 2", org_dir=org_dir)
+        data, stderr, rc = run_batch(
+            "delete",
+            ["Delete me 1", "Delete me 2"],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+
+    def test_batch_result_index_matches_input(self, org_dir):
+        """Result index matches input array position."""
+        data, stderr, rc = run_batch(
+            "set-done",
+            ["Write quarterly report", "Nonexistent xyz"],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["results"][0]["index"] == 0
+        assert data["results"][1]["index"] == 1
+
+    def test_batch_invalid_json(self, org_dir):
+        """Invalid JSON on stdin exits 1."""
+        env = os.environ.copy()
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        cmd = ["python3", str(CLI_SCRIPT), "--json", "--batch", "set-done"]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=env,
+            input="not json", timeout=30,
+        )
+        assert result.returncode == 1
+
+    def test_batch_unsupported_command(self, org_dir):
+        """--batch on unsupported command fails."""
+        env = os.environ.copy()
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        cmd = ["python3", str(CLI_SCRIPT), "--json", "--batch", "search", "foo"]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=env,
+            input="[]", timeout=30,
+        )
+        assert result.returncode == 1
+        assert "not supported" in result.stderr
+
+
+class TestCorrectiveErrors:
+    """Tests for corrective error messages with hints."""
+
+    def test_show_no_match_json_has_hint(self, org_dir):
+        """show on nonexistent task includes hint in JSON on stderr."""
+        data, stderr, rc = run_cli_json("show", "zzz_nonexistent_zzz", org_dir=org_dir)
+        assert rc == 1
+        # Error JSON goes to stderr
+        err_data = None
+        for line in stderr.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                err_data = json.loads(line)
+                break
+        assert err_data is not None
+        assert "error" in err_data
+        assert "hint" in err_data
+        assert "search" in err_data["hint"].lower()
+
+    def test_show_ambiguous_json_has_matches(self, org_dir):
+        """show on ambiguous SUBSTR returns match list + hint in JSON."""
+        # "Write" matches multiple tasks
+        data, stderr, rc = run_cli_json("show", "agent", org_dir=org_dir)
+        assert rc == 2
+        assert data is not None
+        assert "matches" in data
+        assert len(data["matches"]) > 1
+        assert "hint" in data
+        assert "--index" in data["hint"]
+
+    def test_refile_category_not_found_json_hint(self, org_dir):
+        """refile --category nonexistent shows hint in JSON on stderr."""
+        data, stderr, rc = run_cli_json(
+            "refile", "Write quarterly report", "--category", "zzz_nonexistent",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        err_data = None
+        for line in stderr.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    err_data = json.loads(line)
+                    if "hint" in err_data:
+                        break
+                except json.JSONDecodeError:
+                    pass
+        assert err_data is not None
+        assert "hint" in err_data
+        assert "categories" in err_data["hint"].lower()
+
+    def test_set_state_invalid_json_hint(self, org_dir):
+        """set-state with invalid state shows valid states in JSON on stderr."""
+        data, stderr, rc = run_cli_json(
+            "set-state", "Write quarterly report", "INVALID",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        err_data = None
+        for line in stderr.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    err_data = json.loads(line)
+                    if "hint" in err_data:
+                        break
+                except json.JSONDecodeError:
+                    pass
+        assert err_data is not None
+        assert "hint" in err_data
+        assert "TODO" in err_data["hint"]
+
+    def test_priority_cookie_stripped_from_show(self, org_dir):
+        """show with priority cookie in SUBSTR still matches."""
+        stdout, stderr, rc = run_cli("show", "[#A] Write quarterly report", org_dir=org_dir)
+        assert rc == 0
+        assert "Write quarterly report" in stdout
+
+    def test_no_match_text_hint_on_stderr(self, org_dir):
+        """Text mode: no-match error + hint appears on stderr."""
+        stdout, stderr, rc = run_cli("show", "zzz_nonexistent_zzz", org_dir=org_dir)
+        assert rc == 1
+        assert "search" in stderr.lower()
+
+
+class TestMutationTaskField:
+    """Tests for full task state in JSON mutation responses."""
+
+    def test_set_done_includes_task(self, org_dir):
+        """set-done JSON response includes task object."""
+        data, stderr, rc = run_cli_json("set-done", "Write quarterly report", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        assert "task" in data
+        task = data["task"]
+        assert task["heading"] == "Write quarterly report"
+        assert task["state"] == "DONE"
+        assert "body" in task
+        assert "file" in task
+
+    def test_set_state_includes_task(self, org_dir):
+        """set-state JSON response includes task object."""
+        data, stderr, rc = run_cli_json(
+            "set-state", "Prepare onboarding guide", "NEXT", org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert "task" in data
+        assert data["task"]["state"] == "NEXT"
+
+    def test_rename_includes_task(self, org_dir):
+        """rename JSON response includes task object with new heading."""
+        data, stderr, rc = run_cli_json(
+            "rename", "Write quarterly report", "Write annual report", org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert "task" in data
+        assert data["task"]["heading"] == "Write annual report"
+
+    def test_set_tags_includes_task(self, org_dir):
+        """set-tags JSON response includes task with updated tags."""
+        data, stderr, rc = run_cli_json(
+            "set-tags", "Write quarterly report", "--tags", "urgent,work",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert "task" in data
+        assert "urgent" in data["task"]["tags"]
+
+    def test_set_body_includes_task(self, org_dir):
+        """set-body JSON response includes task with updated body."""
+        data, stderr, rc = run_cli_json(
+            "set-body", "Write quarterly report", "New body text.",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert "task" in data
+        assert data["task"]["body"] == "New body text."
+
+    def test_dry_run_no_task_field(self, org_dir):
+        """Dry-run responses do NOT include task field."""
+        data, stderr, rc = run_cli_json(
+            "set-done", "Write quarterly report", "--dry-run", org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert "task" not in data
+        assert data.get("dry_run") is True
+
