@@ -511,10 +511,21 @@ class TestShow:
         assert "Research formicarium options" in stdout
         assert "(tasks.org)" in stdout
 
-    def test_shows_logbook_drawers(self, org_dir):
+    def test_strips_logbook_from_body(self, org_dir):
+        """show strips :LOGBOOK:...:END: drawers from body text."""
         stdout, stderr, rc = run_cli("show", "Fix org-capture workspace", org_dir=org_dir)
         assert rc == 0
-        assert ":LOGBOOK:" in stdout
+        assert ":LOGBOOK:" not in stdout
+        # Body text after the LOGBOOK should still be present
+        assert "existing Emacs instance" in stdout
+
+    def test_strips_logbook_from_json_body(self, org_dir):
+        """show --json strips LOGBOOK from body field."""
+        stdout, stderr, rc = run_cli("--json", "show", "Fix org-capture workspace", org_dir=org_dir)
+        assert rc == 0
+        data = json.loads(stdout)
+        assert ":LOGBOOK:" not in (data["body"] or "")
+        assert "existing Emacs instance" in (data["body"] or "")
 
     def test_task_with_org_link(self, org_dir):
         stdout, stderr, rc = run_cli("show", "interesting article", org_dir=org_dir)
@@ -2709,8 +2720,24 @@ class TestJsonShow:
         assert rc == 0
         for field in ["heading", "state", "priority", "tags", "file",
                        "scheduled", "deadline", "parent", "is_project",
-                       "body", "subtasks", "progress"]:
+                       "body", "sessions", "subtasks", "progress"]:
             assert field in data, f"Missing field: {field}"
+
+    def test_show_sessions_empty_by_default(self, org_dir):
+        """Sessions field is empty list when no sessions recorded."""
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["sessions"] == []
+
+    def test_show_sessions_after_add(self, org_dir):
+        """Sessions field populated after add-session-id."""
+        run_cli("add-session-id", "Set up automated backups",
+                "claude_code:show-test-uuid", org_dir=org_dir)
+        data, _, rc = run_cli_json("show", "Set up automated backups", org_dir=org_dir)
+        assert rc == 0
+        assert len(data["sessions"]) >= 1
+        assert data["sessions"][0]["agent"] == "claude_code"
+        assert data["sessions"][0]["session_id"] == "show-test-uuid"
 
     def test_show_project_with_subtasks(self, org_dir):
         """Show on a project should include subtasks and progress."""
@@ -3681,4 +3708,75 @@ class TestMutationTaskField:
         assert data is not None
         assert "task" not in data
         assert data.get("dry_run") is True
+
+
+class TestAddSessionId:
+    def test_add_session_id(self, org_dir):
+        """add-session-id creates LOGBOOK entry."""
+        stdout, stderr, rc = run_cli(
+            "add-session-id", "Set up automated backups",
+            "claude_code:test-uuid-1234",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert "Added session" in stdout or "added" in stdout
+
+    def test_add_session_id_json(self, org_dir):
+        """add-session-id --json returns structured response."""
+        data, stderr, rc = run_cli_json(
+            "add-session-id", "Set up automated backups",
+            "claude_code:test-uuid-5678",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["status"] == "added"
+        assert data["session_id"] == "claude_code:test-uuid-5678"
+
+    def test_add_session_id_idempotent(self, org_dir):
+        """Adding the same session ID twice is a no-op."""
+        run_cli("add-session-id", "Set up automated backups",
+                "claude_code:idempotent-test", org_dir=org_dir)
+        data, stderr, rc = run_cli_json(
+            "add-session-id", "Set up automated backups",
+            "claude_code:idempotent-test",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["status"] == "no-op"
+
+
+class TestGetSessionIds:
+    def test_get_session_ids_empty(self, org_dir):
+        """get-session-ids returns empty list for task without sessions."""
+        data, stderr, rc = run_cli_json(
+            "get-session-ids", "Write quarterly report",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["sessions"] == []
+
+    def test_get_session_ids_after_add(self, org_dir):
+        """get-session-ids returns sessions added via add-session-id."""
+        run_cli("add-session-id", "Set up automated backups",
+                "claude_code:roundtrip-test", org_dir=org_dir)
+        data, stderr, rc = run_cli_json(
+            "get-session-ids", "Set up automated backups",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert len(data["sessions"]) >= 1
+        session = data["sessions"][0]
+        assert session["agent"] == "claude_code"
+        assert session["session_id"] == "roundtrip-test"
+
+    def test_get_session_ids_plain(self, org_dir):
+        """get-session-ids plain output shows one entry per line."""
+        run_cli("add-session-id", "Set up automated backups",
+                "pi_agent:plain-test", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "get-session-ids", "Set up automated backups",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert "pi_agent:plain-test" in stdout
 

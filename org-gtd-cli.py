@@ -380,6 +380,18 @@ def cmd_set_body(args):
     return run_elisp(expr, json_mode=args.json)
 
 
+def cmd_add_session_id(args):
+    expr = (f'(org-gtd-cli/add-session-id {to_elisp(args.substr)} '
+            f'{to_elisp(args.session_id)} {to_elisp(args.index)})')
+    return run_elisp(expr, json_mode=args.json)
+
+
+def cmd_get_session_ids(args):
+    expr = (f'(org-gtd-cli/get-session-ids {to_elisp(args.substr)} '
+            f'{to_elisp(args.index)})')
+    return run_elisp(expr, json_mode=args.json)
+
+
 def cmd_set_done(args):
     if not args.substr:
         print("Error: SUBSTR is required", file=sys.stderr)
@@ -844,6 +856,20 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_set_body)
 
+    # --- Session tracking ---
+
+    p = sub.add_parser("add-session-id", help="Add agent session ID to task LOGBOOK")
+    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("session_id", metavar="SESSION_ID",
+                   help="Session ID in format agent:uuid")
+    p.add_argument("--index", help="Disambiguate with 1-based index")
+    p.set_defaults(func=cmd_add_session_id)
+
+    p = sub.add_parser("get-session-ids", help="Get agent session IDs from task LOGBOOK")
+    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("--index", help="Disambiguate with 1-based index")
+    p.set_defaults(func=cmd_get_session_ids)
+
     # --- Maintenance ---
 
     p = sub.add_parser("archive", help="Archive completed tasks")
@@ -877,8 +903,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
 
 
 BATCH_COMMANDS = {
-    "add-event", "add-subtask", "add-task", "delete", "refile",
-    "set-done", "show", "set-tags", "add-tags",
+    "add-event", "add-session-id", "add-subtask", "add-task", "delete",
+    "refile", "set-done", "show", "set-tags", "add-tags",
 }
 
 

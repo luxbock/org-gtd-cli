@@ -250,10 +250,17 @@ this function only returns a value when a [#X] cookie is actually present."
 Agents sometimes paste headings including the priority cookie."
   (replace-regexp-in-string "\\[#[A-C]\\] ?" "" s))
 
+(defun org-gtd-cli/strip-logbook (s)
+  "Remove :LOGBOOK:...:END: drawer blocks from string S."
+  (let ((result s))
+    (while (string-match "^:LOGBOOK:\n\\(?:.*\n\\)*?:END:\n?" result)
+      (setq result (replace-match "" t t result)))
+    (string-trim result)))
+
 (defun org-gtd-cli/get-body-at-point ()
   "Extract body text of heading at point.
-Returns the body string, or nil if empty.  Strips trailing creation
-timestamp.  Point must be on a heading line."
+Returns the body string, or nil if empty.  Strips LOGBOOK drawers
+and trailing creation timestamp.  Point must be on a heading line."
   (let* ((level (org-current-level))
          (child-level (1+ level))
          (subtree-end (save-excursion (org-end-of-subtree t) (point)))
@@ -267,10 +274,123 @@ timestamp.  Point must be on a heading line."
                        subtree-end)))
          (raw-body (string-trim (buffer-substring-no-properties
                                  (min body-start body-end) body-end)))
-         (body (if (string-match "\\[[-0-9]+ [A-Z][a-z]+\\( [0-9:]+\\)?\\]\\'" raw-body)
-                   (string-trim (substring raw-body 0 (match-beginning 0)))
-                 raw-body)))
+         (no-logbook (org-gtd-cli/strip-logbook raw-body))
+         (body (if (string-match "\\[[-0-9]+ [A-Z][a-z]+\\( [0-9:]+\\)?\\]\\'" no-logbook)
+                   (string-trim (substring no-logbook 0 (match-beginning 0)))
+                 no-logbook)))
     (if (string-empty-p body) nil body)))
+
+(defun org-gtd-cli/parse-session-entries ()
+  "Parse agent session entries from LOGBOOK drawer at point.
+Returns a list of alists with keys agent, session_id, timestamp.
+Point must be on a heading line."
+  (let ((entries '())
+        (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+        (meta-end (save-excursion (org-end-of-meta-data t) (point))))
+    (save-excursion
+      (goto-char (line-beginning-position))
+      (when (re-search-forward "^[ \t]*:LOGBOOK:" meta-end t)
+        (let ((drawer-end (save-excursion
+                            (re-search-forward "^[ \t]*:END:" subtree-end t))))
+          (when drawer-end
+            (while (re-search-forward
+                    "^- Agent session \\([a-z_]+\\):\\([^ ]+\\) \\[\\([^]]+\\)\\]"
+                    drawer-end t)
+              (push `((agent . ,(match-string 1))
+                      (session_id . ,(match-string 2))
+                      (timestamp . ,(match-string 3)))
+                    entries))))))
+    (nreverse entries)))
+
+(defun org-gtd-cli/add-session-id (substring session-id &optional index)
+  "Add an agent session ID to the LOGBOOK drawer of a task.
+SESSION-ID should be in the format agent:uuid.
+Idempotent: if SESSION-ID already exists, this is a no-op."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+              (meta-end (save-excursion (org-end-of-meta-data t) (point)))
+              (timestamp (format-time-string "[%Y-%m-%d %a %H:%M]"))
+              (entry-line (format "- Agent session %s %s" session-id timestamp))
+              (already-exists nil))
+         ;; Check for existing session ID (idempotent)
+         (save-excursion
+           (goto-char (line-beginning-position))
+           (when (re-search-forward "^[ \t]*:LOGBOOK:" meta-end t)
+             (let ((drawer-end (save-excursion
+                                 (re-search-forward "^[ \t]*:END:" subtree-end t))))
+               (when (and drawer-end
+                          (re-search-forward
+                           (regexp-quote session-id)
+                           drawer-end t))
+                 (setq already-exists t)))))
+         (if already-exists
+             (progn
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "add-session-id")
+                      (status . "no-op")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (message . "Session ID already recorded")))
+                 (princ (format "Session ID already recorded for: %s (%s)\n"
+                                heading rel-file))))
+           ;; Find or create LOGBOOK drawer and insert entry
+           (save-excursion
+             (goto-char (line-beginning-position))
+             (if (re-search-forward "^[ \t]*:LOGBOOK:" meta-end t)
+                 ;; Existing LOGBOOK — insert after :LOGBOOK: line
+                 (progn
+                   (forward-line 1)
+                   (insert entry-line "\n"))
+               ;; No LOGBOOK — create one after properties/scheduling
+               (goto-char (cdr buf-pos))
+               (org-end-of-meta-data)
+               (when (> (point) subtree-end)
+                 (goto-char subtree-end))
+               (insert ":LOGBOOK:\n" entry-line "\n:END:\n")))
+           (save-buffer)
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/output
+                `((version . 1)
+                  (command . "add-session-id")
+                  (status . "added")
+                  (heading . ,heading)
+                  (file . ,rel-file)
+                  (session_id . ,session-id)))
+             (princ (format "Added session %s to: %s (%s)\n"
+                            session-id heading rel-file)))))))))
+
+(defun org-gtd-cli/get-session-ids (substring &optional index)
+  "Get all agent session IDs from a task's LOGBOOK drawer."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (buf-pos (org-gtd-cli/find-task substring idx t)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (entries (org-gtd-cli/parse-session-entries)))
+         (if org-gtd-cli/json-mode
+             (org-gtd-cli/output
+              `((version . 1)
+                (command . "get-session-ids")
+                (heading . ,heading)
+                (file . ,rel-file)
+                (sessions . ,(apply #'vector entries))))
+           (if entries
+               (dolist (e entries)
+                 (princ (format "%s:%s [%s]\n"
+                                (cdr (assq 'agent e))
+                                (cdr (assq 'session_id e))
+                                (cdr (assq 'timestamp e)))))
+             (princ "No session IDs found.\n"))))))))
 
 (defun org-gtd-cli/find-task (substring &optional index include-done exact)
   "Find a task by SUBSTRING match across all agenda files.
@@ -818,6 +938,7 @@ minus the version/command wrapper."
          (child-level (1+ level))
          (subtree-end (save-excursion (org-end-of-subtree t) (point)))
          (body (org-gtd-cli/get-body-at-point))
+         (sessions (org-gtd-cli/parse-session-entries))
          ;; Collect subtasks
          (children '())
          (done-count 0)
@@ -857,6 +978,7 @@ minus the version/command wrapper."
         (parent . ,(or parent-heading :null))
         (is_project . ,(if is-project t :false))
         (body . ,(or body :null))
+        (sessions . ,(apply #'vector sessions))
         (subtasks . ,(apply #'vector (nreverse children)))
         (progress . ,(if is-project
                          `((done . ,done-count) (total . ,total-count))
