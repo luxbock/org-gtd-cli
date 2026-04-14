@@ -2867,40 +2867,11 @@ TAGS-CSV is a comma-separated string of tags to remove."
   "Format TAGS list as :tag1:tag2: string, or empty string if nil."
   (if tags (concat ":" (mapconcat #'identity tags ":") ":") ""))
 
-;; --- archive helpers ---
+;; --- archive helpers (delegated to gtd-core.el shared functions) ---
 
-(defun org-gtd-cli/subtree-has-recent-dates-p ()
-  "Return non-nil if the subtree at point contains dates from this or last month."
-  (save-excursion
-    (let* ((subtree-end (save-excursion (org-end-of-subtree t)))
-           (this-month (format-time-string "%Y-%m-"))
-           ;; Subtract (day-of-month + 1) days to get a date in last month
-           (day-of-month (string-to-number (format-time-string "%d")))
-           (last-month-time (time-subtract (current-time)
-                                           (days-to-time (1+ day-of-month))))
-           (last-month (format-time-string "%Y-%m-" last-month-time))
-           (recent-re (concat last-month "\\|" this-month)))
-      (re-search-forward recent-re subtree-end t))))
-
-(defun org-gtd-cli/subtree-has-any-dates-p ()
-  "Return non-nil if the subtree at point contains any YYYY-MM-DD date string."
-  (save-excursion
-    (let ((subtree-end (save-excursion (org-end-of-subtree t))))
-      (re-search-forward "[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}" subtree-end t))))
-
-(defun org-gtd-cli/inside-active-project-p ()
-  "Return the heading of an active (non-done) ancestor, or nil.
-Walks up via `org-up-heading-safe'.  An ancestor is \"active\" if it has
-a TODO keyword that is NOT in `org-done-keywords'."
-  (save-excursion
-    (let ((result nil))
-      (while (and (not result) (org-up-heading-safe))
-        (let ((state (org-get-todo-state)))
-          (when (and state
-                     (member state org-todo-keywords-1)
-                     (not (member state org-done-keywords)))
-            (setq result (org-get-heading t t t t)))))
-      result)))
+(defalias 'org-gtd-cli/subtree-has-recent-dates-p #'gtd/subtree-has-recent-dates-p)
+(defalias 'org-gtd-cli/subtree-has-any-dates-p #'gtd/subtree-has-any-dates-p)
+(defalias 'org-gtd-cli/inside-active-project-p #'gtd/inside-active-project-p)
 
 ;; --- archive (single task) ---
 
