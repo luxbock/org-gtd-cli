@@ -492,7 +492,7 @@ If ACTIVE is non-nil, use angle brackets; otherwise square brackets."
     (with-temp-buffer
       (org-mode)
       (insert text)
-      (let ((fill-column 80))
+      (let ((fill-column 100))
         ;; Phase 1: Insert blank line before standalone timestamps so
         ;; org-element treats them as separate elements.  Mark inserted
         ;; newlines with a text property for precise removal later.
