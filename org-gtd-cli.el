@@ -192,14 +192,8 @@ siblings have TODO keywords (skips if organizational headings are mixed in)."
   "Return FILEPATH relative to org-directory."
   (file-relative-name filepath org-directory))
 
-(defun org-gtd-cli/heading-path-at-point ()
-  "Return the full slash-separated path for the heading at point.
-Walks up the org tree to build a path like \"Computers/NixOS/epiphyte\"."
-  (let ((path (list (org-get-heading t t t t))))
-    (save-excursion
-      (while (org-up-heading-safe)
-        (push (org-get-heading t t t t) path)))
-    (mapconcat #'identity path "/")))
+(defalias 'org-gtd-cli/heading-path-at-point #'gtd/heading-path-at-point
+  "Compatibility alias.  See `gtd/heading-path-at-point' in gtd-core.el.")
 
 (defun org-gtd-cli/strip-markup (s)
   "Strip org markup from S for fuzzy matching.
