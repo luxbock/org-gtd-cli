@@ -18,6 +18,17 @@
 ;; Prevent lock file conflicts with running Doom instance
 (setq create-lockfiles nil)
 
+;; Suppress "Saving file..."/"Wrote ..." chatter from `save-buffer'. In daemon
+;; mode the Lisp `message' is rebound to capture stderr (see
+;; `org-gtd-cli/daemon-dispatch'), but `save-buffer'/`write-region' emit those
+;; notices through the *C-level* message primitive, which bypasses that Lisp
+;; redefinition and leaks onto the daemon's stdout — corrupting `--json' output.
+;; `save-silently' makes `basic-save-buffer' skip the Lisp notice AND wrap the
+;; write in `with-suppressed-message' (binding `inhibit-message'), which the
+;; C-level "Wrote" message respects. Does not reproduce in batch (C messages go
+;; to stderr there), so it is daemon-mode-specific.
+(setq save-silently t)
+
 ;; Isolated user-emacs-directory (set by caller, but ensure a default)
 (unless (file-directory-p user-emacs-directory)
   (make-directory user-emacs-directory t))
@@ -700,11 +711,12 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                          (is-project
                           (org-gtd-cli/has-todo-children-p)))
                      (let ((body-text (when org-gtd-cli/full-mode
-                                        (org-gtd-cli/get-body-at-point))))
+                                        (org-gtd-cli/get-body-at-point)))
+                           (props (org-gtd-cli/properties-at-point)))
                        (push (list state heading priority-char
                                    (vconcat (mapcar #'identity tags))
                                    tags-str rel-file scheduled deadline
-                                   parent-heading is-project body-text)
+                                   parent-heading is-project body-text props)
                              results)))))))))))
     (setq results (nreverse results))
     (if org-gtd-cli/json-mode
@@ -743,7 +755,8 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                     (scheduled . ,(or (nth 6 r) :null))
                     (deadline . ,(or (nth 7 r) :null))
                     (parent . ,(or (nth 8 r) :null))
-                    (is_project . ,(if (nth 9 r) t :false)))))
+                    (is_project . ,(if (nth 9 r) t :false))
+                    (properties . ,(nth 11 r)))))
         (when org-gtd-cli/full-mode
           (setq task (append task `((body . ,(or (nth 10 r) :null))))))
         (push task tasks)))
@@ -843,10 +856,11 @@ FILE-NAME restricts search to a single file in org-directory."
                                   (setq found t))))
                             found))))
                    (let ((body-text (when org-gtd-cli/full-mode
-                                      (org-gtd-cli/get-body-at-point))))
+                                      (org-gtd-cli/get-body-at-point)))
+                         (props (org-gtd-cli/properties-at-point)))
                      (push (list state heading rel-file
                                  (vconcat (mapcar #'identity tags))
-                                 parent-heading is-project body-text)
+                                 parent-heading is-project body-text props)
                            matches))))))))))
     (setq matches (nreverse matches))
     (if org-gtd-cli/json-mode
@@ -860,13 +874,15 @@ FILE-NAME restricts search to a single file in org-directory."
                    (parent (nth 4 m))
                    (is-project (nth 5 m))
                    (body (nth 6 m))
+                   (props (nth 7 m))
                    (task `((index . ,i)
                            (heading . ,heading)
                            (state . ,state)
                            (tags . ,(or tags []))
                            (file . ,rel-file)
                            (parent . ,(or parent :null))
-                           (is_project . ,(if is-project t :false)))))
+                           (is_project . ,(if is-project t :false))
+                           (properties . ,props))))
               (when org-gtd-cli/full-mode
                 (setq task (append task `((body . ,(or body :null))))))
               (push task tasks)
@@ -924,6 +940,26 @@ state and priority — no tags, body, drawers, or planning lines."
                (princ content)
                (princ "\n"))))))))
   (kill-emacs 0))
+
+(defconst org-gtd-cli/properties-exclude '("CATEGORY")
+  "Standard properties to omit from the generic `properties' JSON field.
+`org-entry-properties' with `standard' auto-injects CATEGORY (a derived
+value, not part of the user's :PROPERTIES: drawer), so we drop it. Special
+properties (TODO/PRIORITY/TAGS/SCHEDULED/DEADLINE/...) are already surfaced
+as first-class fields and never appear among `standard' properties.")
+
+(defun org-gtd-cli/properties-at-point ()
+  "Return the heading's :PROPERTIES: drawer as a JSON object (hash-table).
+Keys are property names (strings), values their string contents. Excludes
+`org-gtd-cli/properties-exclude'. An entry with no user properties yields an
+empty object (`{}'), not null. Serializing a hash-table (rather than an
+alist) both avoids the symbol-key requirement of `json-serialize' and gives
+a clean `{}' for the empty case. Not inherited — only the entry's own drawer."
+  (let ((h (make-hash-table :test 'equal)))
+    (dolist (pair (org-entry-properties nil 'standard))
+      (unless (member (car pair) org-gtd-cli/properties-exclude)
+        (puthash (car pair) (cdr pair) h)))
+    h))
 
 (defun org-gtd-cli/task-alist-at-point ()
   "Build a full task alist for the heading at point.
@@ -984,6 +1020,7 @@ minus the version/command wrapper."
         (deadline . ,(or deadline :null))
         (parent . ,(or parent-heading :null))
         (is_project . ,(if is-project t :false))
+        (properties . ,(org-gtd-cli/properties-at-point))
         (body . ,(or body :null))
         (sessions . ,(apply #'vector sessions))
         (subtasks . ,(apply #'vector (nreverse children)))
@@ -2883,12 +2920,24 @@ TAGS-CSV is a comma-separated string of tags to remove."
 `set-property' refuses to write these to avoid corrupting task state;
 use the dedicated command (e.g. set-schedule, set-deadline, set-tags) instead.")
 
+(defconst org-gtd-cli/property-enums
+  '(("AGENT_EFFORT" . ("light" "standard" "deep")))
+  "Alist of upcased PROPERTY-NAME -> list of allowed (canonical) values.
+`set-property' rejects out-of-enum values for these keys (case-insensitive
+match) and stores the canonical form. This keeps the writer generic while
+giving known enum properties value-level validation. AGENT_EFFORT is the
+per-task model-tier hint on @agent leaf tasks (light/standard/deep); the
+tier->model mapping is deferred to the consuming SKILL — see
+~/Nextcloud/org/CLAUDE.md.")
+
 (defun org-gtd-cli/set-property (substring key value &optional clear index dry-run)
   "Set or clear a single org PROPERTY on an existing task.
 KEY is the property name (e.g. \"AGENT_EFFORT\").  When CLEAR is non-nil
 the property is removed; otherwise it is set to VALUE.  This is a generic
-writer — value-level validation (e.g. allowed AGENT_EFFORT values) belongs
-in the calling command, not here."
+writer; the only value-level validation is for keys listed in
+`org-gtd-cli/property-enums' (e.g. AGENT_EFFORT), whose values are checked
+against the allowed set and normalized to canonical form.  Any other
+per-property validation belongs in the calling command."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))
@@ -2913,6 +2962,18 @@ in the calling command, not here."
     (when (and (not is-clear) (not value))
       (org-gtd-cli/error "Error: provide --value VALUE (or --clear to remove)")
       (kill-emacs 1))
+    ;; Enum validation for known properties (keeps the writer otherwise generic).
+    ;; Match case-insensitively and normalize to the canonical value.
+    (when (and (not is-clear) value)
+      (let ((allowed (cdr (assoc (upcase key) org-gtd-cli/property-enums))))
+        (when allowed
+          (let ((canonical (cl-find value allowed :test #'cl-equalp)))
+            (if canonical
+                (setq value canonical)
+              (org-gtd-cli/error
+               "Error: invalid value \"%s\" for %s; allowed: %s"
+               value (upcase key) (mapconcat #'identity allowed ", "))
+              (kill-emacs 1))))))
     (let ((buf-pos (org-gtd-cli/find-task substring idx t)))
       (with-current-buffer (car buf-pos)
         (org-with-wide-buffer

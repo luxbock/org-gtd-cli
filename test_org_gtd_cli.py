@@ -1854,6 +1854,108 @@ class TestSetProperty:
             "--value", "light", org_dir=org_dir)
         assert rc == 1
 
+    def test_agent_effort_valid_values(self, org_dir):
+        for v in ("light", "standard", "deep"):
+            stdout, stderr, rc = run_cli(
+                "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", v, org_dir=org_dir)
+            assert rc == 0, f"{v}: {stderr}"
+            assert f":AGENT_EFFORT: {v}" in (org_dir / "inbox.org").read_text()
+
+    def test_agent_effort_invalid_value_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--value", "medium", org_dir=org_dir)
+        assert rc == 1
+        assert "invalid value" in stderr.lower()
+        assert "light, standard, deep" in stderr
+        # Nothing written.
+        assert ":AGENT_EFFORT:" not in (org_dir / "inbox.org").read_text()
+
+    def test_agent_effort_value_normalized_case_insensitive(self, org_dir):
+        """A case variant is accepted and stored as the canonical lowercase form."""
+        data, _, rc = run_cli_json(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--value", "DEEP", org_dir=org_dir)
+        assert rc == 0
+        assert data["new_value"] == "deep"
+        assert ":AGENT_EFFORT: deep" in (org_dir / "inbox.org").read_text()
+
+    def test_non_enum_property_accepts_any_value(self, org_dir):
+        """Validation is scoped to enum'd keys; the writer stays generic."""
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "CUSTOM_FIELD",
+            "--value", "anything-goes", org_dir=org_dir)
+        assert rc == 0
+        assert ":CUSTOM_FIELD: anything-goes" in (org_dir / "inbox.org").read_text()
+
+    def test_agent_effort_clear_skips_value_validation(self, org_dir):
+        run_cli("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", "deep", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--clear", org_dir=org_dir)
+        assert rc == 0
+        assert ":AGENT_EFFORT:" not in (org_dir / "inbox.org").read_text()
+
+
+class TestTaskProperties:
+    """The generic `properties' JSON field exposes the :PROPERTIES: drawer
+    (incl. AGENT_EFFORT) in show/search/agenda/mutation output. Always present
+    (not gated by --full); an entry with no user properties yields {}."""
+
+    def test_show_json_includes_properties(self, org_dir):
+        run_cli("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", "deep", org_dir=org_dir)
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["properties"]["AGENT_EFFORT"] == "deep"
+
+    def test_show_json_properties_empty_object_when_unset(self, org_dir):
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        # Empty object, not null/missing — callers can index .properties safely.
+        assert data["properties"] == {}
+
+    def test_properties_excludes_category(self, org_dir):
+        """CATEGORY is auto-injected by org and must not appear as a property."""
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert "CATEGORY" not in data["properties"]
+
+    def test_search_json_includes_properties_without_full(self, org_dir):
+        """Acceptance: `search --tag @agent' surfaces AGENT_EFFORT (no --full)."""
+        run_cli("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", "light", org_dir=org_dir)
+        data, _, rc = run_cli_json("search", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        task = next(t for t in data["tasks"] if t["heading"] == "Buy groceries")
+        assert task["properties"]["AGENT_EFFORT"] == "light"
+
+    def test_agenda_json_includes_properties(self, org_dir):
+        run_cli("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", "standard", org_dir=org_dir)
+        data, _, rc = run_cli_json("agenda", org_dir=org_dir)
+        assert rc == 0
+        task = next(t for t in data["tasks"] if t["heading"] == "Buy groceries")
+        assert task["properties"]["AGENT_EFFORT"] == "standard"
+
+    def test_mutation_response_includes_properties(self, org_dir):
+        """Mutation responses (built from task-alist-at-point) carry properties."""
+        run_cli("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", "deep", org_dir=org_dir)
+        data, _, rc = run_cli_json("set-tags", "Buy groceries", "--add",
+                                   "urgent", org_dir=org_dir)
+        assert rc == 0
+        assert data["task"]["properties"]["AGENT_EFFORT"] == "deep"
+
+    def test_properties_value_non_ascii_roundtrip(self, org_dir):
+        run_cli("set-property", "Buy groceries", "--key", "NOTE",
+                "--value", "café — naïve", org_dir=org_dir)
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["properties"]["NOTE"] == "café — naïve"
+
 
 # ===========================================================================
 # 38. archive: single task
@@ -3311,6 +3413,53 @@ class TestJsonNonAsciiEncoding:
         # The error blob is emitted on stderr as JSON; it must parse.
         err = json.loads(stderr.strip().splitlines()[-1])
         assert "error" in err
+
+
+class TestDaemonSaveChatter:
+    """Regression: --json mutations in DAEMON mode must not leak save chatter.
+
+    `save-buffer' prints "Saving file %s..." but that notice is gated behind
+    `(not noninteractive)', so it never surfaces in batch mode (the default
+    test harness) — it ONLY appears in daemon mode, which is how olli's
+    interactive shell (ORG_GTD_CLI_DAEMON=1) and the agents actually invoke
+    the CLI. Each mutation then prepended the notice to the stream, breaking
+    naive `json.load(stdout)' / merged-stream parsers. `save-silently' (set in
+    org-gtd-cli.el) suppresses it. See the GTD task "Fix org-gtd-cli --json:
+    'Saving file...' chatter ... corrupts JSON output".
+
+    These tests spin up their OWN isolated Emacs daemon via a unique TMPDIR so
+    they never touch olli's interactive daemon (socket under /tmp/claude/...),
+    and tear it down afterwards.
+    """
+
+    @staticmethod
+    def _kill_daemon(daemon_tmp):
+        socket = os.path.join(daemon_tmp, "org-gtd-cli", "server")
+        if os.path.exists(socket):
+            subprocess.run(
+                ["emacsclient", "--socket-name", socket, "--eval", "(kill-emacs)"],
+                capture_output=True, timeout=10)
+
+    def test_daemon_json_mutation_no_save_chatter(self, org_dir, tmp_path):
+        """A --json mutation run against a fresh daemon emits ONLY JSON, with
+        no 'Saving file ...' chatter on either stream. Fails pre-fix."""
+        daemon_tmp = tmp_path / "daemon-home"
+        daemon_tmp.mkdir()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": str(daemon_tmp)}
+        try:
+            stdout, stderr, rc = run_cli(
+                "--json", "set-body", "Buy groceries", "daemon chatter test",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            # stdout must parse as a single JSON object (no leading chatter).
+            data = json.loads(stdout)
+            assert data["command"] == "set-body"
+            assert data["task"]["body"] == "daemon chatter test"
+            # The save notice must appear on neither stream.
+            assert "Saving file" not in stdout
+            assert "Saving file" not in stderr
+        finally:
+            self._kill_daemon(str(daemon_tmp))
 
 
 # ===========================================================================
