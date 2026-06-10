@@ -1981,7 +1981,11 @@ class TestArchiveSingle:
         assert "still active" in stderr
 
     def test_rejects_recent_dates(self, org_dir):
-        stdout, stderr, rc = run_cli("archive", "submit expense claims", org_dir=org_dir)
+        # Pin "now" so the fixture's dates stay within the recent-date window
+        # regardless of when the suite runs (fixture dates are ~2026-03).
+        stdout, stderr, rc = run_cli(
+            "archive", "submit expense claims", org_dir=org_dir,
+            env_overrides={"ORG_GTD_CLI_NOW": "2026-03-20"})
         assert rc == 1
         assert "recent dates" in stderr
 
@@ -2005,7 +2009,11 @@ class TestArchiveSingle:
 
 class TestArchiveBatch:
     def test_happy_path(self, org_dir):
-        stdout, stderr, rc = run_cli("archive", "--all", org_dir=org_dir)
+        # Pin "now" (fixture dates ~2026-03): expense-claims stays recent (kept),
+        # router/dentists (2026-01) are old enough to archive. Deterministic.
+        stdout, stderr, rc = run_cli(
+            "archive", "--all", org_dir=org_dir,
+            env_overrides={"ORG_GTD_CLI_NOW": "2026-03-20"})
         assert rc == 0
         assert "Archived" in stdout
         text = (org_dir / "tasks.org").read_text()
@@ -2193,6 +2201,11 @@ class TestFixTimestamps:
 # 42. fill-text (line wrapping)
 # ===========================================================================
 
+# Body text is filled at this column (matches `fill-column' in
+# org-gtd-cli.el's fill-text; see commit 0050827 — set to 100 to mirror
+# olli's Emacs setup). Wrapped lines must not exceed it.
+FILL_COLUMN = 100
+
 LONG_TEXT = (
     "This is a very long line of text that should definitely be wrapped "
     "because it exceeds the eighty column limit that we have set for body "
@@ -2209,24 +2222,24 @@ class TestFillText:
     def test_append_body_wraps_long_text(self, org_dir):
         stdout, stderr, rc = run_cli("append-body", "Bare heading", LONG_TEXT, org_dir=org_dir)
         assert rc == 0
-        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "Research", 80)
+        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "Research", FILL_COLUMN)
 
     def test_set_body_wraps_long_text(self, org_dir):
         stdout, stderr, rc = run_cli("set-body", "Bare heading", LONG_TEXT, org_dir=org_dir)
         assert rc == 0
-        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "Research", 80)
+        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "Research", FILL_COLUMN)
 
     def test_add_task_wraps_long_body(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Wrap test task", "--body", LONG_TEXT, org_dir=org_dir)
         assert rc == 0
         assert "Wrap test task" in (org_dir / "inbox.org").read_text()
-        assert_no_long_lines(org_dir / "inbox.org", "Wrap test task", "", 80)
+        assert_no_long_lines(org_dir / "inbox.org", "Wrap test task", "", FILL_COLUMN)
 
     def test_add_subtask_wraps_long_body(self, org_dir):
         stdout, stderr, rc = run_cli("add-subtask", "Holiday pre-trip", "Wrap sub", "--body", LONG_TEXT, org_dir=org_dir)
         assert rc == 0
         assert "Wrap sub" in (org_dir / "tasks.org").read_text()
-        assert_no_long_lines(org_dir / "tasks.org", "Wrap sub", "Finance", 80)
+        assert_no_long_lines(org_dir / "tasks.org", "Wrap sub", "Finance", FILL_COLUMN)
 
     def test_src_block_preserved(self, org_dir):
         body = (
@@ -2288,7 +2301,7 @@ class TestFillText:
         body = f"{LONG_TEXT}\n\n{LONG_TEXT2}"
         stdout, stderr, rc = run_cli("set-body", "Bare heading", body, org_dir=org_dir)
         assert rc == 0
-        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "Research", 80)
+        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "Research", FILL_COLUMN)
         # Check blank line preserved between paragraphs
         text = (org_dir / "tasks.org").read_text()
         # Extract the body region between "Bare heading" and next heading
@@ -2343,7 +2356,7 @@ class TestFillText:
         stdout, stderr, rc = run_cli("set-body", "Bare heading", body, org_dir=org_dir)
         assert rc == 0
         text = (org_dir / "tasks.org").read_text()
-        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "[[file:", 80)
+        assert_no_long_lines(org_dir / "tasks.org", "Bare heading", "[[file:", FILL_COLUMN)
         assert (
             "[[file:agent-notes/service-phone-number-requirements-for-agent-accounts.org]"
             "[Service Phone Number Requirements]]"

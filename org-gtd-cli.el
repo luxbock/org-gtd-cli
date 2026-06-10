@@ -29,6 +29,13 @@
 ;; to stderr there), so it is daemon-mode-specific.
 (setq save-silently t)
 
+;; Optional fixed reference date for archive recency checks (deterministic
+;; tests against static fixtures). ORG_GTD_CLI_NOW="YYYY-MM-DD" pins "now";
+;; unset = live clock. See `gtd/now-reference' in gtd-core.el.
+(let ((now (getenv "ORG_GTD_CLI_NOW")))
+  (when (and now (not (string-empty-p now)))
+    (setq gtd/now-reference (org-time-string-to-time now))))
+
 ;; Isolated user-emacs-directory (set by caller, but ensure a default)
 (unless (file-directory-p user-emacs-directory)
   (make-directory user-emacs-directory t))
@@ -269,9 +276,11 @@ Agents sometimes paste headings including the priority cookie."
   (replace-regexp-in-string "\\[#[A-C]\\] ?" "" s))
 
 (defun org-gtd-cli/strip-logbook (s)
-  "Remove :LOGBOOK:...:END: drawer blocks from string S."
+  "Remove :LOGBOOK:...:END: drawer blocks from string S.
+Tolerates leading whitespace on the drawer markers, so indented drawers
+(e.g. under nested subtasks in a full-subtree dump) are stripped too."
   (let ((result s))
-    (while (string-match "^:LOGBOOK:\n\\(?:.*\n\\)*?:END:\n?" result)
+    (while (string-match "^[ \t]*:LOGBOOK:[ \t]*\n\\(?:.*\n\\)*?[ \t]*:END:[ \t]*\n?" result)
       (setq result (replace-match "" t t result)))
     (string-trim result)))
 
@@ -936,7 +945,10 @@ state and priority — no tags, body, drawers, or planning lines."
                      (goto-char subtree-end))))
              (let* ((beg (point))
                     (end (save-excursion (org-end-of-subtree t) (point)))
-                    (content (buffer-substring-no-properties beg end)))
+                    ;; Strip LOGBOOK drawers (state-change history) — noise in a
+                    ;; human-readable dump, and JSON `show' already omits them.
+                    (content (org-gtd-cli/strip-logbook
+                              (buffer-substring-no-properties beg end))))
                (princ content)
                (princ "\n"))))))))
   (kill-emacs 0))
