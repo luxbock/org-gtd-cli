@@ -1839,21 +1839,21 @@ Returns a list of message strings in printing order."
           (cond
            ;; A sibling already has NEXT — do nothing
            ((member "NEXT" all-sibling-states))
-           ;; All siblings done — auto-complete parent, then cascade
+           ;; All siblings done — leave parent open for manual review.
+           ;; We deliberately do NOT auto-complete the project (and therefore
+           ;; do not cascade to grandparents): the last subtask being done
+           ;; doesn't mean the project is done — more work may simply not be
+           ;; filed as subtasks yet. Closure is a manual decision via an
+           ;; explicit `set-done` on the project heading.
            ((not (cl-find-if
                   (lambda (s) (and s (not (member s org-done-keywords))))
                   all-sibling-states))
             (save-excursion
               (org-up-heading-safe)
               (when (org-entry-is-todo-p)
-                (let ((parent-heading (org-get-heading t t t t)))
-                  (org-todo "DONE")
-                  (setq msgs (nconc msgs
-                    (list (format "  Auto-completed project: \"%s\" (%s)\n"
-                                  parent-heading rel-file))))
-                  ;; Cascade: recurse from the parent's position
-                  (setq msgs (nconc msgs
-                    (org-gtd-cli/auto-progress rel-file)))))))
+                (setq msgs (nconc msgs
+                  (list (format "  All subtasks done — project left open for review: \"%s\" (%s)\n"
+                                (org-get-heading t t t t) rel-file)))))))
            ;; Default — promote next actionable task (project-aware)
            (t
             (save-excursion
@@ -1899,17 +1899,14 @@ Returns a list of message strings in printing order."
                 (unless (org-get-next-sibling) (throw 'scanned nil))))))
         (cond
          (has-next nil)
-         ;; All done → preview auto-complete, then cascade from parent
+         ;; All done → parent left open for manual review (no auto-close, no cascade)
          (all-done
           (save-excursion
             (org-up-heading-safe)
             (when (org-entry-is-todo-p)
               (setq msgs (nconc msgs
-                (list (format "  Would auto-complete project: \"%s\" (%s)\n"
-                              (org-get-heading t t t t) rel-file))))
-              ;; Cascade: recurse from parent (parent = new simulated-DONE)
-              (setq msgs (nconc msgs
-                (org-gtd-cli/auto-progress-preview rel-file))))))
+                (list (format "  All subtasks done — project would be left open for review: \"%s\" (%s)\n"
+                              (org-get-heading t t t t) rel-file)))))))
          ;; Default — promotion preview (no state changes)
          (t
           (save-excursion
@@ -2014,6 +2011,11 @@ Returns a list of message strings in printing order."
                 (old_state . "TODO")
                 (new_state . "NEXT")
                 (file . ,(match-string 3 msg)))
+              effects))
+       ((string-match "All subtasks done — project left open for review: \"\\([^\"]+\\)\" (\\([^)]+\\))" msg)
+        (push `((action . "project-needs-review")
+                (heading . ,(match-string 1 msg))
+                (file . ,(match-string 2 msg)))
               effects))))
     (apply #'vector (nreverse effects))))
 

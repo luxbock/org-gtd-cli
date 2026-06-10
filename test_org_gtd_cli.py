@@ -736,12 +736,17 @@ class TestDone:
         assert rc == 0
         assert "DONE Get travel insurance quote" in (org_dir / "tasks.org").read_text()
 
-    def test_all_siblings_done_auto_completes_parent(self, org_dir):
+    def test_all_siblings_done_leaves_parent_open(self, org_dir):
+        # Completing the last open subtask must NOT auto-close the project:
+        # remaining work may simply not be filed as subtasks yet. The parent
+        # is left open for manual review and an advisory is emitted.
         stdout, stderr, rc = run_cli("set-done", "Test migration on staging", org_dir=org_dir)
         assert rc == 0
-        assert "Auto-completed project" in stdout
+        assert "project left open for review" in stdout
         assert "Ship epiphyte updates" in stdout
-        assert "DONE Ship epiphyte updates" in (org_dir / "tasks.org").read_text()
+        text = (org_dir / "tasks.org").read_text()
+        assert "DONE Ship epiphyte updates" not in text
+        assert "TODO Ship epiphyte updates" in text
 
     def test_subproject_drill_in_promotes_first_child(self, org_dir):
         stdout, stderr, rc = run_cli("set-done", "Set up alerting", org_dir=org_dir)
@@ -757,11 +762,12 @@ class TestDone:
         assert "Auto-progressed" not in stdout
         assert "Auto-completed" not in stdout
 
-    def test_dry_run_auto_complete_preview(self, org_dir):
+    def test_dry_run_leaves_parent_open_preview(self, org_dir):
         stdout, stderr, rc = run_cli("set-done", "Test migration on staging", "--dry-run", org_dir=org_dir)
         assert rc == 0
-        assert "Would auto-complete project" in stdout
+        assert "project would be left open for review" in stdout
         assert "Ship epiphyte updates" in stdout
+        # Dry run makes no changes
         assert "NEXT Test migration on staging" in (org_dir / "tasks.org").read_text()
 
     def test_dry_run_subproject_drill_in_preview(self, org_dir):
@@ -771,23 +777,29 @@ class TestDone:
         assert "in subproject" in stdout
         assert "NEXT Set up alerting" in (org_dir / "tasks.org").read_text()
 
-    def test_cascading_auto_complete(self, org_dir):
+    def test_no_cascade_leaves_ancestors_open(self, org_dir):
+        # Last subtask of a sub-project: the sub-project is left open and the
+        # cascade to the grandparent does NOT run — so the grandparent's other
+        # child ("Run smoke tests") is not promoted to NEXT.
         stdout, stderr, rc = run_cli("set-done", "Install certificates", org_dir=org_dir)
         assert rc == 0
-        assert "Auto-completed project" in stdout
+        assert "project left open for review" in stdout
         assert "Set up TLS certs" in stdout
-        assert "Auto-progressed" in stdout
-        assert "Run smoke tests" in stdout
-        assert "DONE Set up TLS certs" in (org_dir / "tasks.org").read_text()
-        assert "NEXT Run smoke tests" in (org_dir / "tasks.org").read_text()
+        assert "Auto-progressed" not in stdout
+        text = (org_dir / "tasks.org").read_text()
+        assert "DONE Set up TLS certs" not in text
+        assert "TODO Set up TLS certs" in text
+        assert "NEXT Run smoke tests" not in text
+        assert "TODO Run smoke tests" in text
 
-    def test_cascading_dry_run_preview(self, org_dir):
+    def test_no_cascade_dry_run_preview(self, org_dir):
         stdout, stderr, rc = run_cli("set-done", "Install certificates", "--dry-run", org_dir=org_dir)
         assert rc == 0
-        assert "Would auto-complete project" in stdout
+        assert "project would be left open for review" in stdout
         assert "Set up TLS certs" in stdout
-        assert "Would auto-progress" in stdout
-        assert "Run smoke tests" in stdout
+        assert "Would auto-progress" not in stdout
+        # No cascade preview, so the grandparent sibling is not mentioned
+        assert "Run smoke tests" not in stdout
         assert "NEXT Install certificates" in (org_dir / "tasks.org").read_text()
 
 
@@ -3171,6 +3183,20 @@ class TestJsonMutations:
         assert rc == 0
         assert data["new_state"] == "DONE"
         assert isinstance(data["side_effects"], list)
+
+    def test_set_done_last_subtask_reports_project_needs_review(self, org_dir):
+        """Completing the last subtask emits a project-needs-review side effect
+        (not a state-change) so JSON consumers know the parent was left open."""
+        data, _, rc = run_cli_json("set-done", "Test migration on staging", org_dir=org_dir)
+        assert rc == 0
+        review = [e for e in data["side_effects"] if e.get("action") == "project-needs-review"]
+        assert len(review) == 1
+        assert review[0]["heading"] == "Ship epiphyte updates"
+        # No state-change side effect should auto-close the parent
+        assert not any(
+            e.get("action") == "state-change" and e.get("new_state") == "DONE"
+            for e in data["side_effects"]
+        )
 
     def test_set_state_json(self, org_dir):
         data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", org_dir=org_dir)
