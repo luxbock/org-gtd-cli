@@ -50,12 +50,25 @@
   (equal (getenv "ORG_GTD_CLI_FULL") "1")
   "When non-nil, include body text in list commands (search, subtasks, agenda).")
 
+(defun org-gtd-cli/json-encode (alist)
+  "Serialize ALIST to a JSON string safe for `princ'/`message' output.
+`json-serialize' returns a *unibyte* UTF-8 byte string.  Writing that raw
+double-encodes every non-ASCII byte under a non-UTF-8 locale — which is
+exactly the environment the CLI runs in (systemd services and the bwrap
+sandbox start Emacs with no LANG), producing invalid JSON like
+\"\\342\\200\\224\" / mojibake for em-dashes and accents.  Decoding the
+bytes back to a multibyte string makes `princ' emit clean UTF-8 regardless
+of locale, and keeps the daemon-dispatch capture (which rebinds
+`standard-output') working — unlike raw byte writers such as
+`send-string-to-terminal'."
+  (decode-coding-string (json-serialize alist) 'utf-8))
+
 (defun org-gtd-cli/output (alist)
   "Output ALIST as JSON (json-mode) or do nothing (text mode).
-In JSON mode, serializes ALIST with `json-serialize' and prints to stdout.
-In text mode, this is a no-op — callers handle their own text output."
+In JSON mode, serializes ALIST with `org-gtd-cli/json-encode' and prints to
+stdout.  In text mode, this is a no-op — callers handle their own text output."
   (when org-gtd-cli/json-mode
-    (princ (json-serialize alist))
+    (princ (org-gtd-cli/json-encode alist))
     (princ "\n")))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
@@ -122,7 +135,7 @@ In JSON mode, outputs {\"error\": \"...\"}  to stderr.
 Use this for errors, warnings, and hints — never for command output data."
   (if org-gtd-cli/json-mode
       (let ((msg (apply #'format fmt args)))
-        (message "%s" (json-serialize `((error . ,msg)))))
+        (message "%s" (org-gtd-cli/json-encode `((error . ,msg)))))
     (apply #'message fmt args)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
@@ -422,7 +435,7 @@ If EXACT is non-nil, require full heading match instead of substring."
     (cond
      ((null matches)
       (if org-gtd-cli/json-mode
-          (message "%s" (json-serialize
+          (message "%s" (org-gtd-cli/json-encode
                          `((error . ,(format "No task found matching \"%s\"" substring))
                            (hint . "Try a shorter substring, or use 'search' for partial matches."))))
         (org-gtd-cli/error "No task found matching \"%s\"" substring)
@@ -1971,7 +1984,7 @@ Returns a list of message strings in printing order."
     (unless (member new-state all-states)
       (let ((valid-str (mapconcat #'identity all-states ", ")))
         (if org-gtd-cli/json-mode
-            (message "%s" (json-serialize
+            (message "%s" (org-gtd-cli/json-encode
                            `((error . ,(format "\"%s\" is not a valid state" new-state))
                              (hint . ,(format "Valid states: %s" valid-str)))))
           (org-gtd-cli/error "Error: \"%s\" is not a valid state" new-state)
@@ -2093,7 +2106,7 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                                      target self-match-count (if (= self-match-count 1) "" "es"))
                            (format "Target heading \"%s\" not found" target))))
                 (if org-gtd-cli/json-mode
-                    (message "%s" (json-serialize
+                    (message "%s" (org-gtd-cli/json-encode
                                    `((error . ,msg)
                                      (hint . "Use 'categories' to see available targets."))))
                   (org-gtd-cli/error "Error: %s" msg)
@@ -2138,7 +2151,7 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
           (cond
            ((null matches)
             (if org-gtd-cli/json-mode
-                (message "%s" (json-serialize
+                (message "%s" (org-gtd-cli/json-encode
                                `((error . ,(format "Category heading \"%s\" not found" category))
                                  (hint . "Use 'categories' to see available targets."))))
               (org-gtd-cli/error "Error: category heading \"%s\" not found" category)
@@ -2236,7 +2249,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                        (org-get-todo-state))))
            (if org-gtd-cli/json-mode
                (message "%s"
-                        (json-serialize
+                        (org-gtd-cli/json-encode
                          `((error . ,(format "Cannot set-next on subproject: \"%s\" has subtasks" heading))
                            (hint . "Use set-next on the parent project, or set-state on a specific subtask.")
                            (exit_code . 1))))
@@ -2255,7 +2268,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                         (not parent-is-project))
                (if org-gtd-cli/json-mode
                    (message "%s"
-                            (json-serialize
+                            (org-gtd-cli/json-encode
                              `((error . ,(format "Cannot set-next: \"%s\" is not inside a project" heading))
                                (hint . "Use set-state SUBSTR NEXT to set state directly.")
                                (exit_code . 1))))
@@ -2860,6 +2873,105 @@ TAGS-CSV is a comma-separated string of tags to remove."
 (defun org-gtd-cli/format-tag-str (tags)
   "Format TAGS list as :tag1:tag2: string, or empty string if nil."
   (if tags (concat ":" (mapconcat #'identity tags ":") ":") ""))
+
+;; --- set-property (generic property writer) ---
+
+(defconst org-gtd-cli/reserved-properties
+  '("SCHEDULED" "DEADLINE" "CLOSED" "CLOCK" "TODO" "PRIORITY"
+    "TAGS" "ALLTAGS" "CATEGORY" "ITEM" "BLOCKED" "FILE")
+  "Property names that have dedicated commands or special org semantics.
+`set-property' refuses to write these to avoid corrupting task state;
+use the dedicated command (e.g. set-schedule, set-deadline, set-tags) instead.")
+
+(defun org-gtd-cli/set-property (substring key value &optional clear index dry-run)
+  "Set or clear a single org PROPERTY on an existing task.
+KEY is the property name (e.g. \"AGENT_EFFORT\").  When CLEAR is non-nil
+the property is removed; otherwise it is set to VALUE.  This is a generic
+writer — value-level validation (e.g. allowed AGENT_EFFORT values) belongs
+in the calling command, not here."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (is-clear (and clear (not (equal clear "nil"))
+                        (not (string-empty-p clear))))
+         (key (when (and key (not (string-empty-p key)) (not (equal key "nil")))
+                key))
+         (value (when (and value (not (string-empty-p value))
+                           (not (equal value "nil")))
+                  value)))
+    ;; Validate KEY
+    (unless key
+      (org-gtd-cli/error "Error: a property KEY is required (use --key NAME)")
+      (kill-emacs 1))
+    (when (member (upcase key) org-gtd-cli/reserved-properties)
+      (org-gtd-cli/error
+       (concat "Error: \"%s\" is a reserved property with dedicated commands\n"
+               "Use set-schedule/set-deadline/set-tags/set-state/etc. instead.")
+       key)
+      (kill-emacs 1))
+    ;; Require a VALUE unless clearing
+    (when (and (not is-clear) (not value))
+      (org-gtd-cli/error "Error: provide --value VALUE (or --clear to remove)")
+      (kill-emacs 1))
+    (let ((buf-pos (org-gtd-cli/find-task substring idx t)))
+      (with-current-buffer (car buf-pos)
+        (org-with-wide-buffer
+         (goto-char (cdr buf-pos))
+         (let* ((heading (org-get-heading t t t t))
+                (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+                (old-value (org-entry-get nil key)))
+           (cond
+            (is-clear
+             (if is-dry-run
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/output
+                      `((version . 1) (command . "set-property")
+                        (heading . ,heading) (file . ,rel-file)
+                        (key . ,key)
+                        (old_value . ,(or old-value :null))
+                        (new_value . :null)
+                        (dry_run . t)))
+                   (princ (format "Would clear property %s: \"%s\" (%s)\n"
+                                  key heading rel-file)))
+               (org-entry-delete nil key)
+               (save-buffer)
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/mutation-output
+                    `((version . 1) (command . "set-property")
+                      (heading . ,heading) (file . ,rel-file)
+                      (key . ,key)
+                      (old_value . ,(or old-value :null))
+                      (new_value . :null))
+                    buf-pos)
+                 (princ (format "Cleared property %s: \"%s\" (%s)\n"
+                                key heading rel-file)))))
+            (t
+             (if is-dry-run
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/output
+                      `((version . 1) (command . "set-property")
+                        (heading . ,heading) (file . ,rel-file)
+                        (key . ,key)
+                        (old_value . ,(or old-value :null))
+                        (new_value . ,value)
+                        (dry_run . t)))
+                   (princ (format "Would set property %s: \"%s\" %s -> %s (%s)\n"
+                                  key heading (or old-value "(unset)")
+                                  value rel-file)))
+               (org-entry-put nil key value)
+               (save-buffer)
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/mutation-output
+                    `((version . 1) (command . "set-property")
+                      (heading . ,heading) (file . ,rel-file)
+                      (key . ,key)
+                      (old_value . ,(or old-value :null))
+                      (new_value . ,value))
+                    buf-pos)
+                 (princ (format "Property %s: \"%s\" %s -> %s (%s)\n"
+                                key heading (or old-value "(unset)")
+                                value rel-file)))))))))))
+  (kill-emacs 0))
 
 ;; --- archive helpers (delegated to gtd-core.el shared functions) ---
 

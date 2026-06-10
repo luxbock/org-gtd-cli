@@ -531,6 +531,23 @@ def cmd_add_tags(args):
     return run_elisp(expr, json_mode=args.json)
 
 
+def cmd_set_property(args):
+    if not args.key:
+        print("Error: --key NAME is required", file=sys.stderr)
+        return 1
+    if args.value is None and not args.clear:
+        print("Error: provide --value VALUE or --clear", file=sys.stderr)
+        return 1
+    if args.value is not None and args.clear:
+        print("Error: --value and --clear are mutually exclusive", file=sys.stderr)
+        return 1
+    expr = (f'(org-gtd-cli/set-property {to_elisp(args.substr)} '
+            f'{to_elisp(args.key)} {to_elisp(args.value)} '
+            f'{to_elisp("t" if args.clear else None)} '
+            f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    return run_elisp(expr, json_mode=args.json)
+
+
 def cmd_agenda_view(args):
     if args.json:
         print('{"error": "--json is not supported for agenda-view", '
@@ -604,6 +621,7 @@ Modifying:
   set-deadline      Set/clear DEADLINE timestamp
   set-tags          Replace all tags
   add-tags          Append tags (no duplicates)
+  set-property      Set or clear a generic org property
   append-body       Append text to task body
   set-body          Replace task body
 
@@ -837,6 +855,18 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_add_tags)
+
+    p = sub.add_parser("set-property",
+                       help="Set or clear a generic org property on a task")
+    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("--key", required=True, metavar="NAME",
+                   help="Property name (e.g. AGENT_EFFORT)")
+    p.add_argument("--value", default=None, metavar="VALUE",
+                   help="Property value to set")
+    p.add_argument("--clear", action="store_true", help="Remove the property")
+    p.add_argument("--index", help="Disambiguate with 1-based index")
+    p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
+    p.set_defaults(func=cmd_set_property)
 
     p = sub.add_parser("append-body", help="Append text to task body")
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")

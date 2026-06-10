@@ -42,15 +42,19 @@ def org_dir(tmp_path):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def run_cli(*args, org_dir):
+def run_cli(*args, org_dir, env_overrides=None):
     """Run org-gtd-cli with the given arguments.
 
     Returns (stdout, stderr, returncode).
+    env_overrides, if given, is merged into the subprocess environment (used
+    to simulate the non-UTF-8 locale of systemd/bwrap invocations).
     """
     env = os.environ.copy()
     env["ORG_DIRECTORY"] = str(org_dir) + "/"
     env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
     env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+    if env_overrides:
+        env.update(env_overrides)
     cmd = ["python3", str(CLI_SCRIPT)] + list(args)
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
     return result.stdout, result.stderr, result.returncode
@@ -1766,6 +1770,92 @@ class TestEdgeCasesNewCommandsNoMatch:
 
 
 # ===========================================================================
+# 37b. set-property: generic property writer
+# ===========================================================================
+
+class TestSetProperty:
+    def test_set_new_property(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--value", "light", org_dir=org_dir)
+        assert rc == 0
+        assert "Property AGENT_EFFORT:" in stdout
+        text = (org_dir / "inbox.org").read_text()
+        assert ":AGENT_EFFORT: light" in text
+        assert ":PROPERTIES:" in text
+
+    def test_overwrite_property(self, org_dir):
+        run_cli("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", "light", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--value", "deep", org_dir=org_dir)
+        assert rc == 0
+        assert "light -> deep" in stdout
+        text = (org_dir / "inbox.org").read_text()
+        assert ":AGENT_EFFORT: deep" in text
+        assert ":AGENT_EFFORT: light" not in text
+
+    def test_clear_property(self, org_dir):
+        run_cli("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                "--value", "light", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--clear", org_dir=org_dir)
+        assert rc == 0
+        assert "Cleared property AGENT_EFFORT:" in stdout
+        assert ":AGENT_EFFORT:" not in (org_dir / "inbox.org").read_text()
+
+    def test_clear_absent_property_is_noop(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--clear", org_dir=org_dir)
+        assert rc == 0
+        assert "Cleared property AGENT_EFFORT:" in stdout
+
+    def test_dry_run_does_not_write(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--value", "deep", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert "Would set property AGENT_EFFORT:" in stdout
+        assert ":AGENT_EFFORT:" not in (org_dir / "inbox.org").read_text()
+
+    def test_missing_value_errors(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            org_dir=org_dir)
+        assert rc == 1
+        assert "--value" in stderr
+
+    def test_value_and_clear_mutually_exclusive(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--value", "light", "--clear", org_dir=org_dir)
+        assert rc == 1
+        assert "mutually exclusive" in stderr
+
+    def test_reserved_property_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "SCHEDULED",
+            "--value", "2026-01-01", org_dir=org_dir)
+        assert rc == 1
+        assert "reserved" in stderr
+        # case-insensitive reservation
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "deadline",
+            "--value", "2026-01-01", org_dir=org_dir)
+        assert rc == 1
+        assert "reserved" in stderr
+
+    def test_nonexistent_task(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "xyznonexistent", "--key", "AGENT_EFFORT",
+            "--value", "light", org_dir=org_dir)
+        assert rc == 1
+
+
+# ===========================================================================
 # 38. archive: single task
 # ===========================================================================
 
@@ -2997,6 +3087,28 @@ class TestJsonMutations:
         assert rc == 0
         assert data["new_priority"] is None
 
+    def test_set_property_json(self, org_dir):
+        data, _, rc = run_cli_json(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--value", "deep", org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "set-property"
+        assert data["key"] == "AGENT_EFFORT"
+        assert data["old_value"] is None
+        assert data["new_value"] == "deep"
+        # mutation-output enriches with the full task state
+        assert data["task"]["heading"] == "Buy groceries"
+
+    def test_set_property_clear_json(self, org_dir):
+        run_cli_json("set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+                     "--value", "deep", org_dir=org_dir)
+        data, _, rc = run_cli_json(
+            "set-property", "Buy groceries", "--key", "AGENT_EFFORT",
+            "--clear", org_dir=org_dir)
+        assert rc == 0
+        assert data["old_value"] == "deep"
+        assert data["new_value"] is None
+
     def test_rename_json(self, org_dir):
         data, _, rc = run_cli_json("rename", "Buy groceries", "Buy food", org_dir=org_dir)
         assert rc == 0
@@ -3145,6 +3257,60 @@ class TestJsonMutations:
         # Old tags should be preserved
         for tag in data["old_tags"]:
             assert tag in data["new_tags"]
+
+
+# ===========================================================================
+# JSON: non-ASCII / locale-independent UTF-8 encoding
+# ===========================================================================
+
+# A locale with no UTF-8 — mirrors how systemd services and the bwrap sandbox
+# start Emacs (no LANG set). `json-serialize` returns unibyte UTF-8 bytes that,
+# princ'd raw under such a locale, get double-encoded into invalid JSON.
+C_LOCALE = {"LANG": "C", "LC_ALL": "C"}
+NON_ASCII_BODY = "Dash — café naïve → ça"
+
+
+class TestJsonNonAsciiEncoding:
+    """Non-ASCII bodies must produce valid UTF-8 JSON regardless of locale."""
+
+    def test_show_json_non_ascii_utf8_locale(self, org_dir):
+        run_cli("set-body", "Buy groceries", NON_ASCII_BODY, org_dir=org_dir)
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["body"] == NON_ASCII_BODY
+
+    def test_show_json_non_ascii_c_locale(self, org_dir):
+        """Regression: em-dash/accents must not octal-escape or mojibake under C."""
+        run_cli("set-body", "Buy groceries", NON_ASCII_BODY, org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "Buy groceries",
+            org_dir=org_dir, env_overrides=C_LOCALE)
+        assert rc == 0
+        # stdout must be strictly valid JSON (no \342\200\224 octal escapes,
+        # no double-encoded bytes) and round-trip the exact characters.
+        data = json.loads(stdout)
+        assert data["body"] == NON_ASCII_BODY
+
+    def test_search_full_json_non_ascii_c_locale(self, org_dir):
+        """`search --full --json` is the path originally reported as broken."""
+        run_cli("set-body", "Buy groceries", NON_ASCII_BODY, org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "--json", "search", "Buy groceries", "--full",
+            org_dir=org_dir, env_overrides=C_LOCALE)
+        assert rc == 0
+        data = json.loads(stdout)
+        bodies = [t.get("body") for t in data["tasks"]]
+        assert NON_ASCII_BODY in bodies
+
+    def test_json_error_non_ascii_c_locale(self, org_dir):
+        """Error JSON (on stderr) must also be valid UTF-8 under C locale."""
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "nø such tæsk",
+            org_dir=org_dir, env_overrides=C_LOCALE)
+        assert rc == 1
+        # The error blob is emitted on stderr as JSON; it must parse.
+        err = json.loads(stderr.strip().splitlines()[-1])
+        assert "error" in err
 
 
 # ===========================================================================
