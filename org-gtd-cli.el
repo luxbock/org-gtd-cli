@@ -1958,7 +1958,9 @@ Returns a list of message strings in printing order."
                                  (old_state . ,old-state)
                                  (new_state . "DONE")
                                  (dry_run . t)
-                                 (side_effects . []))))
+                                 (side_effects . ,(org-gtd-cli/parse-side-effects-preview
+                                                   (org-gtd-cli/auto-progress-preview rel-file)
+                                                   rel-file)))))
                    (org-gtd-cli/output result))
                (princ (format "Would mark done: %s (%s)\n" heading rel-file))
                (dolist (msg (org-gtd-cli/auto-progress-preview rel-file))
@@ -1998,13 +2000,9 @@ Returns a list of message strings in printing order."
                 (new_state . "DONE")
                 (file . ,(match-string 2 msg)))
               effects))
-       ((string-match "Auto-progressed: \"\\([^\"]+\\)\" -> NEXT (\\([^)]+\\))" msg)
-        (push `((action . "state-change")
-                (heading . ,(match-string 1 msg))
-                (old_state . "TODO")
-                (new_state . "NEXT")
-                (file . ,(match-string 2 msg)))
-              effects))
+       ;; Subproject drill-in must be matched before the generic NEXT clause:
+       ;; the generic regex also matches this message but captures the
+       ;; "in subproject ..." segment as the file.
        ((string-match "Auto-progressed: \"\\([^\"]+\\)\" -> NEXT (in subproject \"\\([^\"]+\\)\") (\\([^)]+\\))" msg)
         (push `((action . "state-change")
                 (heading . ,(match-string 1 msg))
@@ -2012,10 +2010,40 @@ Returns a list of message strings in printing order."
                 (new_state . "NEXT")
                 (file . ,(match-string 3 msg)))
               effects))
+       ((string-match "Auto-progressed: \"\\([^\"]+\\)\" -> NEXT (\\([^)]+\\))" msg)
+        (push `((action . "state-change")
+                (heading . ,(match-string 1 msg))
+                (old_state . "TODO")
+                (new_state . "NEXT")
+                (file . ,(match-string 2 msg)))
+              effects))
        ((string-match "All subtasks done — project left open for review: \"\\([^\"]+\\)\" (\\([^)]+\\))" msg)
         (push `((action . "project-needs-review")
                 (heading . ,(match-string 1 msg))
                 (file . ,(match-string 2 msg)))
+              effects))))
+    (apply #'vector (nreverse effects))))
+
+(defun org-gtd-cli/parse-side-effects-preview (msgs rel-file)
+  "Parse auto-progress PREVIEW message strings into a side_effects vector.
+Mirrors `org-gtd-cli/parse-side-effects' for the dry-run wording produced by
+`org-gtd-cli/auto-progress-preview'.  Preview messages omit the file, so
+REL-FILE supplies the file field — auto-progress only ever touches siblings
+within the just-completed task's own file."
+  (let ((effects '()))
+    (dolist (msg msgs)
+      (cond
+       ((string-match "Would auto-progress: \"\\([^\"]+\\)\" -> NEXT" msg)
+        (push `((action . "state-change")
+                (heading . ,(match-string 1 msg))
+                (old_state . "TODO")
+                (new_state . "NEXT")
+                (file . ,rel-file))
+              effects))
+       ((string-match "project would be left open for review: \"\\([^\"]+\\)\"" msg)
+        (push `((action . "project-needs-review")
+                (heading . ,(match-string 1 msg))
+                (file . ,rel-file))
               effects))))
     (apply #'vector (nreverse effects))))
 

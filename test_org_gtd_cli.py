@@ -3162,27 +3162,119 @@ class TestJsonMutations:
         assert data["new_state"] == "DONE"
 
     def test_set_done_with_auto_progress(self, org_dir):
-        """Set-done on a project subtask should report auto-progress side effects."""
-        search_data, _, _ = run_cli_json("search", "--state", "all", org_dir=org_dir)
-        project = None
-        for task in search_data["tasks"]:
-            if task["is_project"]:
-                project = task
-                break
-        if project is None:
-            pytest.skip("No projects in fixture data")
-        sub_data, _, _ = run_cli_json("subtasks", project["heading"], org_dir=org_dir)
-        next_child = None
-        for child in sub_data["subtasks"]:
-            if child["state"] == "NEXT":
-                next_child = child
-                break
-        if next_child is None:
-            pytest.skip("No NEXT subtask found")
-        data, _, rc = run_cli_json("set-done", next_child["heading"], org_dir=org_dir)
+        """Completing a project subtask promotes the next TODO sibling to NEXT,
+        reported as a single state-change side effect."""
+        # "Prepare onboarding guide" has children: Draft outline, Write first
+        # chapter (both TODO). Completing the first promotes the next.
+        data, _, rc = run_cli_json("set-done", "Draft outline", org_dir=org_dir)
         assert rc == 0
         assert data["new_state"] == "DONE"
-        assert isinstance(data["side_effects"], list)
+        assert data["side_effects"] == [
+            {
+                "action": "state-change",
+                "heading": "Write first chapter",
+                "old_state": "TODO",
+                "new_state": "NEXT",
+                "file": "tasks.org",
+            }
+        ]
+        assert "NEXT Write first chapter" in (org_dir / "tasks.org").read_text()
+
+    def test_set_done_subproject_drill_in_json(self, org_dir):
+        """Promoting into a sub-project reports the drilled-in child with the
+        correct file (regression: the generic NEXT parser used to capture the
+        'in subproject ...' segment as the file)."""
+        # "Improve monitoring": Set up alerting (NEXT), Add dashboards (TODO
+        # project -> Design dashboard layout, Implement dashboard). Completing
+        # the NEXT sibling drills into "Add dashboards".
+        data, _, rc = run_cli_json("set-done", "Set up alerting", org_dir=org_dir)
+        assert rc == 0
+        assert data["side_effects"] == [
+            {
+                "action": "state-change",
+                "heading": "Design dashboard layout",
+                "old_state": "TODO",
+                "new_state": "NEXT",
+                "file": "tasks.org",
+            }
+        ]
+
+    def test_set_done_nested_last_subtask_no_cascade_json(self, org_dir):
+        """Completing the last open subtask of a nested sub-project leaves that
+        sub-project open for review and does NOT cascade to the grandparent's
+        other children (no auto-complete, no promotion of 'Run smoke tests')."""
+        data, _, rc = run_cli_json("set-done", "Install certificates", org_dir=org_dir)
+        assert rc == 0
+        assert data["side_effects"] == [
+            {
+                "action": "project-needs-review",
+                "heading": "Set up TLS certs",
+                "file": "tasks.org",
+            }
+        ]
+        text = (org_dir / "tasks.org").read_text()
+        assert "TODO Set up TLS certs" in text
+        assert "DONE Set up TLS certs" not in text
+        assert "NEXT Run smoke tests" not in text
+        assert "TODO Run smoke tests" in text
+
+    def test_set_done_existing_next_no_side_effects_json(self, org_dir):
+        """When a sibling already holds NEXT, completing another task promotes
+        nothing — side_effects is empty."""
+        data, _, rc = run_cli_json("set-done", "Get travel insurance quote", org_dir=org_dir)
+        assert rc == 0
+        assert data["side_effects"] == []
+
+    def test_set_done_dry_run_side_effects_json(self, org_dir):
+        """Dry-run JSON previews the same side_effects the real run would
+        produce, without mutating the file."""
+        data, _, rc = run_cli_json("set-done", "Draft outline", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert data["dry_run"] is True
+        assert data["side_effects"] == [
+            {
+                "action": "state-change",
+                "heading": "Write first chapter",
+                "old_state": "TODO",
+                "new_state": "NEXT",
+                "file": "tasks.org",
+            }
+        ]
+        # Dry run makes no changes.
+        text = (org_dir / "tasks.org").read_text()
+        assert "TODO Draft outline" in text
+        assert "TODO Write first chapter" in text
+
+    def test_set_done_dry_run_subproject_side_effects_json(self, org_dir):
+        """Dry-run JSON previews a drill-in promotion with the correct file."""
+        data, _, rc = run_cli_json("set-done", "Set up alerting", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert data["dry_run"] is True
+        assert data["side_effects"] == [
+            {
+                "action": "state-change",
+                "heading": "Design dashboard layout",
+                "old_state": "TODO",
+                "new_state": "NEXT",
+                "file": "tasks.org",
+            }
+        ]
+        assert "NEXT Set up alerting" in (org_dir / "tasks.org").read_text()
+
+    def test_set_done_dry_run_project_needs_review_json(self, org_dir):
+        """Dry-run JSON previews a project-needs-review side effect for the last
+        subtask of a sub-project, without mutating the file."""
+        data, _, rc = run_cli_json("set-done", "Install certificates", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert data["dry_run"] is True
+        assert data["side_effects"] == [
+            {
+                "action": "project-needs-review",
+                "heading": "Set up TLS certs",
+                "file": "tasks.org",
+            }
+        ]
+        assert "NEXT Install certificates" in (org_dir / "tasks.org").read_text()
 
     def test_set_done_last_subtask_reports_project_needs_review(self, org_dir):
         """Completing the last subtask emits a project-needs-review side effect
