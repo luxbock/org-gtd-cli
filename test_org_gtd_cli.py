@@ -3154,6 +3154,32 @@ class TestJsonMutations:
         assert "side_effects" in data
         assert isinstance(data["side_effects"], list)
 
+    def test_set_done_json_heading_prefix_of_another(self, tmp_path):
+        """Regression: mutation-output re-finds the task by heading to attach
+        the full task state to the JSON response. When the heading was a
+        substring of another task's heading, the substring-based re-find hit
+        the Multiple-matches branch and called kill-emacs 2 AFTER the mutation
+        was already saved — reporting failure (exit 2) for a successful
+        mutation. The re-find is now exact-match and intercepts kill-emacs,
+        degrading to omitting the task field instead of exiting."""
+        (tmp_path / "inbox.org").write_text(
+            "* Inbox\n"
+            "** TODO Buy milk\n"
+            "** TODO Buy milk and eggs\n")
+        data, _, rc = run_cli_json("set-done", "Buy milk", "--index", "1",
+                                   org_dir=tmp_path)
+        assert rc == 0
+        assert "error" not in data
+        assert data["command"] == "set-done"
+        assert data["heading"] == "Buy milk"
+        assert data["new_state"] == "DONE"
+        # The exact-match re-find succeeds and attaches the full task state
+        assert data["task"]["heading"] == "Buy milk"
+        assert data["task"]["state"] == "DONE"
+        text = (tmp_path / "inbox.org").read_text()
+        assert "** DONE Buy milk\n" in text
+        assert "** TODO Buy milk and eggs" in text
+
     def test_set_done_dry_run_json(self, org_dir):
         data, _, rc = run_cli_json("set-done", "Buy groceries", "--dry-run", org_dir=org_dir)
         assert rc == 0

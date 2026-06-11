@@ -1057,13 +1057,26 @@ field with the full task state (same schema as show --json)."
            (cond
             ((null heading-or-buf-pos) nil)
             ((stringp heading-or-buf-pos)
-             ;; Re-find by heading text (handles reordering)
+             ;; Re-find by heading text (handles reordering).  Use exact
+             ;; matching, and intercept `kill-emacs' (which `find-task'
+             ;; calls on no-match/ambiguity and `condition-case' does NOT
+             ;; catch) so a failed re-find degrades to omitting the task
+             ;; field — the mutation is already saved at this point, so
+             ;; exiting with an error here would misreport success as
+             ;; failure.  `message'/`standard-output' are silenced so
+             ;; find-task's error JSON doesn't pollute the real output.
              (condition-case nil
-                 (let ((bp (org-gtd-cli/find-task heading-or-buf-pos nil t)))
-                   (with-current-buffer (car bp)
-                     (org-with-wide-buffer
-                      (goto-char (cdr bp))
-                      (org-gtd-cli/task-alist-at-point))))
+                 (catch 'org-gtd-cli--refind-failed
+                   (cl-letf (((symbol-function 'kill-emacs)
+                              (lambda (&optional _code)
+                                (throw 'org-gtd-cli--refind-failed nil)))
+                             ((symbol-function 'message) #'ignore)
+                             (standard-output #'ignore))
+                     (let ((bp (org-gtd-cli/find-task heading-or-buf-pos nil t t)))
+                       (with-current-buffer (car bp)
+                         (org-with-wide-buffer
+                          (goto-char (cdr bp))
+                          (org-gtd-cli/task-alist-at-point))))))
                (error nil)))
             (t
              ;; Direct buf-pos
