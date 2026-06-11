@@ -268,6 +268,9 @@ def cmd_search(args):
 
 
 def cmd_show(args):
+    if not args.substr:
+        print("Error: SUBSTR is required", file=sys.stderr)
+        return 1
     expr = (f'(org-gtd-cli/show {to_elisp(args.substr)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.plain else None)})')
     return run_elisp(expr, json_mode=args.json)
@@ -381,6 +384,9 @@ def cmd_set_body(args):
 
 
 def cmd_add_session_id(args):
+    if not args.substr or not args.session_id:
+        print("Error: SUBSTR and SESSION_ID are required", file=sys.stderr)
+        return 1
     expr = (f'(org-gtd-cli/add-session-id {to_elisp(args.substr)} '
             f'{to_elisp(args.session_id)} {to_elisp(args.index)})')
     return run_elisp(expr, json_mode=args.json)
@@ -498,6 +504,9 @@ def cmd_set_deadline(args):
 
 
 def cmd_set_tags(args):
+    if not args.substr:
+        print("Error: SUBSTR is required", file=sys.stderr)
+        return 1
     add_flag = getattr(args, 'add', None)
     remove_flag = getattr(args, 'remove', None)
     if add_flag:
@@ -522,6 +531,9 @@ def cmd_set_tags(args):
 
 
 def cmd_add_tags(args):
+    if not args.substr:
+        print("Error: SUBSTR is required", file=sys.stderr)
+        return 1
     if args.tags is None:
         print("Error: --tags is required", file=sys.stderr)
         return 1
@@ -654,7 +666,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     # --- Querying ---
 
     p = sub.add_parser("show", help="Show full task details")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring to match")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring to match (optional with --batch)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--plain", action="store_true", help="Minimal output")
     p.set_defaults(func=cmd_show)
@@ -846,8 +859,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_set_deadline)
 
     p = sub.add_parser("set-tags", help="Replace all tags")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    tag_group = p.add_mutually_exclusive_group(required=True)
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring (optional with --batch)")
+    tag_group = p.add_mutually_exclusive_group()
     tag_group.add_argument("--tags", help="Tags to set (comma-separated, empty string to clear)")
     tag_group.add_argument("--add", help="Tags to add (comma-separated)")
     tag_group.add_argument("--remove", help="Tags to remove (comma-separated)")
@@ -856,8 +870,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_set_tags)
 
     p = sub.add_parser("add-tags", help="Append tags (no duplicates)")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("--tags", required=True, help="Tags to add (comma-separated)")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring (optional with --batch)")
+    p.add_argument("--tags", help="Tags to add (comma-separated, optional with --batch)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_add_tags)
@@ -895,9 +910,10 @@ Run 'org-gtd-cli <command> -h' for command details."""
     # --- Session tracking ---
 
     p = sub.add_parser("add-session-id", help="Add agent session ID to task LOGBOOK")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("session_id", metavar="SESSION_ID",
-                   help="Session ID in format agent:uuid")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring (optional with --batch)")
+    p.add_argument("session_id", nargs="?", default=None, metavar="SESSION_ID",
+                   help="Session ID in format agent:uuid (optional with --batch)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_add_session_id)
 

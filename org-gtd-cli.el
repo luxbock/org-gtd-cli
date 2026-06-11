@@ -3310,8 +3310,9 @@ Outputs a JSON batch response with per-item results."
                         results)
                   (cl-incf failed))
                  (t
-                  ;; kill-emacs 0 but no result — function handled its own output
-                  ;; This happens for add-task/add-event which output + exit
+                  ;; kill-emacs 0 but no result alist — shouldn't happen now
+                  ;; that batch-one delegates (the delegate shim intercepts
+                  ;; kill-emacs), but keep as a success fallback.
                   (push `((index . ,idx) (success . t)) results)
                   (cl-incf succeeded))))
             (error
@@ -3330,204 +3331,195 @@ Outputs a JSON batch response with per-item results."
                    (failed . ,failed)))))
     (kill-emacs (if (> succeeded 0) 0 1))))
 
+(defun org-gtd-cli/batch--field (item &rest keys)
+  "Return the first present field among KEYS in batch ITEM.
+ITEM is either a bare string — returned as-is when KEYS includes
+`heading' — or an alist parsed from a JSON object.  JSON null values
+count as absent.  Returns nil when no key is present."
+  (if (stringp item)
+      (when (memq 'heading keys) item)
+    (let (val)
+      (while (and keys (null val))
+        (let ((v (alist-get (pop keys) item)))
+          (unless (eq v :null)
+            (setq val v))))
+      val)))
+
+(defun org-gtd-cli/batch--required (item name &rest keys)
+  "Like `org-gtd-cli/batch--field' but signal an error when absent.
+NAME is the field name used in the error message."
+  (or (apply #'org-gtd-cli/batch--field item keys)
+      (error "Missing required field: %s" name)))
+
+(defun org-gtd-cli/batch--json-error (s)
+  "If S parses as a JSON object with an `error' field, return that field.
+The real commands emit errors as {\"error\": ..., \"hint\": ...} JSON in
+json-mode; this recovers the plain text for batch per-item results."
+  (condition-case nil
+      (let* ((obj (json-parse-string (string-trim s)
+                                     :object-type 'alist
+                                     :array-type 'array))
+             (err (and (consp obj) (alist-get 'error obj))))
+        (and (stringp err) err))
+    (error nil)))
+
+(defun org-gtd-cli/batch--delegate (fn &rest args)
+  "Call the real command implementation FN with ARGS, capturing its output.
+Forces `org-gtd-cli/json-mode' on so FN emits JSON, captures stdout by
+rebinding `standard-output' (same shim style as `daemon-dispatch'), and
+intercepts `kill-emacs' and `message' so a single item can neither kill
+the batch process nor leak output.
+
+On success (FN returned normally or exited 0) returns FN's JSON payload
+parsed as an alist (arrays as vectors, so the payload re-serializes
+cleanly into the batch response), or nil when FN printed nothing.  On
+failure (non-zero exit) signals `error' with the message FN reported."
+  (let ((exit-code nil)
+        (stderr-msgs '())
+        (payload ""))
+    (with-temp-buffer
+      (let ((standard-output (current-buffer))
+            (org-gtd-cli/json-mode t))
+        (cl-letf (((symbol-function 'kill-emacs)
+                   (lambda (&optional code)
+                     (setq exit-code (or code 0))
+                     (throw 'org-gtd-cli--delegate nil)))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest margs)
+                     (when fmt
+                       (push (apply #'format fmt margs) stderr-msgs)))))
+          (catch 'org-gtd-cli--delegate
+            (apply fn args))))
+      (setq payload (string-trim (buffer-string))))
+    (if (and exit-code (> exit-code 0))
+        ;; Failure.  The error text normally arrives via `message'
+        ;; ({"error": ...} JSON in json-mode); find-task's multiple-match
+        ;; listing goes to stdout instead, so fall back to the payload.
+        (let ((texts (delq nil
+                           (mapcar (lambda (m)
+                                     (or (org-gtd-cli/batch--json-error m) m))
+                                   (nreverse stderr-msgs)))))
+          (when (and (null texts) (not (string-empty-p payload)))
+            (setq texts (list (or (org-gtd-cli/batch--json-error payload)
+                                  payload))))
+          (error "%s" (if texts
+                          (mapconcat #'identity texts "; ")
+                        "Command failed")))
+      (unless (string-empty-p payload)
+        (json-parse-string payload :object-type 'alist :array-type 'array)))))
+
+(defun org-gtd-cli/batch--result (idx payload &optional extra)
+  "Build a per-item batch result from a delegated command's PAYLOAD.
+Strips PAYLOAD's version/command wrapper and prepends the batch
+bookkeeping fields (index, success) plus EXTRA fields."
+  (append `((index . ,idx) (success . t))
+          extra
+          (cl-remove-if (lambda (kv) (memq (car-safe kv) '(version command)))
+                        payload)))
+
 (defun org-gtd-cli/batch-one (command item shared-arg idx)
-  "Execute one batch ITEM for COMMAND. Returns result alist.
-SHARED-ARG is command-specific shared parameter.
-IDX is the 0-based index in the batch array."
+  "Execute one batch ITEM for COMMAND.  Returns a per-item result alist.
+Delegates to the real command implementation via
+`org-gtd-cli/batch--delegate', so batch items get behavior identical to
+single CLI calls (validation, auto-progress, side effects, full JSON
+fields).  SHARED-ARG is the command-specific shared parameter (parent
+heading for add-subtask, category for refile).  IDX is the 0-based
+index in the batch array."
   (pcase command
     ("set-done"
-     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
-            (buf-pos (org-gtd-cli/find-task heading nil t)))
-       (with-current-buffer (car buf-pos)
-         (org-with-wide-buffer
-          (goto-char (cdr buf-pos))
-          (let ((old-state (org-get-todo-state)))
-            (org-todo "DONE")
-            (save-buffer)
-            `((index . ,idx) (success . t)
-              (heading . ,heading)
-              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))
-              (old_state . ,old-state) (new_state . "DONE")))))))
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/set-done
+           (org-gtd-cli/batch--required item "heading" 'heading))))
 
     ("delete"
-     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
-            (buf-pos (org-gtd-cli/find-task heading nil t t)))
-       (with-current-buffer (car buf-pos)
-         (org-with-wide-buffer
-          (goto-char (cdr buf-pos))
-          (let ((file (org-gtd-cli/relative-filename (buffer-file-name))))
-            (org-cut-subtree)
-            (save-buffer)
-            `((index . ,idx) (success . t)
-              (heading . ,heading) (file . ,file)))))))
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/delete
+           (org-gtd-cli/batch--required item "heading" 'heading))))
 
     ("refile"
-     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
-            (buf-pos (org-gtd-cli/find-task heading nil nil))
-            ;; Find refile target using shared-arg as category
-            (matches (org-gtd-cli/find-category-matches shared-arg)))
-       (cond
-        ((null matches)
-         (error "Category heading \"%s\" not found" shared-arg))
-        ((> (length matches) 1)
-         (error "Multiple category matches for \"%s\" (use a more specific path, e.g. \"Parent/Child\")"
-                shared-arg))
-        (t
-         (let* ((m (car matches))
-                (target-buf (nth 0 m))
-                (target-pos (nth 1 m))
-                (target-file (nth 2 m))
-                (target-heading (with-current-buffer target-buf
-                                  (org-with-wide-buffer
-                                   (goto-char target-pos)
-                                   (org-get-heading t t t t)))))
-           (with-current-buffer (car buf-pos)
-             (org-with-wide-buffer
-              (goto-char (cdr buf-pos))
-              (let ((file (org-gtd-cli/relative-filename (buffer-file-name))))
-                (org-refile nil nil (list target-heading target-file nil target-pos))
-                (save-buffer)
-                (with-current-buffer target-buf (save-buffer))
-                `((index . ,idx) (success . t)
-                  (heading . ,heading) (file . ,file)
-                  (target_heading . ,target-heading)
-                  (target_file . ,(org-gtd-cli/relative-filename target-file)))))))))))
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/refile
+           (org-gtd-cli/batch--required item "heading" 'heading)
+           nil shared-arg)))
 
     ("add-subtask"
-     (let* ((title (alist-get 'title item))
-            (body (alist-get 'body item))
-            (tags (alist-get 'tags item))
-            (state (or (alist-get 'state item) "TODO"))
-            (parent-heading shared-arg)
-            (buf-pos (org-gtd-cli/find-task parent-heading nil t)))
-       ;; Validate all inputs BEFORE modifying the buffer: a rejected item
-       ;; must not leave a partially-inserted heading behind, since the
-       ;; next successful item's save-buffer would persist it to disk.
-       (when (and body (not (string-empty-p body)))
-         (org-gtd-cli/validate-body-text body))
-       (with-current-buffer (car buf-pos)
-         (org-with-wide-buffer
-          (goto-char (cdr buf-pos))
-          (let* ((level (org-current-level))
-                 (child-level (1+ level))
-                 (subtree-end (save-excursion (org-end-of-subtree t) (point))))
-            (goto-char subtree-end)
-            (insert "\n" (make-string child-level ?*) " " state " " title)
-            (when (and tags (not (string-empty-p tags)))
-              (org-set-tags tags))
-            (when (and body (not (string-empty-p body)))
-              (insert "\n" body))
-            (save-buffer)
-            `((index . ,idx) (success . t)
-              (heading . ,title)
-              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))))))))
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/add-subtask
+           shared-arg
+           (org-gtd-cli/batch--required item "title" 'title)
+           (org-gtd-cli/batch--field item 'body)
+           (org-gtd-cli/batch--field item 'tags)
+           (org-gtd-cli/batch--field item 'schedule)
+           (org-gtd-cli/batch--field item 'deadline)
+           (org-gtd-cli/batch--field item 'priority)
+           (org-gtd-cli/batch--field item 'state))))
 
     ("add-task"
-     (let* ((title (alist-get 'title item))
-            (body (alist-get 'body item))
-            (tags (alist-get 'tags item))
-            (category (alist-get 'category item))
-            (state (or (alist-get 'state item) "TODO"))
-            (target-file (if category
-                             (expand-file-name "tasks.org" org-directory)
-                           (expand-file-name "inbox.org" org-directory))))
-       (when (and body (not (string-empty-p body)))
-         (org-gtd-cli/validate-body-text body))
-       (with-current-buffer (find-file-noselect target-file)
-         (org-with-wide-buffer
-          (if category
-              ;; Find category heading and insert under it
-              (let ((found nil))
-                (goto-char (point-min))
-                (while (and (not found)
-                            (re-search-forward org-heading-regexp nil t))
-                  (unless (org-get-todo-state)
-                    (when (string-match-p (regexp-quote category)
-                                          (org-get-heading t t t t))
-                      (setq found t))))
-                (unless found
-                  (error "Category \"%s\" not found" category))
-                (org-end-of-subtree t)
-                (insert "\n** " state " " title))
-            ;; Insert at end of inbox
-            (goto-char (point-max))
-            (insert "\n* " state " " title))
-          (when (and tags (not (string-empty-p tags)))
-            (org-set-tags tags))
-          (when (and body (not (string-empty-p body)))
-            (insert "\n" body))
-          (save-buffer)))
-       `((index . ,idx) (success . t)
-         (heading . ,title)
-         (file . ,(org-gtd-cli/relative-filename target-file)))))
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/add-task
+           (org-gtd-cli/batch--required item "title" 'title)
+           (org-gtd-cli/batch--field item 'body)
+           (org-gtd-cli/batch--field item 'tags)
+           (org-gtd-cli/batch--field item 'schedule)
+           (org-gtd-cli/batch--field item 'deadline)
+           (org-gtd-cli/batch--field item 'priority)
+           (org-gtd-cli/batch--field item 'file)
+           (org-gtd-cli/batch--field item 'category)
+           (org-gtd-cli/batch--field item 'state))))
 
     ("add-event"
-     (let* ((title (alist-get 'title item))
-            (date (alist-get 'date item))
-            (time-str (alist-get 'time item))
-            (end-date (or (alist-get 'end-date item) (alist-get 'end_date item)))
-            (target-file (expand-file-name "calendar.org" org-directory)))
-       (unless date (error "Missing required field: date"))
-       (unless title (error "Missing required field: title"))
-       (with-current-buffer (find-file-noselect target-file)
-         (org-with-wide-buffer
-          (goto-char (point-max))
-          (let ((ts (org-gtd-cli/make-timestamp date time-str t)))
-            (insert "\n* " title " :calpersonal:\n"
-                    (if end-date
-                        (format "%s--%s\n" ts
-                                (org-gtd-cli/make-timestamp end-date nil t))
-                      (format "%s\n" ts))))
-          (save-buffer)))
-       `((index . ,idx) (success . t)
-         (heading . ,title)
-         (file . ,(org-gtd-cli/relative-filename target-file)))))
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/add-event
+           (org-gtd-cli/batch--required item "title" 'title)
+           (org-gtd-cli/batch--required item "date" 'date)
+           (org-gtd-cli/batch--field item 'time)
+           (org-gtd-cli/batch--field item 'tag)
+           (org-gtd-cli/batch--field item 'file)
+           (org-gtd-cli/batch--field item 'end-date 'end_date))))
+
+    ("add-session-id"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/add-session-id
+           (org-gtd-cli/batch--required item "heading" 'heading)
+           (org-gtd-cli/batch--required item "session_id"
+                                        'session_id 'session-id))))
 
     ("show"
-     (let* ((heading (if (stringp item) item (alist-get 'heading item)))
-            (buf-pos (org-gtd-cli/find-task heading nil t)))
-       (with-current-buffer (car buf-pos)
-         (org-with-wide-buffer
-          (goto-char (cdr buf-pos))
-          ;; Build the show response inline
-          (let* ((h (org-get-heading t t t t))
-                 (state (org-get-todo-state))
-                 (body (org-gtd-cli/get-body-at-point)))
-            `((index . ,idx) (success . t)
-              (heading . ,h) (state . ,(or state :null))
-              (body . ,(or body :null))
-              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))))))))
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/show
+           (org-gtd-cli/batch--required item "heading" 'heading))))
 
     ("set-tags"
-     (let* ((heading (alist-get 'heading item))
-            (tags (alist-get 'tags item))
-            (buf-pos (org-gtd-cli/find-task heading nil t)))
-       (with-current-buffer (car buf-pos)
-         (org-with-wide-buffer
-          (goto-char (cdr buf-pos))
-          (org-set-tags tags)
-          (save-buffer)
-          `((index . ,idx) (success . t)
-            (heading . ,heading)
-            (tags . ,tags)
-            (file . ,(org-gtd-cli/relative-filename (buffer-file-name))))))))
+     (let ((payload (org-gtd-cli/batch--delegate
+                     #'org-gtd-cli/set-tags
+                     (org-gtd-cli/batch--required item "heading" 'heading)
+                     (org-gtd-cli/batch--field item 'tags))))
+       ;; Legacy batch schema: `tags' as a comma-joined string.
+       (org-gtd-cli/batch--result
+        idx payload
+        `((tags . ,(mapconcat #'identity
+                              (append (alist-get 'new_tags payload) nil)
+                              ","))))))
 
     ("add-tags"
-     (let* ((heading (alist-get 'heading item))
-            (tags-str (alist-get 'tags item))
-            (buf-pos (org-gtd-cli/find-task heading nil t)))
-       (with-current-buffer (car buf-pos)
-         (org-with-wide-buffer
-          (goto-char (cdr buf-pos))
-          (let* ((current-tags (org-get-tags nil t))
-                 (new-tags (split-string tags-str "," t))
-                 (merged (cl-union current-tags new-tags :test #'string=)))
-            (org-set-tags (mapconcat #'identity merged ":"))
-            (save-buffer)
-            `((index . ,idx) (success . t)
-              (heading . ,heading)
-              (tags . ,(mapconcat #'identity merged ","))
-              (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))))))))
+     (let ((payload (org-gtd-cli/batch--delegate
+                     #'org-gtd-cli/add-tags
+                     (org-gtd-cli/batch--required item "heading" 'heading)
+                     (org-gtd-cli/batch--required item "tags" 'tags))))
+       ;; Legacy batch schema: `tags' as the merged comma-joined string.
+       (org-gtd-cli/batch--result
+        idx payload
+        `((tags . ,(mapconcat #'identity
+                              (append (alist-get 'new_tags payload) nil)
+                              ","))))))
 
     (_ (error "Unsupported batch command: %s" command))))
 

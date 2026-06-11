@@ -7,6 +7,7 @@ and asserts on stdout, stderr, exit code, and file contents.
 Port of the 3148-line bash test suite (46 sections, 744+ assertions).
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -4211,6 +4212,210 @@ class TestBatch:
         )
         assert result.returncode == 1
         assert "not supported" in result.stderr
+
+
+class TestBatchDelegation:
+    """Batch items now run the real command implementations (not the old
+    simplified reimplementations), so they gain validation, auto-progress,
+    side effects, and the richer JSON fields of single CLI calls."""
+
+    def test_batch_set_done_auto_progress_side_effects(self, org_dir):
+        """Completing a project subtask via batch promotes the next TODO
+        sibling to NEXT and reports it in the side_effects field (the old
+        bespoke batch path skipped auto-progress entirely)."""
+        data, stderr, rc = run_batch(
+            "set-done", ["Draft outline"], org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["old_state"] == "TODO"
+        assert r["new_state"] == "DONE"
+        assert r["side_effects"] == [
+            {"action": "state-change", "heading": "Write first chapter",
+             "old_state": "TODO", "new_state": "NEXT", "file": "tasks.org"},
+        ]
+        # Mutation responses now include the full task state too
+        assert r["task"]["heading"] == "Draft outline"
+        assert r["task"]["state"] == "DONE"
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "*** NEXT Write first chapter" in tasks
+        assert "*** DONE Draft outline" in tasks
+
+    def test_batch_add_task_schedule_deadline_priority(self, org_dir):
+        """Batch add-task supports schedule/deadline/priority/state and adds
+        a creation timestamp (the old path ignored all of these)."""
+        data, stderr, rc = run_batch(
+            "add-task",
+            [{"title": "Scheduled batch task", "schedule": "2026-04-01",
+              "deadline": "2026-04-05", "priority": "A", "state": "NEXT",
+              "tags": "work"}],
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["heading"] == "Scheduled batch task"
+        assert r["state"] == "NEXT"
+        assert r["file"] == "inbox.org"
+        inbox = (org_dir / "inbox.org").read_text()
+        assert "* NEXT [#A] Scheduled batch task" in inbox
+        assert "SCHEDULED: <2026-04-01" in inbox
+        assert "DEADLINE: <2026-04-05" in inbox
+        # Creation timestamp (inactive, today's date)
+        today = datetime.date.today().isoformat()
+        assert f"[{today}" in inbox
+
+    def test_batch_add_task_category_correct_level(self, org_dir):
+        """Batch add-task --category inserts at the category's child level
+        (the old path hardcoded level-2 insertion) and reports the matched
+        category path."""
+        data, stderr, rc = run_batch(
+            "add-task",
+            [{"title": "Nested batch task", "category": "Agents"}],
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["category"] == "Computers/Agents"
+        tasks = (org_dir / "tasks.org").read_text()
+        # Agents is a level-2 heading, so the task must be level 3
+        assert "*** TODO Nested batch task" in tasks
+
+    def test_batch_add_subtask_schedule_priority(self, org_dir):
+        """Batch add-subtask supports schedule/priority and reports the
+        parent heading."""
+        data, stderr, rc = run_batch(
+            "add-subtask",
+            [{"title": "Scheduled subtask", "schedule": "2026-04-02",
+              "priority": "B"}],
+            "Prepare onboarding guide",
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["heading"] == "Scheduled subtask"
+        assert r["parent"] == "Prepare onboarding guide"
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "*** TODO [#B] Scheduled subtask" in tasks
+        assert "SCHEDULED: <2026-04-02" in tasks
+
+    def test_batch_add_event_tag_and_file(self, org_dir):
+        """Batch add-event honors the tag field and only defaults to
+        calpersonal when neither tag nor file is given."""
+        data, stderr, rc = run_batch(
+            "add-event",
+            [{"title": "Tagged event", "date": "2026-04-10", "tag": "calwork"},
+             {"title": "Default event", "date": "2026-04-11"}],
+            org_dir=org_dir)
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+        assert data["results"][0]["tag"] == "calwork"
+        assert data["results"][1]["tag"] == "calpersonal"
+        cal = (org_dir / "calendar.org").read_text()
+        assert "* Tagged event :calwork:" in cal
+        assert "* Default event :calpersonal:" in cal
+
+    def test_batch_add_event_file_field(self, org_dir):
+        """Batch add-event honors the file field (no calpersonal default
+        when an explicit file is given)."""
+        data, stderr, rc = run_batch(
+            "add-event",
+            [{"title": "Inbox event", "date": "2026-04-12",
+              "file": "inbox.org"}],
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["file"] == "inbox.org"
+        assert r["tag"] is None
+        inbox = (org_dir / "inbox.org").read_text()
+        assert "* Inbox event" in inbox
+        assert "calpersonal" not in inbox
+
+    def test_batch_add_session_id(self, org_dir):
+        """Batch add-session-id works and is idempotent per item."""
+        data, stderr, rc = run_batch(
+            "add-session-id",
+            [{"heading": "Write quarterly report",
+              "session_id": "claude:abc-123"}],
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["status"] == "added"
+        assert r["session_id"] == "claude:abc-123"
+        assert "claude:abc-123" in (org_dir / "tasks.org").read_text()
+        # Second run is a no-op
+        data2, _, rc2 = run_batch(
+            "add-session-id",
+            [{"heading": "Write quarterly report",
+              "session_id": "claude:abc-123"}],
+            org_dir=org_dir)
+        assert rc2 == 0
+        assert data2["results"][0]["status"] == "no-op"
+
+    def test_batch_show_full_task_fields(self, org_dir):
+        """Batch show returns the same rich schema as single show --json."""
+        data, stderr, rc = run_batch(
+            "show", ["Prepare onboarding guide"], org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["heading"] == "Prepare onboarding guide"
+        assert r["state"] == "TODO"
+        assert r["file"] == "tasks.org"
+        assert r["is_project"] is True
+        assert [c["heading"] for c in r["subtasks"]] == [
+            "Draft outline", "Write first chapter"]
+
+    def test_batch_set_tags_splits_csv(self, org_dir):
+        """Batch set-tags splits comma-separated tags into separate org tags
+        (the old path passed the raw CSV string to org-set-tags)."""
+        data, stderr, rc = run_batch(
+            "set-tags",
+            [{"heading": "Write quarterly report", "tags": "work,urgent"}],
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["tags"] == "work,urgent"
+        assert r["new_tags"] == ["work", "urgent"]
+        assert ":work:urgent:" in (org_dir / "tasks.org").read_text()
+
+    def test_batch_add_tags_merge(self, org_dir):
+        """Batch add-tags merges with existing tags and reports old/new."""
+        data, stderr, rc = run_batch(
+            "add-tags",
+            [{"heading": "Set up automated backups for agent workspace",
+              "tags": "urgent"}],
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["old_tags"] == ["@agent"]
+        assert r["new_tags"] == ["@agent", "urgent"]
+        assert r["tags"] == "@agent,urgent"
+
+    def test_batch_delete_refuses_project(self, org_dir):
+        """Batch delete gains the real implementation's project guard."""
+        data, stderr, rc = run_batch(
+            "delete", ["Prepare onboarding guide"], org_dir=org_dir)
+        assert rc == 1
+        r = data["results"][0]
+        assert r["success"] is False
+        assert "project with subtasks" in r["error"]
+        # Project untouched
+        assert "Prepare onboarding guide" in (org_dir / "tasks.org").read_text()
+
+    def test_batch_error_text_is_plain(self, org_dir):
+        """Per-item errors carry the plain error text extracted from the
+        delegated command's JSON error output."""
+        data, stderr, rc = run_batch(
+            "set-done", ["Nonexistent task xyz"], org_dir=org_dir)
+        assert rc == 1
+        r = data["results"][0]
+        assert r["success"] is False
+        assert "No task found matching" in r["error"]
+        assert not r["error"].lstrip().startswith("{")
 
 
 class TestCorrectiveErrors:
