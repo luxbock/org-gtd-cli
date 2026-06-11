@@ -1351,6 +1351,49 @@ class TestMove:
         assert rc == 0
         assert "Moved:" in stdout
 
+    def test_move_before_stays_under_correct_parent(self, org_dir):
+        # Regression: after deleting the task, the sibling used to be
+        # re-found by scanning the whole buffer from point-min, so a
+        # same-level heading under a DIFFERENT parent matching the
+        # substring could silently steal the task.
+        (org_dir / "moveparents.org").write_text("""\
+* TODO Parent One
+** TODO Shared step beta
+* TODO Parent Two
+** TODO Lone task to move
+** TODO Shared step alpha
+""")
+        stdout, stderr, rc = run_cli(
+            "move", "Lone task to move", "--before", "Shared step",
+            org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "moveparents.org"
+        text = f.read_text()
+        # Task must remain under Parent Two, before "Shared step alpha"
+        assert_line_before(f, "Parent Two", "Lone task to move")
+        assert_line_before(f, "Lone task to move", "Shared step alpha")
+        # And must NOT have been relocated under Parent One
+        assert text.index("Lone task to move") > text.index("Parent Two")
+
+    def test_move_after_stays_under_correct_parent(self, org_dir):
+        (org_dir / "moveparents.org").write_text("""\
+* TODO Parent One
+** TODO Shared step beta
+* TODO Parent Two
+** TODO Shared step alpha
+** TODO Middle filler task
+** TODO Lone task to move
+""")
+        stdout, stderr, rc = run_cli(
+            "move", "Lone task to move", "--after", "Shared step",
+            org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "moveparents.org"
+        text = f.read_text()
+        assert_line_before(f, "Shared step alpha", "Lone task to move")
+        assert_line_before(f, "Lone task to move", "Middle filler task")
+        assert text.index("Lone task to move") > text.index("Parent Two")
+
 
 # ===========================================================================
 # 25. org-timestamp --inactive

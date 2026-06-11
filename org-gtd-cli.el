@@ -2519,21 +2519,19 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
              (unless sibling-pos
                (org-gtd-cli/error "Error: sibling \"%s\" not found" sibling-substring)
                (kill-emacs 1))
-             ;; Delete the task
+             ;; Delete the task. Compute the sibling's post-deletion
+             ;; position from the SIBLING-POS found in the bounded
+             ;; search above, adjusting for the deleted region.
+             ;; (Re-searching the whole buffer here could match a
+             ;; same-level heading under a different parent and
+             ;; silently relocate the task there.)
              (goto-char task-beg)
-             (let ((del-end (save-excursion (org-end-of-subtree t)
-                                            (if (eobp) (point) (1+ (point))))))
-               (delete-region task-beg del-end))
-             ;; Recalculate sibling position after deletion
-             (goto-char (point-min))
-             (let ((new-sibling-pos nil))
-               (while (and (not new-sibling-pos)
-                           (re-search-forward org-heading-regexp nil t))
-                 (when (and (= (org-current-level) level)
-                            (string-match-p
-                             (regexp-quote (downcase sibling-substring))
-                             (downcase (org-get-heading t t t t))))
-                   (setq new-sibling-pos (line-beginning-position))))
+             (let* ((del-end (save-excursion (org-end-of-subtree t)
+                                             (if (eobp) (point) (1+ (point)))))
+                    (new-sibling-pos (if (> sibling-pos task-beg)
+                                         (- sibling-pos (- del-end task-beg))
+                                       sibling-pos)))
+               (delete-region task-beg del-end)
                (if (string= direction "before")
                    (progn
                      (goto-char new-sibling-pos)
