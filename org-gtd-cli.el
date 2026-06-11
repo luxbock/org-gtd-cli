@@ -3567,6 +3567,11 @@ IDX is the 0-based index in the batch array."
             (state (or (alist-get 'state item) "TODO"))
             (parent-heading shared-arg)
             (buf-pos (org-gtd-cli/find-task parent-heading nil t)))
+       ;; Validate all inputs BEFORE modifying the buffer: a rejected item
+       ;; must not leave a partially-inserted heading behind, since the
+       ;; next successful item's save-buffer would persist it to disk.
+       (when (and body (not (string-empty-p body)))
+         (org-gtd-cli/validate-body-text body))
        (with-current-buffer (car buf-pos)
          (org-with-wide-buffer
           (goto-char (cdr buf-pos))
@@ -3578,7 +3583,6 @@ IDX is the 0-based index in the batch array."
             (when (and tags (not (string-empty-p tags)))
               (org-set-tags tags))
             (when (and body (not (string-empty-p body)))
-              (org-gtd-cli/validate-body-text body)
               (insert "\n" body))
             (save-buffer)
             `((index . ,idx) (success . t)

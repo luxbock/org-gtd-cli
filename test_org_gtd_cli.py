@@ -3977,6 +3977,35 @@ class TestBatch:
         assert data is not None
         assert data["summary"]["succeeded"] == 2
 
+    def test_batch_add_subtask_failed_item_not_persisted(self, org_dir):
+        """A rejected item must not leak a partially-inserted heading to disk.
+
+        Regression: the heading used to be inserted before the body was
+        validated, so a failed item's heading remained in the (unsaved)
+        buffer and the next successful item's save-buffer persisted it.
+        """
+        data, stderr, rc = run_batch(
+            "add-subtask",
+            [
+                {"title": "Leaky subtask", "body": "* illegal heading body"},
+                {"title": "Valid subtask"},
+            ],
+            "Prepare onboarding guide",
+            org_dir=org_dir,
+        )
+        assert rc == 0  # one item succeeded
+        assert data is not None
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["succeeded"] == 1
+        assert data["summary"]["failed"] == 1
+        assert data["results"][0]["success"] is False
+        assert "error" in data["results"][0]
+        assert data["results"][1]["success"] is True
+        # The failed item's heading must not appear in any org file
+        all_text = "".join(p.read_text() for p in org_dir.glob("*.org"))
+        assert "Leaky subtask" not in all_text
+        assert "Valid subtask" in all_text
+
     def test_batch_delete(self, org_dir):
         """Batch delete multiple tasks."""
         # First add some tasks to delete
