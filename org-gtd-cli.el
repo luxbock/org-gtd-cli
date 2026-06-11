@@ -2123,6 +2123,47 @@ within the just-completed task's own file."
 
 ;; --- refile ---
 
+(defun org-gtd-cli/find-category-matches (category)
+  "Find refile targets matching CATEGORY in tasks.org.
+CATEGORY is substring-matched against non-TODO headings; it may contain
+`/' separators for ancestor path matching (substring on each segment).
+Returns a list of matches, each of the form (BUFFER POS FILE HEADING-PATH)."
+  (let* ((cat-parts (split-string category "/" t))
+         (matches '())
+         (cat-file (expand-file-name "tasks.org" org-directory)))
+    (when (file-exists-p cat-file)
+      (with-current-buffer (find-file-noselect cat-file)
+        (org-with-wide-buffer
+         (goto-char (point-min))
+         (while (re-search-forward org-heading-regexp nil t)
+           (unless (org-get-todo-state)
+             (let* ((heading (org-get-heading t t t t))
+                    (stripped (org-gtd-cli/strip-markup heading)))
+               (if (= (length cat-parts) 1)
+                   (when (or (string-match-p (regexp-quote (car cat-parts)) heading)
+                             (string-match-p (regexp-quote (car cat-parts)) stripped))
+                     (push (list (current-buffer) (point) cat-file
+                                 (org-gtd-cli/heading-path-at-point))
+                           matches))
+                 ;; Multi-segment: substring match on last, substring on ancestors
+                 (when (or (string-match-p (regexp-quote (car (last cat-parts))) heading)
+                           (string-match-p (regexp-quote (car (last cat-parts))) stripped))
+                   (let ((path-match t)
+                         (parts (butlast cat-parts)))
+                     (save-excursion
+                       (dolist (part (reverse parts))
+                         (unless (and (org-up-heading-safe)
+                                      (let ((h (org-get-heading t t t t)))
+                                        (or (string-match-p (regexp-quote part) h)
+                                            (string-match-p (regexp-quote part)
+                                                            (org-gtd-cli/strip-markup h)))))
+                           (setq path-match nil))))
+                     (when path-match
+                       (push (list (current-buffer) (point) cat-file
+                                   (org-gtd-cli/heading-path-at-point))
+                             matches)))))))))))
+    (nreverse matches)))
+
 (defun org-gtd-cli/refile (substring target category &optional index dry-run)
   "Move a task to a different heading.
 TARGET (--to) uses exact match on any heading across all agenda files.
@@ -2205,41 +2246,7 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                   (org-gtd-cli/error "Hint: use 'categories' to see available targets.")))
               (kill-emacs 1)))
         ;; --category: substring match on non-TODO headings in tasks.org only
-        (let* ((cat-parts (split-string category "/" t))
-               (matches '())
-               (cat-file (expand-file-name "tasks.org" org-directory)))
-          (when (file-exists-p cat-file)
-            (with-current-buffer (find-file-noselect cat-file)
-              (org-with-wide-buffer
-               (goto-char (point-min))
-               (while (re-search-forward org-heading-regexp nil t)
-                 (unless (org-get-todo-state)
-                   (let* ((heading (org-get-heading t t t t))
-                          (stripped (org-gtd-cli/strip-markup heading)))
-                     (if (= (length cat-parts) 1)
-                         (when (or (string-match-p (regexp-quote (car cat-parts)) heading)
-                                   (string-match-p (regexp-quote (car cat-parts)) stripped))
-                           (push (list (current-buffer) (point) cat-file
-                                       (org-gtd-cli/heading-path-at-point))
-                                 matches))
-                       ;; Multi-segment: substring match on last, substring on ancestors
-                       (when (or (string-match-p (regexp-quote (car (last cat-parts))) heading)
-                                 (string-match-p (regexp-quote (car (last cat-parts))) stripped))
-                         (let ((path-match t)
-                               (parts (butlast cat-parts)))
-                           (save-excursion
-                             (dolist (part (reverse parts))
-                               (unless (and (org-up-heading-safe)
-                                            (let ((h (org-get-heading t t t t)))
-                                              (or (string-match-p (regexp-quote part) h)
-                                                  (string-match-p (regexp-quote part)
-                                                                  (org-gtd-cli/strip-markup h)))))
-                                 (setq path-match nil))))
-                           (when path-match
-                             (push (list (current-buffer) (point) cat-file
-                                         (org-gtd-cli/heading-path-at-point))
-                                   matches)))))))))))
-          (setq matches (nreverse matches))
+        (let ((matches (org-gtd-cli/find-category-matches category)))
           (cond
            ((null matches)
             (if org-gtd-cli/json-mode
@@ -3523,24 +3530,35 @@ IDX is the 0-based index in the batch array."
 
     ("refile"
      (let* ((heading (if (stringp item) item (alist-get 'heading item)))
-            (buf-pos (org-gtd-cli/find-task heading nil nil)))
-       (with-current-buffer (car buf-pos)
-         (org-with-wide-buffer
-          (goto-char (cdr buf-pos))
-          ;; Find refile target using shared-arg as category
-          (let* ((target (org-gtd-cli/find-refile-target nil shared-arg))
-                 (target-heading (nth 0 target))
-                 (target-file (nth 1 target))
-                 (target-pos (nth 2 target))
-                 (file (org-gtd-cli/relative-filename (buffer-file-name))))
-            (org-refile nil nil (list target-heading target-file nil target-pos))
-            (save-buffer)
-            (when (get-file-buffer target-file)
-              (with-current-buffer (get-file-buffer target-file) (save-buffer)))
-            `((index . ,idx) (success . t)
-              (heading . ,heading) (file . ,file)
-              (target_heading . ,target-heading)
-              (target_file . ,(org-gtd-cli/relative-filename target-file))))))))
+            (buf-pos (org-gtd-cli/find-task heading nil nil))
+            ;; Find refile target using shared-arg as category
+            (matches (org-gtd-cli/find-category-matches shared-arg)))
+       (cond
+        ((null matches)
+         (error "Category heading \"%s\" not found" shared-arg))
+        ((> (length matches) 1)
+         (error "Multiple category matches for \"%s\" (use a more specific path, e.g. \"Parent/Child\")"
+                shared-arg))
+        (t
+         (let* ((m (car matches))
+                (target-buf (nth 0 m))
+                (target-pos (nth 1 m))
+                (target-file (nth 2 m))
+                (target-heading (with-current-buffer target-buf
+                                  (org-with-wide-buffer
+                                   (goto-char target-pos)
+                                   (org-get-heading t t t t)))))
+           (with-current-buffer (car buf-pos)
+             (org-with-wide-buffer
+              (goto-char (cdr buf-pos))
+              (let ((file (org-gtd-cli/relative-filename (buffer-file-name))))
+                (org-refile nil nil (list target-heading target-file nil target-pos))
+                (save-buffer)
+                (with-current-buffer target-buf (save-buffer))
+                `((index . ,idx) (success . t)
+                  (heading . ,heading) (file . ,file)
+                  (target_heading . ,target-heading)
+                  (target_file . ,(org-gtd-cli/relative-filename target-file)))))))))))
 
     ("add-subtask"
      (let* ((title (alist-get 'title item))

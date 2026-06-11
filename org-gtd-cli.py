@@ -962,9 +962,9 @@ def cmd_batch(args):
             print("Error: --batch add-subtask requires parent SUBSTR positional", file=sys.stderr)
             return 1
     elif command == "refile":
-        shared_arg = getattr(args, 'category', None) or getattr(args, 'to', None)
+        shared_arg = getattr(args, 'category', None)
         if not shared_arg:
-            print("Error: --batch refile requires --to or --category", file=sys.stderr)
+            print("Error: --batch refile requires --category", file=sys.stderr)
             return 1
 
     expr = (f'(org-gtd-cli/batch {to_elisp(command)} '

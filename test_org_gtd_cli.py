@@ -3990,6 +3990,47 @@ class TestBatch:
         assert rc == 0
         assert data["summary"]["succeeded"] == 2
 
+    def test_batch_refile(self, org_dir):
+        """Batch refile moves items under the shared category heading."""
+        data, stderr, rc = run_batch(
+            "refile",
+            ["Buy groceries", "Call the plumber about kitchen sink"],
+            "--category", "Family",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data is not None
+        assert data["summary"]["succeeded"] == 2
+        assert data["summary"]["failed"] == 0
+        for r in data["results"]:
+            assert r["success"] is True
+            assert r["target_heading"] == "Family"
+            assert r["target_file"] == "tasks.org"
+        inbox = (org_dir / "inbox.org").read_text()
+        assert "Buy groceries" not in inbox
+        assert "Call the plumber" not in inbox
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "Buy groceries" in tasks
+        assert "Call the plumber about kitchen sink" in tasks
+        assert_line_before(org_dir / "tasks.org", "* Family", "Buy groceries")
+
+    def test_batch_refile_nonexistent_category(self, org_dir):
+        """Batch refile with an unknown category fails cleanly per item."""
+        data, stderr, rc = run_batch(
+            "refile",
+            ["Buy groceries"],
+            "--category", "No such category xyz",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        assert data is not None
+        assert data["summary"]["succeeded"] == 0
+        assert data["summary"]["failed"] == 1
+        assert data["results"][0]["success"] is False
+        assert "not found" in data["results"][0]["error"]
+        # Task untouched
+        assert "Buy groceries" in (org_dir / "inbox.org").read_text()
+
     def test_batch_result_index_matches_input(self, org_dir):
         """Result index matches input array position."""
         data, stderr, rc = run_batch(
