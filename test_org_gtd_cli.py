@@ -503,6 +503,42 @@ class TestSearch:
         assert rc != 0
 
 
+class TestConflictedCopyExclusion:
+    """Nextcloud conflict copies must not be scanned as agenda files.
+
+    org-agenda-file-regexp is overridden in org-gtd-cli.el to reject
+    "(conflicted copy ...)" names; otherwise every result is duplicated
+    and org IDs get cloned.
+    """
+
+    CONFLICT_NAME = "inbox (conflicted copy 2026-06-06 143022).org"
+
+    def _make_conflict_copy(self, org_dir):
+        shutil.copy(org_dir / "inbox.org", org_dir / self.CONFLICT_NAME)
+
+    def test_search_has_no_duplicates(self, org_dir):
+        self._make_conflict_copy(org_dir)
+        stdout, stderr, rc = run_cli("--json", "search", "groceries", org_dir=org_dir)
+        assert rc == 0
+        data = json.loads(stdout)
+        assert data["count"] == 1
+        headings = [t["heading"] for t in data["tasks"]]
+        assert headings.count("Buy groceries") == 1
+        files = [t["file"] for t in data["tasks"]]
+        assert self.CONFLICT_NAME not in files
+
+    def test_conflict_file_not_scanned(self, org_dir):
+        self._make_conflict_copy(org_dir)
+        stdout, stderr, rc = run_cli(
+            "--json", "search", "--state", "all", "--tag", "@agent", org_dir=org_dir
+        )
+        assert rc == 0
+        data = json.loads(stdout)
+        files = {t["file"] for t in data["tasks"]}
+        assert self.CONFLICT_NAME not in files
+        assert all("conflicted copy" not in f for f in files)
+
+
 # ===========================================================================
 # 8. show
 # ===========================================================================

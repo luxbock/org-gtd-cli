@@ -51,6 +51,19 @@
       org-default-notes-file (concat org-directory "inbox.org")
       org-startup-with-inline-images nil)
 
+;; `org-agenda-files' expands `org-directory' to files via
+;; `org-agenda-file-regexp' (default "\\`[^.].*\\.org\\'").  Nextcloud sync
+;; conflicts leave duplicates like "tasks (conflicted copy 2026-06-06
+;; 143022).org" next to the original, and the default regexp happily picks
+;; them up — duplicating every search/agenda/find-task result and cloning
+;; org IDs.  Emacs regexps have no negative lookahead, so instead of
+;; rejecting the literal "conflicted copy" substring we reject any file name
+;; containing a parenthesis: every Nextcloud conflict name has one, no real
+;; GTD file does.  Emacs backup/autosave junk ("inbox.org~", "#inbox.org#",
+;; ".#inbox.org") is already excluded by the "\\.org\\'" suffix and
+;; leading-dot rules, so nothing extra is needed for those.
+(setq org-agenda-file-regexp "\\`[^.][^()]*\\.org\\'")
+
 ;; Override DEFER from core: drop @ to avoid interactive note prompt in batch
 (setq org-todo-keywords
       '((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d!/!)")
