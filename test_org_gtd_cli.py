@@ -1203,6 +1203,41 @@ class TestAddNote:
         assert "Created:" in stdout
         assert "[[file:agent-notes/deep-nested-note.org]]" in (org_dir / "tasks.org").read_text()
 
+    def test_colliding_slug_errors_and_preserves_original(self, org_dir):
+        """A second note whose title slugifies to an existing slug must error,
+        not silently overwrite the original note file."""
+        stdout, stderr, rc = run_cli("add-note", "Collision test", org_dir=org_dir)
+        assert rc == 0
+        note_file = org_dir / "agent-notes" / "collision-test.org"
+        original = note_file.read_text()
+        # Different title, same slug ("Collision; test!" -> "collision-test")
+        stdout, stderr, rc = run_cli("add-note", "Collision; test!", org_dir=org_dir)
+        assert rc == 1
+        assert "already exists" in stderr
+        assert note_file.read_text() == original
+
+    def test_colliding_slug_json_error(self, org_dir):
+        """In --json mode the collision error is emitted as JSON on stderr."""
+        stdout, stderr, rc = run_cli("add-note", "Collision test", org_dir=org_dir)
+        assert rc == 0
+        stdout, stderr, rc = run_cli("--json", "add-note", "Collision test", org_dir=org_dir)
+        assert rc == 1
+        err_data = None
+        for line in stderr.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                err_data = json.loads(line)
+                break
+        assert err_data is not None, f"No JSON error found in stderr: {stderr}"
+        assert "already exists" in err_data["error"]
+
+    def test_non_ascii_title_errors_instead_of_empty_slug(self, org_dir):
+        """A fully non-ASCII title slugifies to "" — must error, not create .org."""
+        stdout, stderr, rc = run_cli("add-note", "日本語のメモ", org_dir=org_dir)
+        assert rc == 1
+        assert "empty filename slug" in stderr
+        assert not (org_dir / "agent-notes" / ".org").exists()
+
 
 # ===========================================================================
 # 22. append-body

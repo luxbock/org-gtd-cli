@@ -1681,6 +1681,16 @@ at least one direct child with a TODO keyword."
                                               ":") ":")
                      ":research:"))
          (date-str (format-time-string "[%Y-%m-%d %a]")))
+    (when (string-empty-p slug)
+      (org-gtd-cli/error
+       "Error: title %S produces an empty filename slug. Slugs keep only ASCII letters, digits, spaces and hyphens; include at least one ASCII letter or digit in the title."
+       title)
+      (kill-emacs 1))
+    (when (file-exists-p note-file)
+      (org-gtd-cli/error
+       "Error: note file already exists: %s. Refusing to overwrite; choose a different title or edit the existing note."
+       note-file)
+      (kill-emacs 1))
     (unless (file-directory-p notes-dir)
       (make-directory notes-dir t))
     (with-temp-file note-file
