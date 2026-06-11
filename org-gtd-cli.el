@@ -526,7 +526,7 @@ If ACTIVE is non-nil, use angle brackets; otherwise square brackets."
   (format-time-string "[%Y-%m-%d %a %H:%M]"))
 
 (defun org-gtd-cli/fill-text (text)
-  "Fill TEXT to 80 columns, respecting org syntax (blocks, lists, timestamps)."
+  "Fill TEXT to 100 columns, respecting org syntax (blocks, lists, timestamps)."
   (if (or (null text) (string-empty-p text))
       text
     (with-temp-buffer
@@ -2427,7 +2427,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                  (while (and (not sibling-pos)
                              (re-search-forward org-heading-regexp search-end t))
                    (when (and (= (org-current-level) level)
-                              (not (= (point-at-bol) task-beg))
+                              (not (= (line-beginning-position) task-beg))
                               (string-match-p
                                (regexp-quote (downcase sibling-substring))
                                (downcase (org-get-heading t t t t))))

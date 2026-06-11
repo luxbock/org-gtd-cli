@@ -119,7 +119,7 @@ def _run_batch(expr: str, json_mode: bool = False, full_mode: bool = False) -> i
         cmd = [
             EMACS_BIN, "--batch", "-q",
             "--eval", f'(setq user-emacs-directory "{tmpdir}/")',
-            "--eval", f'(setenv "ORG_DIRECTORY" "{ORG_DIR}")',
+            "--eval", f'(setenv "ORG_DIRECTORY" "{escape_elisp(ORG_DIR)}")',
             "-l", CORE_FILE,
             "-l", ELISP_FILE,
             "--eval", expr,
@@ -145,7 +145,7 @@ def _ensure_daemon() -> None:
         EMACS_BIN, "--daemon", "-q",
         "--eval", f'(setq server-name "{escape_elisp(SOCKET_PATH)}")',
         "--eval", f'(setq user-emacs-directory "{user_emacs_dir}/")',
-        "--eval", f'(setenv "ORG_DIRECTORY" "{ORG_DIR}")',
+        "--eval", f'(setenv "ORG_DIRECTORY" "{escape_elisp(ORG_DIR)}")',
         "-l", CORE_FILE,
         "-l", ELISP_FILE,
     ]
@@ -610,7 +610,7 @@ Creating:
 
 Modifying:
   set-done          Mark task DONE (with auto-progress)
-  set-state         Change TODO state
+  set-state         Change TODO state (DONE here skips set-done's auto-progress)
   set-next          Promote task/child to NEXT
   set-priority      Set priority A/B/C
   set-cancelled     Mark task CANCELLED
@@ -765,7 +765,13 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_done)
 
-    p = sub.add_parser("set-state", help="Change TODO state")
+    p = sub.add_parser(
+        "set-state",
+        help="Change TODO state (set-state DONE skips set-done's auto-progress)",
+        description="Change TODO state. Note: `set-state SUBSTR DONE` bypasses "
+                    "set-done's auto-progress side effects (sibling NEXT "
+                    "promotion, project-needs-review tagging) — prefer "
+                    "set-done for completing tasks.")
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
     p.add_argument("state", metavar="STATE",
                    help="Target state: TODO, NEXT, DONE, WAITING, DEFER, CANCELLED")
