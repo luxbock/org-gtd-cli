@@ -7,6 +7,7 @@ This script parses arguments and calls Emacs in batch mode.
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -171,9 +172,12 @@ def _run_daemon(expr: str, json_mode: bool = False, full_mode: bool = False, *, 
     """Run an elisp expression via emacsclient against the daemon."""
     _ensure_daemon()
 
-    stdout_file = os.path.join(_TMPDIR, "org-gtd-cli-stdout")
-    stderr_file = os.path.join(_TMPDIR, "org-gtd-cli-stderr")
-    exit_file = os.path.join(_TMPDIR, "org-gtd-cli-exit")
+    # Unique per-invocation output dir: concurrent CLI calls share the daemon,
+    # and fixed paths would let one call clobber another's stdout/exit code.
+    out_dir = tempfile.mkdtemp(prefix="org-gtd-cli-out-", dir=_TMPDIR)
+    stdout_file = os.path.join(out_dir, "stdout")
+    stderr_file = os.path.join(out_dir, "stderr")
+    exit_file = os.path.join(out_dir, "exit")
 
     json_flag = "t" if json_mode else "nil"
     full_flag = "t" if full_mode else "nil"
@@ -186,26 +190,30 @@ def _run_daemon(expr: str, json_mode: bool = False, full_mode: bool = False, *, 
                f' "{escape_elisp(stderr_file)}"'
                f' "{escape_elisp(exit_file)}")')
 
-    result = subprocess.run(
-        [EMACSCLIENT_BIN, "--socket-name", SOCKET_PATH, "--eval", wrapped],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            [EMACSCLIENT_BIN, "--socket-name", SOCKET_PATH, "--eval", wrapped],
+            capture_output=True, text=True,
+        )
 
-    if result.returncode != 0 and not _retried:
-        # Stale socket or daemon died — clean up and retry once
-        try:
-            os.unlink(SOCKET_PATH)
-        except FileNotFoundError:
-            pass
-        return _run_daemon(expr, json_mode, full_mode, _retried=True)
+        if result.returncode != 0 and not _retried:
+            # Stale socket or daemon died — clean up and retry once
+            # (the retry allocates its own output dir)
+            try:
+                os.unlink(SOCKET_PATH)
+            except FileNotFoundError:
+                pass
+            return _run_daemon(expr, json_mode, full_mode, _retried=True)
 
-    if result.returncode != 0:
-        print(f"Error: emacsclient failed: {result.stderr.strip()}", file=sys.stderr)
-        return 1
+        if result.returncode != 0:
+            print(f"Error: emacsclient failed: {result.stderr.strip()}", file=sys.stderr)
+            return 1
 
-    stdout = _read_file_safe(stdout_file)
-    stderr = _read_file_safe(stderr_file)
-    exit_code_str = _read_file_safe(exit_file).strip()
+        stdout = _read_file_safe(stdout_file)
+        stderr = _read_file_safe(stderr_file)
+        exit_code_str = _read_file_safe(exit_file).strip()
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
 
     if stdout:
         sys.stdout.write(stdout)

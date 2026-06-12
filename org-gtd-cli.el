@@ -11,6 +11,14 @@
 (require 'org-archive)
 (require 'cl-lib)
 
+;; Load `userlock' eagerly: it is NOT preloaded, and the C file-lock code
+;; autoloads it on the first supersession event.  If that first event happens
+;; inside `org-gtd-cli/daemon-dispatch', loading the file redefines
+;; `ask-user-about-supersession-threat' and silently clobbers the cl-letf
+;; shadow installed there — resurrecting the interactive prompt the shadow
+;; exists to suppress.  (`load' because userlock.el has no `provide'.)
+(load "userlock" nil t)
+
 ;; ══════════════════════════════════════════════════════════════════════════════
 ;; CLI-specific configuration
 ;; ══════════════════════════════════════════════════════════════════════════════
@@ -131,23 +139,43 @@ EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
   (unless (string-suffix-p "/" org-directory)
     (setq org-directory (concat org-directory "/")))
   (setq org-agenda-files (list org-directory))
-  (org-gtd-cli/revert-org-buffers)
   (setq org-gtd-cli/json-mode json-mode-p)
   (setq org-gtd-cli/full-mode full-mode-p)
   (let ((org-gtd-cli--exit-code 0)
         (stderr-msgs '()))
-    (with-temp-file stdout-file
-      (let ((standard-output (current-buffer)))
-        (cl-letf (((symbol-function 'kill-emacs)
-                   (lambda (&optional code)
-                     (setq org-gtd-cli--exit-code (or code 0))
-                     (throw 'org-gtd-cli-exit nil)))
-                  ((symbol-function 'message)
-                   (lambda (fmt &rest args)
-                     (when fmt
-                       (push (apply #'format fmt args) stderr-msgs)))))
-          (catch 'org-gtd-cli-exit
-            (funcall body-fn)))))
+    ;; If a file's mtime changes while a call is in flight (Doom auto-save or
+    ;; the Nextcloud client racing the daemon), Emacs raises interactive
+    ;; supersession prompts — minibuffer reads that block the headless daemon
+    ;; forever, queueing every later emacsclient call behind them.  The revert
+    ;; below makes the buffer authoritative, so suppress the prompts and let
+    ;; saves overwrite the file.  The C-level buffer-modification check
+    ;; (`lock-file', reached from `prepare_to_modify_buffer' — including
+    ;; during the revert itself) calls this function; return nil instead of
+    ;; prompting or signaling `file-supersession' so the edit proceeds.
+    (cl-letf (((symbol-function 'ask-user-about-supersession-threat)
+               (lambda (_filename) nil)))
+      (org-gtd-cli/revert-org-buffers)
+      (with-temp-file stdout-file
+        (let ((standard-output (current-buffer)))
+          (cl-letf (((symbol-function 'kill-emacs)
+                     (lambda (&optional code)
+                       (setq org-gtd-cli--exit-code (or code 0))
+                       (throw 'org-gtd-cli-exit nil)))
+                    ((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (when fmt
+                         (push (apply #'format fmt args) stderr-msgs))))
+                    ;; Second supersession path: `basic-save-buffer' has its
+                    ;; own inline "has changed since visited or saved.  Save
+                    ;; anyway?" `yes-or-no-p' (as does `find-file-noselect'),
+                    ;; gated on this predicate.  Claiming the buffer is in
+                    ;; sync skips those prompts too.  Only shadowed around
+                    ;; BODY-FN — the revert above needs the real predicate to
+                    ;; detect stale buffers.
+                    ((symbol-function 'verify-visited-file-modtime)
+                     (lambda (&optional _buf) t)))
+            (catch 'org-gtd-cli-exit
+              (funcall body-fn))))))
     (with-temp-file stderr-file
       (dolist (msg (nreverse stderr-msgs))
         (insert msg "\n")))

@@ -14,6 +14,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -3732,6 +3736,172 @@ class TestDaemonSaveChatter:
             assert "Saving file" not in stderr
         finally:
             self._kill_daemon(str(daemon_tmp))
+
+
+class TestDaemonRobustness:
+    """Regression tests for daemon-mode races.
+
+    1. Supersession: an external mtime/content change between the daemon's
+       buffer revert and `save-buffer' used to trigger Emacs's interactive
+       supersession prompts, hanging the headless daemon forever.
+    2. Output race: the Python wrapper used fixed stdout/stderr/exit paths in
+       $TMPDIR, so two concurrent invocations clobbered each other's results.
+
+    The daemon socket lives at $TMPDIR/org-gtd-cli/server, and unix socket
+    paths have a ~107-char limit — pytest's tmp_path is too deep, so these
+    tests build a short-lived daemon TMPDIR directly under the session tmpdir
+    (e.g. /tmp/claude) instead.
+    """
+
+    @staticmethod
+    def _make_daemon_tmp():
+        return tempfile.mkdtemp(prefix="ogc-", dir=os.environ.get("TMPDIR", "/tmp"))
+
+    @staticmethod
+    def _kill_daemon(daemon_tmp):
+        socket = os.path.join(daemon_tmp, "org-gtd-cli", "server")
+        if os.path.exists(socket):
+            try:
+                subprocess.run(
+                    ["emacsclient", "--socket-name", socket,
+                     "--eval", "(kill-emacs)"],
+                    capture_output=True, timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        # Fallback for a wedged daemon (e.g. stuck on an interactive prompt):
+        # its command line contains the unique TMPDIR path.
+        subprocess.run(["pkill", "-f", daemon_tmp], capture_output=True)
+        shutil.rmtree(daemon_tmp, ignore_errors=True)
+
+    def test_daemon_mutation_survives_external_file_change(self, org_dir):
+        """A mutation must not hang when the .org file's mtime changes behind
+        the daemon's back — including between the dispatch-time revert and the
+        save (simulated by hammering the mtime during the call). Pre-fix this
+        hit Emacs's interactive supersession prompts and hung forever."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp}
+        inbox = org_dir / "inbox.org"
+        try:
+            # Open/mutate the task so the daemon holds a live inbox.org buffer.
+            stdout, stderr, rc = run_cli(
+                "--json", "set-body", "Buy groceries", "first body",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+
+            # Touch the file behind the daemon's back: content + future mtime.
+            inbox.write_text(inbox.read_text() + "\n# external edit\n")
+            future = time.time() + 60
+            os.utime(inbox, (future, future))
+
+            # Keep hammering the mtime during the next call so a change lands
+            # in the revert->modify->save window (the actual race trigger).
+            stop = threading.Event()
+
+            def hammer():
+                while not stop.is_set():
+                    t = time.time() + 60
+                    try:
+                        os.utime(inbox, (t, t))
+                    except FileNotFoundError:
+                        pass
+                    time.sleep(0.001)
+
+            th = threading.Thread(target=hammer, daemon=True)
+            th.start()
+            try:
+                # run_cli's timeout=30 turns a pre-fix hang into a test failure.
+                stdout, stderr, rc = run_cli(
+                    "--json", "set-body", "Buy groceries", "second body",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                stop.set()
+                th.join(timeout=5)
+
+            assert rc == 0, f"stderr: {stderr}"
+            data = json.loads(stdout)
+            assert data["command"] == "set-body"
+            assert data["task"]["body"] == "second body"
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_concurrent_calls_outputs_not_clobbered(self, org_dir):
+        """Two concurrent invocations against the same daemon must each get
+        their own stdout and exit code. Pre-fix, fixed result-file paths in
+        $TMPDIR let one call read (or truncate) the other's output."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp}
+        try:
+            # Warm up so both concurrent calls reuse one daemon.
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+
+            for i in range(8):
+                # Several simultaneous calls per round: the extra processes
+                # add the scheduling jitter needed to land one call's read in
+                # another's write window.
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    f_oks = [ex.submit(
+                        run_cli, "--json", "set-body", "Buy groceries",
+                        f"round {i}", org_dir=org_dir, env_overrides=env)
+                        for _ in range(2)]
+                    f_errs = [ex.submit(
+                        run_cli, "--json", "show", "zz no such task zz",
+                        org_dir=org_dir, env_overrides=env)
+                        for _ in range(2)]
+                    ok_results = [f.result() for f in f_oks]
+                    err_results = [f.result() for f in f_errs]
+
+                # Each mutation gets its own JSON and its own exit code.
+                for out_ok, err_ok, rc_ok in ok_results:
+                    assert rc_ok == 0, f"round {i}: stderr: {err_ok}"
+                    data = json.loads(out_ok)
+                    assert data["command"] == "set-body"
+                    assert data["task"]["body"] == f"round {i}"
+
+                # Each failing show keeps its exit code and does not receive
+                # another call's stdout.
+                for out_err, err_err, rc_err in err_results:
+                    assert rc_err == 1, \
+                        f"round {i}: rc {rc_err}, stdout: {out_err}"
+                    assert "set-body" not in out_err
+                    err = json.loads(err_err.strip().splitlines()[-1])
+                    assert "error" in err
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_concurrent_fast_calls_own_stdout(self, org_dir):
+        """Concurrent fast commands (org-timestamp does no file IO, so its
+        dispatch takes ~1ms) each get their own stdout. This is the most
+        sensitive clobber detector: pre-fix, the daemon overwrote the fixed
+        result files with the next queued call's output while the previous
+        caller was still reading them."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp}
+        try:
+            # Warm up so all concurrent calls reuse one daemon.
+            stdout, stderr, rc = run_cli(
+                "org-timestamp", "2026-01-01",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+
+            base = datetime.date(2026, 3, 1)
+            dates = [(base + datetime.timedelta(days=i)).isoformat()
+                     for i in range(48)]
+            for i in range(12):
+                batch = dates[i * 4:(i + 1) * 4]
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    futs = {d: ex.submit(run_cli, "org-timestamp", d,
+                                         org_dir=org_dir, env_overrides=env)
+                            for d in batch}
+                    for d, f in futs.items():
+                        out, err, rc = f.result()
+                        assert rc == 0, f"{d}: rc {rc}, stderr: {err}"
+                        assert d in out, \
+                            f"asked for {d}, got another call's output: {out!r}"
+        finally:
+            self._kill_daemon(daemon_tmp)
 
 
 # ===========================================================================
