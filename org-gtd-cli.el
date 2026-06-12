@@ -1596,6 +1596,19 @@ any state (including DONE) and plain category/note headings."
 
 ;; --- add-event ---
 
+(defun org-gtd-cli/file-calendar-id ()
+  "Return the file-level \"#+PROPERTY: calendar-id <value>\" in the current buffer.
+Returns nil when the keyword is absent.  Scans the buffer text directly
+rather than going through org's keyword cache
+(`org-set-regexps-and-options' runs once at mode init), so the lookup
+always reflects the buffer's current contents."
+  (org-with-wide-buffer
+   (goto-char (point-min))
+   (let ((case-fold-search t))
+     (when (re-search-forward
+            "^#\\+PROPERTY:[ \t]+calendar-id[ \t]+\\(.+?\\)[ \t]*$" nil t)
+       (match-string-no-properties 1)))))
+
 (defun org-gtd-cli/add-event (title date &optional time tag file end-date)
   "Add a calendar event.  When END-DATE is given, create a date range."
   (let* ((target-file (if (and file (not (string-empty-p file))
@@ -1619,17 +1632,19 @@ any state (including DONE) and plain category/note headings."
                                 "--"
                                 (org-gtd-cli/make-timestamp end-date nil t))
                       (org-gtd-cli/make-timestamp date time-str t)))
-         (use-gcal-drawer (string-suffix-p "family-calendar.org" target-file))
-         (gcal-calendar-id (when use-gcal-drawer
-                             "REDACTED@group.calendar.google.com")))
+         (gcal-calendar-id nil))
     (unless (file-exists-p target-file)
       (org-gtd-cli/error "Error: file not found: %s" target-file)
       (kill-emacs 1))
     (with-current-buffer (find-file-noselect target-file)
+      ;; A file-level "#+PROPERTY: calendar-id <id>" in the target file
+      ;; opts it into org-gcal sync format; without it the event is a
+      ;; plain heading + timestamp.
+      (setq gcal-calendar-id (org-gtd-cli/file-calendar-id))
       (org-with-wide-buffer
        (goto-char (point-max))
        (unless (bolp) (insert "\n"))
-       (if use-gcal-drawer
+       (if gcal-calendar-id
            (insert (format "\n* %s%s\n:PROPERTIES:\n:calendar-id: %s\n:END:\n:org-gcal:\n%s\n:END:\n"
                            title
                            (if cal-tag (format " :%s:" cal-tag) "")
@@ -1651,7 +1666,8 @@ any state (including DONE) and plain category/note headings."
              (date . ,date)
              (time . ,(or time-str :null))
              (end_date . ,(or end-date-val :null))
-             (tag . ,(or cal-tag :null)))))
+             (tag . ,(or cal-tag :null))
+             (calendar_id . ,(or gcal-calendar-id :null)))))
       (princ (format "Added event: %s -> %s\n"
                      title (org-gtd-cli/relative-filename target-file)))))
   (kill-emacs 0))

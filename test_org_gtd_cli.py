@@ -27,6 +27,10 @@ CLI_SCRIPT = Path(__file__).parent / "org-gtd-cli.py"
 CORE_FILE = Path(__file__).parent / "gtd-core.el"
 ELISP_FILE = Path(__file__).parent / "org-gtd-cli.el"
 
+# Fake gcal calendar id used by add-event tests; the real id lives as a
+# file-level "#+PROPERTY: calendar-id ..." in the live org file, not in code.
+FAKE_CALENDAR_ID = "test-family@group.calendar.google.com"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1196,8 +1200,10 @@ class TestAddEvent:
         assert "<2026-04-01 Wed 09:00>--<2026-04-03 Fri>" in (org_dir / "calendar.org").read_text()
 
     def test_non_default_file_omits_tag(self, org_dir):
-        # Create the non-default calendar file
-        (org_dir / "family-calendar.org").write_text("#+title: Family Calendar\n")
+        # A file-level calendar-id property opts the file into gcal format
+        (org_dir / "family-calendar.org").write_text(
+            "#+title: Family Calendar\n"
+            f"#+PROPERTY: calendar-id {FAKE_CALENDAR_ID}\n")
         stdout, stderr, rc = run_cli("add-event", "Family dinner", "--date", "2026-03-23", "--file", "family-calendar.org", org_dir=org_dir)
         assert rc == 0
         cal = (org_dir / "family-calendar.org").read_text()
@@ -1205,10 +1211,12 @@ class TestAddEvent:
         assert ":calpersonal:" not in cal
         assert ":org-gcal:" in cal
         assert ":END:" in cal
-        assert ":calendar-id:" in cal
+        assert f":calendar-id: {FAKE_CALENDAR_ID}" in cal
 
     def test_non_default_file_with_explicit_tag(self, org_dir):
-        (org_dir / "family-calendar.org").write_text("#+title: Family Calendar\n")
+        (org_dir / "family-calendar.org").write_text(
+            "#+title: Family Calendar\n"
+            f"#+PROPERTY: calendar-id {FAKE_CALENDAR_ID}\n")
         stdout, stderr, rc = run_cli("add-event", "School play", "--date", "2026-03-25", "--tag", "calfamily", "--file", "family-calendar.org", org_dir=org_dir)
         assert rc == 0
         cal = (org_dir / "family-calendar.org").read_text()
@@ -1216,12 +1224,37 @@ class TestAddEvent:
         assert ":org-gcal:" in cal
 
     def test_date_range_in_gcal_drawer(self, org_dir):
-        (org_dir / "family-calendar.org").write_text("#+title: Family Calendar\n")
+        (org_dir / "family-calendar.org").write_text(
+            "#+title: Family Calendar\n"
+            f"#+PROPERTY: calendar-id {FAKE_CALENDAR_ID}\n")
         stdout, stderr, rc = run_cli("add-event", "Spring break", "--date", "2026-04-06", "--file", "family-calendar.org", "--end-date", "2026-04-17", org_dir=org_dir)
         assert rc == 0
         cal = (org_dir / "family-calendar.org").read_text()
         assert ":org-gcal:" in cal
         assert "<2026-04-06 Mon>--<2026-04-17 Fri>" in cal
+
+    def test_file_without_calendar_id_gets_plain_event(self, org_dir):
+        # No file-level calendar-id property -> plain heading, no drawers
+        (org_dir / "family-calendar.org").write_text("#+title: Family Calendar\n")
+        stdout, stderr, rc = run_cli("add-event", "Plain dinner", "--date", "2026-03-23", "--file", "family-calendar.org", org_dir=org_dir)
+        assert rc == 0
+        cal = (org_dir / "family-calendar.org").read_text()
+        assert "* Plain dinner" in cal
+        assert "<2026-03-23 Mon>" in cal
+        assert ":org-gcal:" not in cal
+        assert ":calendar-id:" not in cal
+        assert ":PROPERTIES:" not in cal
+
+    def test_calendar_id_property_works_in_any_file(self, org_dir):
+        # The property drives gcal format regardless of filename
+        (org_dir / "work-calendar.org").write_text(
+            "#+title: Work Calendar\n"
+            "#+PROPERTY: calendar-id work-test@group.calendar.google.com\n")
+        stdout, stderr, rc = run_cli("add-event", "Standup", "--date", "2026-03-24", "--file", "work-calendar.org", org_dir=org_dir)
+        assert rc == 0
+        cal = (org_dir / "work-calendar.org").read_text()
+        assert ":calendar-id: work-test@group.calendar.google.com" in cal
+        assert ":org-gcal:" in cal
 
 
 # ===========================================================================
@@ -3727,6 +3760,23 @@ class TestJsonMutations:
         assert data["command"] == "add-event"
         assert data["date"] == "2026-04-15"
         assert data["tag"] == "calpersonal"
+        # calendar.org has no file-level calendar-id property -> plain event
+        assert data["calendar_id"] is None
+
+    def test_add_event_json_reports_calendar_id(self, org_dir):
+        (org_dir / "family-calendar.org").write_text(
+            "#+title: Family Calendar\n"
+            f"#+PROPERTY: calendar-id {FAKE_CALENDAR_ID}\n")
+        data, _, rc = run_cli_json(
+            "add-event", "Dentist", "--date", "2026-04-16",
+            "--file", "family-calendar.org",
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["calendar_id"] == FAKE_CALENDAR_ID
+        cal = (org_dir / "family-calendar.org").read_text()
+        assert f":calendar-id: {FAKE_CALENDAR_ID}" in cal
+        assert ":org-gcal:" in cal
 
     def test_add_note_json(self, org_dir):
         data, _, rc = run_cli_json("add-note", "Test research", org_dir=org_dir)
@@ -4669,6 +4719,29 @@ class TestBatchDelegation:
         inbox = (org_dir / "inbox.org").read_text()
         assert "* Inbox event" in inbox
         assert "calpersonal" not in inbox
+
+    def test_batch_add_event_calendar_id(self, org_dir):
+        """Batch add-event uses the target file's calendar-id property,
+        same as single calls (it delegates to the same implementation)."""
+        (org_dir / "family-calendar.org").write_text(
+            "#+title: Family Calendar\n"
+            f"#+PROPERTY: calendar-id {FAKE_CALENDAR_ID}\n")
+        data, stderr, rc = run_batch(
+            "add-event",
+            [{"title": "Gcal event", "date": "2026-04-13",
+              "file": "family-calendar.org"},
+             {"title": "Plain event", "date": "2026-04-14"}],
+            org_dir=org_dir)
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+        assert data["results"][0]["calendar_id"] == FAKE_CALENDAR_ID
+        assert data["results"][1]["calendar_id"] is None
+        fam = (org_dir / "family-calendar.org").read_text()
+        assert f":calendar-id: {FAKE_CALENDAR_ID}" in fam
+        assert ":org-gcal:" in fam
+        cal = (org_dir / "calendar.org").read_text()
+        assert "* Plain event" in cal
+        assert ":org-gcal:" not in cal
 
     def test_batch_add_session_id(self, org_dir):
         """Batch add-session-id works and is idempotent per item."""
