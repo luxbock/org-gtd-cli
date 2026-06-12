@@ -1344,6 +1344,46 @@ at least one direct child with a TODO keyword."
        (projects . ,(apply #'vector (nreverse projects)))
        (count . ,(length results))))))
 
+;; --- list-tags ---
+
+(defun org-gtd-cli/list-tags ()
+  "List every tag in use across the org files with usage counts.
+Counts tags literally present on each headline — no inheritance —
+so agents can see which tags exist (and where they are dominant)
+before inventing new ones.  Includes every headline: TODO tasks in
+any state (including DONE) and plain category/note headings."
+  (let ((counts (make-hash-table :test #'equal)))
+    (dolist (file (org-agenda-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (goto-char (point-min))
+           (while (re-search-forward org-heading-regexp nil t)
+             (dolist (tag (org-get-tags nil t))
+               (puthash tag (1+ (gethash tag counts 0)) counts)))))))
+    (let ((results '()))
+      (maphash (lambda (tag count) (push (cons tag count) results)) counts)
+      ;; Sort by count descending, ties alphabetically
+      (setq results (sort results
+                          (lambda (a b)
+                            (if (/= (cdr a) (cdr b))
+                                (> (cdr a) (cdr b))
+                              (string< (car a) (car b))))))
+      (if org-gtd-cli/json-mode
+          (org-gtd-cli/output
+           `((version . 1)
+             (command . "list-tags")
+             (tags . ,(vconcat (mapcar (lambda (r)
+                                         `((tag . ,(car r))
+                                           (count . ,(cdr r))))
+                                       results)))
+             (count . ,(length results))))
+        (if (null results)
+            (org-gtd-cli/error "No tags found.")
+          (dolist (r results)
+            (princ (format "%4d %s\n" (cdr r) (car r))))))))
+  (kill-emacs 0))
+
 ;; --- add-task ---
 
 (defun org-gtd-cli/add-task (title &optional body tags-csv schedule deadline

@@ -3256,6 +3256,94 @@ class TestJsonProjects:
 
 
 # ===========================================================================
+# list-tags command
+# ===========================================================================
+
+class TestListTags:
+    """Tests for the list-tags command (tag usage inventory)."""
+
+    @staticmethod
+    def _counts(data):
+        return {entry["tag"]: entry["count"] for entry in data["tags"]}
+
+    def test_json_shape(self, org_dir):
+        data, _, rc = run_cli_json("list-tags", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "list-tags"
+        assert isinstance(data["tags"], list)
+        assert data["count"] == len(data["tags"])
+        for entry in data["tags"]:
+            assert isinstance(entry["tag"], str)
+            assert isinstance(entry["count"], int)
+
+    def test_counts_match_fixtures(self, org_dir):
+        """Anchor known tag counts from the fixture files."""
+        data, _, rc = run_cli_json("list-tags", org_dir=org_dir)
+        assert rc == 0
+        counts = self._counts(data)
+        assert counts["@agent"] == 3   # three TODO tasks in tasks.org
+        assert counts["buy"] == 2      # Shopping heading + inbox task
+        assert counts["email"] == 2    # inbox task + travel insurance task
+        assert counts["url"] == 2      # inbox task + research task
+        assert counts["@errand"] == 1  # inbox "Buy groceries"
+        assert counts["work"] == 1     # top-level Work category heading
+
+    def test_includes_done_and_plain_headings(self, org_dir):
+        """Tags on DONE tasks and plain (non-TODO) headings are counted."""
+        data, _, rc = run_cli_json("list-tags", org_dir=org_dir)
+        assert rc == 0
+        counts = self._counts(data)
+        # calendar.org: one DONE task + one plain heading, both :calpersonal:
+        assert counts["calpersonal"] == 2
+        # WAITING-state tasks are counted too (tag shares the keyword name)
+        assert counts["WAITING"] == 2
+
+    def test_local_tags_only(self, org_dir):
+        """Inherited tags are not counted — only literal headline tags."""
+        data, _, rc = run_cli_json("list-tags", org_dir=org_dir)
+        assert rc == 0
+        counts = self._counts(data)
+        # The Computers category has many descendants (including the @agent
+        # tasks); if inheritance leaked in, this would be far more than 1.
+        assert counts["computers"] == 1
+        assert counts["family"] == 1
+        assert counts["travel"] == 1
+
+    def test_sort_order(self, org_dir):
+        """Sorted by count descending, ties alphabetically."""
+        data, _, rc = run_cli_json("list-tags", org_dir=org_dir)
+        assert rc == 0
+        entries = [(e["count"], e["tag"]) for e in data["tags"]]
+        assert entries[0][1] == "@agent"  # unique highest count
+        for (c1, t1), (c2, t2) in zip(entries, entries[1:]):
+            assert c1 >= c2, f"counts not descending: {t1}={c1} before {t2}={c2}"
+            if c1 == c2:
+                assert t1 < t2, f"tie not alphabetical: {t1} before {t2}"
+
+    def test_text_mode(self, org_dir):
+        """Text mode prints one 'count tag' line per tag, same ordering."""
+        stdout, _, rc = run_cli("list-tags", org_dir=org_dir)
+        assert rc == 0
+        lines = stdout.strip().split("\n")
+        assert all(re.match(r"^\s*\d+ \S+$", line) for line in lines)
+        assert re.match(r"^\s*3 @agent$", lines[0])
+        # One line per distinct tag, matching the JSON count
+        data, _, _ = run_cli_json("list-tags", org_dir=org_dir)
+        assert len(lines) == data["count"]
+
+    def test_no_tags(self, org_dir):
+        """An org dir with no tagged headlines yields an empty inventory."""
+        for f in org_dir.glob("*.org"):
+            f.unlink()
+        (org_dir / "tasks.org").write_text("* TODO Untagged task\n")
+        data, _, rc = run_cli_json("list-tags", org_dir=org_dir)
+        assert rc == 0
+        assert data["tags"] == []
+        assert data["count"] == 0
+
+
+# ===========================================================================
 # JSON: mutation commands (set-done, set-state, etc.)
 # ===========================================================================
 

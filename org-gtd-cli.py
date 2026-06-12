@@ -298,6 +298,10 @@ def cmd_projects(args):
     return run_elisp("(org-gtd-cli/projects)", json_mode=args.json)
 
 
+def cmd_list_tags(args):
+    return run_elisp("(org-gtd-cli/list-tags)", json_mode=args.json)
+
+
 def cmd_process_agent_tasks(_args):
     print("Error: process-agent-tasks has been removed. "
           "Use: search --tag @agent --state TODO,NEXT [--json]",
@@ -620,6 +624,7 @@ Querying:
   subtasks          List children of a project
   categories        Show category tree for refile targets
   projects          List active projects with progress
+  list-tags         List all tags in use with counts
   process-agent-tasks  (removed, use: search --tag @agent --state TODO,NEXT)
 
 Creating:
@@ -719,6 +724,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
 
     p = sub.add_parser("projects", help="List active projects with progress")
     p.set_defaults(func=cmd_projects)
+
+    p = sub.add_parser("list-tags", help="List all tags in use with counts")
+    p.set_defaults(func=cmd_list_tags)
 
     p = sub.add_parser("process-agent-tasks",
                        help="(removed) Use: search --tag @agent --state TODO,NEXT")
