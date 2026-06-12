@@ -495,12 +495,31 @@ If EXACT is non-nil, require full heading match instead of substring."
     (setq matches (nreverse matches))
     (cond
      ((null matches)
-      (if org-gtd-cli/json-mode
-          (message "%s" (org-gtd-cli/json-encode
-                         `((error . ,(format "No task found matching \"%s\"" substring))
-                           (hint . "Try a shorter substring, or use 'search' for partial matches."))))
-        (org-gtd-cli/error "No task found matching \"%s\"" substring)
-        (org-gtd-cli/error "Hint: try a shorter substring, or use 'search' for partial matches."))
+      (let* ((cat-paths (delete-dups
+                         (mapcar (lambda (m) (nth 3 m))
+                                 (org-gtd-cli/find-category-matches substring))))
+             (hint (cond
+                    ((null cat-paths)
+                     "Try a shorter substring, or use 'search' for partial matches.")
+                    ((null (cdr cat-paths))
+                     (format (concat "\"%s\" matches a category heading, not a task. "
+                                     "To add a task under it: "
+                                     "org-gtd-cli add-task --category \"%s\"")
+                             substring (car cat-paths)))
+                    (t
+                     (format (concat "\"%s\" matches category headings, not tasks: %s. "
+                                     "To add a task under one: "
+                                     "org-gtd-cli add-task --category \"%s\"")
+                             substring
+                             (mapconcat (lambda (p) (format "\"%s\"" p))
+                                        (seq-take cat-paths 3) ", ")
+                             (car cat-paths))))))
+        (if org-gtd-cli/json-mode
+            (message "%s" (org-gtd-cli/json-encode
+                           `((error . ,(format "No task found matching \"%s\"" substring))
+                             (hint . ,hint))))
+          (org-gtd-cli/error "No task found matching \"%s\"" substring)
+          (org-gtd-cli/error "Hint: %s" hint)))
       (kill-emacs 1))
      ((and (= (length matches) 1) (not index))
       (cons (nth 0 (car matches)) (nth 1 (car matches))))

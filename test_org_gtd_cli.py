@@ -319,6 +319,59 @@ class TestAddSubtask:
 
 
 # ===========================================================================
+# 4b. find-task: category-aware no-match hint
+# ===========================================================================
+
+class TestFindTaskCategoryHint:
+    """When a substring matches only a category heading (no TODO keyword),
+    the no-match error hint should point at add-task --category with the
+    full slash path instead of the generic 'shorter substring' advice."""
+
+    def _json_error(self, stderr):
+        for line in stderr.strip().splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                return json.loads(line)
+        raise AssertionError(f"No JSON error found in stderr: {stderr}")
+
+    def test_add_subtask_category_substring_json(self, org_dir):
+        # "Pet Ants" is a category heading (* Family / ** Pet Ants), not a task
+        stdout, stderr, rc = run_cli(
+            "--json", "add-subtask", "Pet Ants", "New child", org_dir=org_dir)
+        assert rc == 1
+        err = self._json_error(stderr)
+        assert 'No task found matching "Pet Ants"' in err["error"]
+        assert "category heading, not a task" in err["hint"]
+        assert 'add-task --category "Family/Pet Ants"' in err["hint"]
+
+    def test_add_subtask_category_substring_text(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Pet Ants", "New child", org_dir=org_dir)
+        assert rc == 1
+        assert 'No task found matching "Pet Ants"' in stderr
+        assert "category heading, not a task" in stderr
+        assert 'add-task --category "Family/Pet Ants"' in stderr
+
+    def test_genuine_no_match_keeps_generic_hint(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "--json", "add-subtask", "zzqqxxk-nonexistent", "child", org_dir=org_dir)
+        assert rc == 1
+        err = self._json_error(stderr)
+        assert 'No task found matching "zzqqxxk-nonexistent"' in err["error"]
+        assert err["hint"] == "Try a shorter substring, or use 'search' for partial matches."
+        assert "add-task --category" not in err["hint"]
+
+    def test_show_category_substring_gets_hint_too(self, org_dir):
+        # find-task is shared, so `show` gets the category-aware hint as well
+        stdout, stderr, rc = run_cli("--json", "show", "Holiday Trip", org_dir=org_dir)
+        assert rc == 1
+        err = self._json_error(stderr)
+        assert 'No task found matching "Holiday Trip"' in err["error"]
+        assert "category heading, not a task" in err["hint"]
+        assert 'add-task --category "Travel/Holiday Trip"' in err["hint"]
+
+
+# ===========================================================================
 # 5. add-subtask: no extra blank lines
 # ===========================================================================
 
