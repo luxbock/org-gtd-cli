@@ -3337,67 +3337,138 @@ Task lines include (file) for source identification."
 ;; Batch mode
 ;; ══════════════════════════════════════════════════════════════════════════════
 
+(defun org-gtd-cli/batch--parse-items (json-str)
+  "Parse JSON-STR as the batch input array, or error out loudly.
+Returns a list of items.  Invalid JSON or a non-array input emits an
+error (JSON error object in json-mode) and exits 1."
+  (let ((parsed (condition-case err
+                    (json-parse-string json-str :object-type 'alist :array-type 'array)
+                  (json-parse-error
+                   (org-gtd-cli/error "Error: invalid JSON input: %s" (error-message-string err))
+                   (kill-emacs 1)))))
+    ;; A top-level JSON object also parses to a list with :array-type 'list,
+    ;; so parse arrays as vectors to tell the two apart reliably.
+    (unless (vectorp parsed)
+      (org-gtd-cli/error "Error: expected a JSON array of batch items")
+      (kill-emacs 1))
+    (append parsed nil)))
+
+(defun org-gtd-cli/batch--run-item (idx thunk)
+  "Run THUNK (one batch item) with error isolation.
+Intercepts `kill-emacs' and `message' so a failing item can neither kill
+the batch process nor leak output, and converts failures into per-item
+error result alists.  Returns (RESULT . SUCCESS-P)."
+  (let ((item-error nil)
+        (item-exit-code nil))
+    (cl-letf (((symbol-function 'kill-emacs)
+               (lambda (&optional code)
+                 (setq item-exit-code (or code 0))
+                 (throw 'org-gtd-cli-batch-item nil)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (when fmt
+                   (setq item-error (apply #'format fmt args))))))
+      (condition-case err
+          (let ((result (catch 'org-gtd-cli-batch-item
+                          (funcall thunk))))
+            (cond
+             (result
+              ;; The thunk returned a result alist directly
+              (cons result t))
+             ((and item-exit-code (> item-exit-code 0))
+              ;; kill-emacs with non-zero = failure
+              (cons `((index . ,idx) (success . :false)
+                      (error . ,(or item-error "Command failed")))
+                    nil))
+             (t
+              ;; kill-emacs 0 but no result alist — shouldn't happen now
+              ;; that batch-one delegates (the delegate shim intercepts
+              ;; kill-emacs), but keep as a success fallback.
+              (cons `((index . ,idx) (success . t)) t))))
+        (error
+         (cons `((index . ,idx) (success . :false)
+                 (error . ,(error-message-string err)))
+               nil))))))
+
+(defun org-gtd-cli/batch--output (command results succeeded failed)
+  "Emit the batch JSON response for COMMAND and exit.
+RESULTS is the reversed per-item result list; SUCCEEDED/FAILED are
+counts.  Exits 0 when at least one item succeeded, 1 otherwise."
+  (org-gtd-cli/output
+   `((version . 1)
+     (command . ,command)
+     (batch . t)
+     (results . ,(apply #'vector (nreverse results)))
+     (summary . ((total . ,(+ succeeded failed))
+                 (succeeded . ,succeeded)
+                 (failed . ,failed)))))
+  (kill-emacs (if (> succeeded 0) 0 1)))
+
 (defun org-gtd-cli/batch (command json-str &optional shared-arg)
   "Execute COMMAND in batch mode over items in JSON-STR.
 SHARED-ARG is a shared parameter (e.g. parent heading for add-subtask,
 category for refile).  JSON-STR is a JSON array.
 
 Outputs a JSON batch response with per-item results."
-  (let* ((items (condition-case err
-                    (json-parse-string json-str :object-type 'alist :array-type 'list)
-                  (json-parse-error
-                   (org-gtd-cli/error "Error: invalid JSON input: %s" (error-message-string err))
-                   (kill-emacs 1))))
-         (results '())
-         (succeeded 0)
-         (failed 0)
-         (idx 0))
+  (let ((items (org-gtd-cli/batch--parse-items json-str))
+        (results '())
+        (succeeded 0)
+        (failed 0)
+        (idx 0))
     (dolist (item items)
-      (let ((item-error nil)
-            (item-exit-code nil))
-        (cl-letf (((symbol-function 'kill-emacs)
-                   (lambda (&optional code)
-                     (setq item-exit-code (or code 0))
-                     (throw 'org-gtd-cli-batch-item nil)))
-                  ((symbol-function 'message)
-                   (lambda (fmt &rest args)
-                     (when fmt
-                       (setq item-error (apply #'format fmt args))))))
-          (condition-case err
-              (let ((result (catch 'org-gtd-cli-batch-item
-                              (org-gtd-cli/batch-one command item shared-arg idx))))
-                (cond
-                 (result
-                  ;; batch-one returned a result alist directly
-                  (push result results)
-                  (cl-incf succeeded))
-                 ((and item-exit-code (> item-exit-code 0))
-                  ;; kill-emacs with non-zero = failure
-                  (push `((index . ,idx) (success . :false)
-                          (error . ,(or item-error "Command failed")))
-                        results)
-                  (cl-incf failed))
-                 (t
-                  ;; kill-emacs 0 but no result alist — shouldn't happen now
-                  ;; that batch-one delegates (the delegate shim intercepts
-                  ;; kill-emacs), but keep as a success fallback.
-                  (push `((index . ,idx) (success . t)) results)
-                  (cl-incf succeeded))))
-            (error
-             (push `((index . ,idx) (success . :false)
-                     (error . ,(error-message-string err)))
-                   results)
-             (cl-incf failed)))))
+      (pcase-let ((`(,result . ,ok)
+                   (org-gtd-cli/batch--run-item
+                    idx (lambda ()
+                          (org-gtd-cli/batch-one command item shared-arg idx)))))
+        (push result results)
+        (if ok (cl-incf succeeded) (cl-incf failed)))
       (cl-incf idx))
-    (org-gtd-cli/output
-     `((version . 1)
-       (command . ,command)
-       (batch . t)
-       (results . ,(apply #'vector (nreverse results)))
-       (summary . ((total . ,(+ succeeded failed))
-                   (succeeded . ,succeeded)
-                   (failed . ,failed)))))
-    (kill-emacs (if (> succeeded 0) 0 1))))
+    (org-gtd-cli/batch--output command results succeeded failed)))
+
+(defun org-gtd-cli/batch-mixed (json-str)
+  "Execute heterogeneous batch items from JSON-STR (the `batch' subcommand).
+JSON-STR is a JSON array of {\"command\": NAME, \"args\": {...}} objects.
+Each item's command is validated and dispatched through
+`org-gtd-cli/batch-one', with the same per-item error isolation as
+`org-gtd-cli/batch' — an unknown command or failing item yields a
+per-item error result without aborting the rest.
+
+Commands that take a shared argument in homogeneous batch mode carry it
+per item here: add-subtask items take \"parent\" in args, refile items
+take \"category\" in args.
+
+Outputs a JSON batch response with per-item results."
+  (let ((items (org-gtd-cli/batch--parse-items json-str))
+        (results '())
+        (succeeded 0)
+        (failed 0)
+        (idx 0))
+    (dolist (item items)
+      (pcase-let ((`(,result . ,ok)
+                   (org-gtd-cli/batch--run-item
+                    idx
+                    (lambda ()
+                      (let ((command (org-gtd-cli/batch--field item 'command))
+                            (item-args (org-gtd-cli/batch--field item 'args)))
+                        (unless (stringp command)
+                          (error "Missing required field: command"))
+                        (unless (listp item-args)
+                          (error "Field \"args\" must be a JSON object"))
+                        (let ((shared-arg
+                               (pcase command
+                                 ("add-subtask"
+                                  (org-gtd-cli/batch--required
+                                   item-args "parent" 'parent))
+                                 ("refile"
+                                  (org-gtd-cli/batch--required
+                                   item-args "category" 'category))
+                                 (_ nil))))
+                          (org-gtd-cli/batch-one command item-args
+                                                 shared-arg idx)))))))
+        (push result results)
+        (if ok (cl-incf succeeded) (cl-incf failed)))
+      (cl-incf idx))
+    (org-gtd-cli/batch--output "batch" results succeeded failed)))
 
 (defun org-gtd-cli/batch--field (item &rest keys)
   "Return the first present field among KEYS in batch ITEM.

@@ -6,6 +6,7 @@ This script parses arguments and calls Emacs in batch mode.
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -650,6 +651,11 @@ Modifying:
   append-body       Append text to task body
   set-body          Replace task body
 
+Batch:
+  batch             Run many commands in one call (JSON array of
+                    {"command", "args"} objects on stdin)
+                    Homogeneous alternative: --batch <subcommand>
+
 Maintenance:
   archive           Archive completed tasks
   delete            Delete a task (exact match, no projects)
@@ -673,7 +679,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     parser.add_argument("--json", action="store_true",
                         help="Output structured JSON instead of human-readable text")
     parser.add_argument("--batch", action="store_true",
-                        help="Read JSON array from stdin, execute items in one process")
+                        help="With a subcommand: read a JSON array of items from "
+                             "stdin, run them all in one process (for mixed "
+                             "commands, see the 'batch' subcommand)")
     sub = parser.add_subparsers(dest="command")
 
     # --- Querying ---
@@ -938,6 +946,45 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_get_session_ids)
 
+    # --- Batch ---
+
+    p = sub.add_parser(
+        "batch",
+        help="Run many commands in one call (JSON array on stdin)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""\
+Run several commands in one Emacs process.
+
+stdin: JSON array of {"command": NAME, "args": {...}} objects.
+Supported commands: add-event, add-session-id, add-subtask, add-task,
+add-tags, delete, refile, set-done, set-tags, show.
+
+Args use the same field names as --batch items:
+  add-task        title (required), body, tags, schedule, deadline,
+                  priority, file, category, state
+  add-subtask     parent (required), title (required), body, tags,
+                  schedule, deadline, priority, state
+  add-event       title (required), date (required), time, tag, file,
+                  end_date
+  refile          heading (required), category (required)
+  set-done        heading (required)
+  delete          heading (required)
+  show            heading (required)
+  set-tags        heading (required), tags
+  add-tags        heading (required), tags (required)
+  add-session-id  heading (required), session_id (required)
+
+Output: JSON with one result per input item, in order, plus a summary
+(same shape as --batch <subcommand>). A failing item does not abort
+the rest. Exit 0 if at least one item succeeded, 1 otherwise.
+
+Example:
+  echo '[{"command": "add-task", "args": {"title": "Buy milk"}},
+         {"command": "set-done", "args": {"heading": "Call plumber"}}]' \\
+    | org-gtd-cli --json batch
+""")
+    p.set_defaults(func=cmd_batch_mixed)
+
     # --- Maintenance ---
 
     p = sub.add_parser("archive", help="Archive completed tasks")
@@ -976,6 +1023,42 @@ BATCH_COMMANDS = {
 }
 
 
+def batch_input_error(msg: str, json_mode: bool) -> int:
+    """Print a batch input error to stderr (JSON error object in --json mode).
+
+    Returns 1 so callers can `return batch_input_error(...)`.
+    """
+    if json_mode:
+        print(json.dumps({"error": msg}), file=sys.stderr)
+    else:
+        print(f"Error: {msg}", file=sys.stderr)
+    return 1
+
+
+def read_batch_stdin(json_mode: bool):
+    """Read and validate the JSON array on stdin for batch modes.
+
+    Returns the parsed list, or None after printing an error (callers
+    must exit 1).
+    """
+    if sys.stdin.isatty():
+        batch_input_error("batch mode requires a JSON array on stdin", json_mode)
+        return None
+    json_str = sys.stdin.read().strip()
+    if not json_str:
+        batch_input_error("empty stdin (expected a JSON array)", json_mode)
+        return None
+    try:
+        items = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        batch_input_error(f"invalid JSON on stdin: {e}", json_mode)
+        return None
+    if not isinstance(items, list):
+        batch_input_error("expected a JSON array of batch items", json_mode)
+        return None
+    return items
+
+
 def cmd_batch(args):
     """Handle --batch mode: read JSON array from stdin, execute in one Emacs process."""
     command = args.command
@@ -983,14 +1066,14 @@ def cmd_batch(args):
         print(f"Error: --batch is not supported for '{command}'", file=sys.stderr)
         return 1
 
-    if sys.stdin.isatty():
-        print("Error: --batch requires JSON input on stdin", file=sys.stderr)
+    items = read_batch_stdin(args.json)
+    if items is None:
         return 1
-
-    json_str = sys.stdin.read().strip()
-    if not json_str:
-        print("Error: empty stdin (expected JSON array)", file=sys.stderr)
-        return 1
+    for i, item in enumerate(items):
+        if not isinstance(item, (str, dict)):
+            return batch_input_error(
+                f"item {i}: expected a string or object, got {type(item).__name__}",
+                args.json)
 
     # Shared args for commands that need them
     shared_arg = None
@@ -1006,7 +1089,29 @@ def cmd_batch(args):
             return 1
 
     expr = (f'(org-gtd-cli/batch {to_elisp(command)} '
-            f'{to_elisp(json_str)} {to_elisp(shared_arg)})')
+            f'{to_elisp(json.dumps(items))} {to_elisp(shared_arg)})')
+    return run_elisp(expr, json_mode=True)
+
+
+def cmd_batch_mixed(args):
+    """Handle the `batch` subcommand: per-item commands from a JSON array on stdin."""
+    items = read_batch_stdin(args.json)
+    if items is None:
+        return 1
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            return batch_input_error(
+                f'item {i}: expected an object with "command" and "args"',
+                args.json)
+        command = item.get("command")
+        if not isinstance(command, str) or not command:
+            return batch_input_error(
+                f'item {i}: missing required field "command"', args.json)
+        if "args" in item and not isinstance(item["args"], dict):
+            return batch_input_error(
+                f'item {i}: "args" must be a JSON object', args.json)
+
+    expr = f'(org-gtd-cli/batch-mixed {to_elisp(json.dumps(items))})'
     return run_elisp(expr, json_mode=True)
 
 
@@ -1015,6 +1120,14 @@ def main():
     args = parser.parse_args()
 
     if not args.command:
+        if args.batch:
+            batch_input_error(
+                "--batch requires a subcommand. Use 'org-gtd-cli batch' "
+                "(per-item {\"command\", \"args\"} objects on stdin) or "
+                "'org-gtd-cli --batch <subcommand>' (one command, "
+                "homogeneous items on stdin)",
+                args.json)
+            sys.exit(1)
         parser.print_help()
         sys.exit(0)
 
@@ -1023,8 +1136,9 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    # Handle --batch mode
-    if getattr(args, 'batch', False):
+    # Handle --batch mode (the `batch` subcommand dispatches normally;
+    # a redundant --batch flag on it is ignored)
+    if args.batch and args.command != "batch":
         rc = cmd_batch(args)
         sys.exit(rc)
 

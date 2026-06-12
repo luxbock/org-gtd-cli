@@ -4266,6 +4266,34 @@ def run_batch(command, items_json, *extra_args, org_dir):
     return data, result.stderr, result.returncode
 
 
+def run_batch_mixed(items, *, org_dir, json_flag=True, stdin=None):
+    """Run org-gtd-cli [--json] batch with JSON on stdin.
+
+    `items` is serialized to JSON unless raw `stdin` text is given.
+    Returns (data, stderr, returncode).
+    """
+    env = os.environ.copy()
+    env["ORG_DIRECTORY"] = str(org_dir) + "/"
+    env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+    env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+    cmd = ["python3", str(CLI_SCRIPT)]
+    if json_flag:
+        cmd.append("--json")
+    cmd.append("batch")
+    payload = json.dumps(items) if stdin is None else stdin
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, env=env,
+        input=payload, timeout=30,
+    )
+    data = None
+    if result.stdout.strip():
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            pass
+    return data, result.stderr, result.returncode
+
+
 class TestBatch:
     """Tests for --batch mode."""
 
@@ -4674,6 +4702,282 @@ class TestBatchDelegation:
         assert r["success"] is False
         assert "No task found matching" in r["error"]
         assert not r["error"].lstrip().startswith("{")
+
+
+class TestBatchMixed:
+    """Tests for the `batch` subcommand (per-item commands on stdin)."""
+
+    def test_heterogeneous_happy_path(self, org_dir):
+        """One call mixing add-task, set-done, and add-tags."""
+        items = [
+            {"command": "add-task",
+             "args": {"title": "Mixed batch task", "tags": "work"}},
+            {"command": "set-done",
+             "args": {"heading": "Write quarterly report"}},
+            {"command": "add-tags",
+             "args": {"heading": "Buy a small UPS", "tags": "urgent"}},
+        ]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        assert data["command"] == "batch"
+        assert data["batch"] is True
+        assert data["summary"] == {"total": 3, "succeeded": 3, "failed": 0}
+        assert [r["index"] for r in data["results"]] == [0, 1, 2]
+        assert all(r["success"] is True for r in data["results"])
+        assert data["results"][0]["heading"] == "Mixed batch task"
+        assert data["results"][0]["file"] == "inbox.org"
+        assert data["results"][1]["new_state"] == "DONE"
+        assert "urgent" in data["results"][2]["new_tags"]
+        inbox = (org_dir / "inbox.org").read_text()
+        assert "Mixed batch task" in inbox
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "** DONE Write quarterly report" in tasks
+        assert "Buy a small UPS for the server :urgent:" in tasks
+
+    def test_unknown_command_is_per_item_error(self, org_dir):
+        """An unknown per-item command fails that item, not the batch."""
+        items = [
+            {"command": "set-done",
+             "args": {"heading": "Write quarterly report"}},
+            {"command": "frobnicate", "args": {"heading": "x"}},
+        ]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0  # one item succeeded
+        assert data["summary"]["succeeded"] == 1
+        assert data["summary"]["failed"] == 1
+        assert data["results"][0]["success"] is True
+        assert data["results"][1]["success"] is False
+        assert data["results"][1]["index"] == 1
+        assert "Unsupported batch command" in data["results"][1]["error"]
+        assert "frobnicate" in data["results"][1]["error"]
+        # The valid item still took effect
+        assert "** DONE Write quarterly report" in (org_dir / "tasks.org").read_text()
+
+    def test_add_subtask_per_item_parent(self, org_dir):
+        """add-subtask items carry their own parent in args."""
+        items = [
+            {"command": "add-subtask",
+             "args": {"parent": "Prepare onboarding guide",
+                      "title": "Mixed subtask A"}},
+            {"command": "add-subtask",
+             "args": {"parent": "Improve monitoring",
+                      "title": "Mixed subtask B", "state": "NEXT"}},
+        ]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+        assert data["results"][0]["parent"] == "Prepare onboarding guide"
+        assert data["results"][1]["parent"] == "Improve monitoring"
+        tasks = (org_dir / "tasks.org").read_text()
+        # Parents are level 2 and 3 respectively
+        assert "*** TODO Mixed subtask A" in tasks
+        assert "**** NEXT Mixed subtask B" in tasks
+
+    def test_add_subtask_missing_parent_is_per_item_error(self, org_dir):
+        """An add-subtask item without parent fails alone."""
+        items = [
+            {"command": "add-subtask", "args": {"title": "Orphan subtask"}},
+            {"command": "add-task", "args": {"title": "Healthy task"}},
+        ]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 1
+        assert data["results"][0]["success"] is False
+        assert "parent" in data["results"][0]["error"]
+        assert data["results"][1]["success"] is True
+        all_text = "".join(p.read_text() for p in org_dir.glob("*.org"))
+        assert "Orphan subtask" not in all_text
+        assert "Healthy task" in all_text
+
+    def test_refile_per_item_category(self, org_dir):
+        """refile items carry their own category in args."""
+        items = [
+            {"command": "refile",
+             "args": {"heading": "Buy groceries", "category": "Family"}},
+            {"command": "refile",
+             "args": {"heading": "Call the plumber about kitchen sink",
+                      "category": "Shopping"}},
+        ]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+        assert data["results"][0]["target_heading"] == "Family"
+        assert data["results"][1]["target_heading"] == "Shopping"
+        inbox = (org_dir / "inbox.org").read_text()
+        assert "Buy groceries" not in inbox
+        assert "Call the plumber" not in inbox
+        assert_line_before(org_dir / "tasks.org",
+                           "* Family", "Buy groceries")
+        assert_line_before(org_dir / "tasks.org",
+                           "* Shopping", "Call the plumber about kitchen sink")
+
+    def test_works_without_json_flag(self, org_dir):
+        """batch emits the JSON results array even without --json."""
+        items = [{"command": "set-done",
+                  "args": {"heading": "Write quarterly report"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir,
+                                           json_flag=False)
+        assert rc == 0
+        assert data is not None
+        assert data["summary"]["succeeded"] == 1
+
+
+class TestBatchLoudErrors:
+    """--batch / batch input errors must be loud: stderr + exit 1, never
+    generic help, never exit 0."""
+
+    def _run(self, args_list, stdin_text, org_dir):
+        env = os.environ.copy()
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        cmd = ["python3", str(CLI_SCRIPT)] + args_list
+        return subprocess.run(cmd, capture_output=True, text=True, env=env,
+                              input=stdin_text, timeout=30)
+
+    def _assert_loud(self, result):
+        assert result.returncode == 1
+        assert result.stderr.strip() != ""
+        assert "usage:" not in result.stdout  # no generic help dump
+
+    def test_batch_flag_without_subcommand_text(self, org_dir):
+        r = self._run(["--batch"], "", org_dir)
+        self._assert_loud(r)
+        assert "subcommand" in r.stderr
+        assert "org-gtd-cli batch" in r.stderr
+        assert "--batch <subcommand>" in r.stderr
+
+    def test_batch_flag_without_subcommand_json(self, org_dir):
+        r = self._run(["--json", "--batch"], "", org_dir)
+        self._assert_loud(r)
+        err = json.loads(r.stderr.strip())
+        assert "subcommand" in err["error"]
+
+    # --- batch subcommand: malformed stdin ---
+
+    def test_batch_subcommand_empty_stdin(self, org_dir):
+        r = self._run(["batch"], "", org_dir)
+        self._assert_loud(r)
+        assert "empty stdin" in r.stderr
+
+    def test_batch_subcommand_invalid_json(self, org_dir):
+        r = self._run(["--json", "batch"], "this is not json", org_dir)
+        self._assert_loud(r)
+        err = json.loads(r.stderr.strip())
+        assert "invalid JSON" in err["error"]
+
+    def test_batch_subcommand_non_array(self, org_dir):
+        r = self._run(["batch"], '{"command": "set-done", "args": {}}', org_dir)
+        self._assert_loud(r)
+        assert "array" in r.stderr
+
+    def test_batch_subcommand_non_object_item(self, org_dir):
+        r = self._run(["batch"], '["set-done"]', org_dir)
+        self._assert_loud(r)
+        assert "object" in r.stderr
+
+    def test_batch_subcommand_missing_command(self, org_dir):
+        r = self._run(["batch"], '[{"args": {"heading": "x"}}]', org_dir)
+        self._assert_loud(r)
+        assert "command" in r.stderr
+
+    def test_batch_subcommand_args_wrong_type(self, org_dir):
+        r = self._run(
+            ["--json", "batch"],
+            '[{"command": "set-done", "args": "Write quarterly report"}]',
+            org_dir)
+        self._assert_loud(r)
+        err = json.loads(r.stderr.strip())
+        assert "args" in err["error"]
+
+    # --- legacy --batch <subcommand>: malformed stdin ---
+
+    def test_batch_flag_empty_stdin(self, org_dir):
+        r = self._run(["--batch", "set-done"], "", org_dir)
+        self._assert_loud(r)
+        assert "empty stdin" in r.stderr
+
+    def test_batch_flag_non_array(self, org_dir):
+        r = self._run(["--json", "--batch", "set-done"], '{"heading": "x"}',
+                      org_dir)
+        self._assert_loud(r)
+        err = json.loads(r.stderr.strip())
+        assert "array" in err["error"]
+
+    def test_batch_flag_invalid_item_type(self, org_dir):
+        r = self._run(["--batch", "set-done"], '[42]', org_dir)
+        self._assert_loud(r)
+        assert "item 0" in r.stderr
+
+
+class TestBatchAddTaskDeepCategory:
+    """Regression for e058336: batch add-task must insert at the matched
+    category's child level (not hardcoded level 2), and must not swallow
+    following headings as children."""
+
+    def _nest_fixture(self, org_dir):
+        """Extend tasks.org with a level-4 category:
+        Computers (1) > Agents (2) > Projects (3) > agent-vm (4)."""
+        tasks = org_dir / "tasks.org"
+        text = tasks.read_text()
+        assert "** Agents\n" in text
+        text = text.replace(
+            "** Agents\n",
+            "** Agents\n"
+            "*** Projects\n"
+            "**** agent-vm\n"
+            "***** TODO Improve agent-vm logging\n",
+            1,
+        )
+        tasks.write_text(text)
+
+    def _assert_task_at_level_5(self, org_dir, title):
+        tasks_file = org_dir / "tasks.org"
+        tasks = tasks_file.read_text()
+        lineno = line_number_of(tasks_file, title)
+        assert lineno is not None
+        assert get_line(tasks_file, lineno).startswith("***** TODO "), \
+            f"task not at level 5: {get_line(tasks_file, lineno)}"
+        # Inserted inside the agent-vm subtree, after its existing child
+        assert_line_before(tasks_file, "**** agent-vm", title)
+        assert_line_before(tasks_file, "***** TODO Improve agent-vm logging",
+                           title)
+        # The following level-3 sibling heading is intact and NOT swallowed:
+        # it still follows the new task at its original level
+        backups = "*** TODO Set up automated backups for agent workspace"
+        assert backups in tasks
+        assert_line_before(tasks_file, title,
+                           "Set up automated backups for agent workspace")
+
+    def test_batch_subcommand_level4_category(self, org_dir):
+        """New `batch` subcommand: task filed under a level-4 category lands
+        at level 5."""
+        self._nest_fixture(org_dir)
+        items = [{"command": "add-task",
+                  "args": {"title": "Migrate agent-vm to new bridge",
+                           "category": "agent-vm"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["category"] == "Computers/Agents/Projects/agent-vm"
+        self._assert_task_at_level_5(org_dir, "Migrate agent-vm to new bridge")
+
+    def test_batch_flag_level4_category_full_path(self, org_dir):
+        """Old --batch add-task path: same level-4 insertion, via the full
+        category path."""
+        self._nest_fixture(org_dir)
+        data, stderr, rc = run_batch(
+            "add-task",
+            [{"title": "Old-style deep task",
+              "category": "Computers/Agents/Projects/agent-vm"}],
+            org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["category"] == "Computers/Agents/Projects/agent-vm"
+        self._assert_task_at_level_5(org_dir, "Old-style deep task")
 
 
 class TestCorrectiveErrors:
