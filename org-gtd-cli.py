@@ -574,14 +574,10 @@ def cmd_set_property(args):
 
 
 def cmd_agenda_view(args):
-    if args.json:
-        print('{"error": "--json is not supported for agenda-view", '
-              '"hint": "Use agenda or search with --json instead."}',
-              file=sys.stderr)
-        return 1
     key = args.key if args.key else " "
     expr = f'(org-gtd-cli/agenda-view {to_elisp(key)})'
-    return run_elisp(expr)
+    return run_elisp(expr, json_mode=args.json,
+                     full_mode=getattr(args, 'full', False))
 
 
 def cmd_archive(args):
@@ -717,6 +713,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("agenda-view", help="Run a pre-built agenda view")
     p.add_argument("key", nargs="?", default=" ",
                    help="Agenda view key (default: ' ' for full dashboard)")
+    p.add_argument("--full", action="store_true",
+                   help="Include body text in results (--json only)")
     p.set_defaults(func=cmd_agenda_view)
 
     p = sub.add_parser("subtasks", help="List children of a project")

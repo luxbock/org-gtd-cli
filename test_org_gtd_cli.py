@@ -2401,6 +2401,96 @@ class TestAgendaView:
         assert rc == 1
         assert "Unknown agenda view key" in stderr
 
+    # --- JSON output ---
+
+    def test_json_envelope(self, org_dir):
+        """--json agenda-view emits the standard version/command envelope
+        plus a `key` field and a `blocks` array."""
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        assert data["version"] == 1
+        assert data["command"] == "agenda-view"
+        assert data["key"] == " "
+        assert isinstance(data["blocks"], list)
+
+    def test_json_all_blocks_present(self, org_dir):
+        """The full dashboard view emits all 10 blocks from +gtd-core.el's
+        " " custom command, in order, including the leading "Agenda"
+        dated section."""
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0
+        names = [b["name"] for b in data["blocks"]]
+        assert names == [
+            "Agenda",
+            "Next Tasks",
+            "Tasks",
+            "Waiting",
+            "Stuck Projects",
+            "Projects",
+            "Deferred",
+            "Web",
+            "Tasks to Refile",
+            "Tasks to Archive",
+        ]
+
+    def test_json_block_with_results(self, org_dir):
+        """A non-empty block carries task entries with the same field schema
+        as other --json commands (heading, state, tags, file, scheduled,
+        deadline, parent, is_project, properties)."""
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0
+        waiting = next(b for b in data["blocks"] if b["name"] == "Waiting")
+        assert waiting["count"] >= 1
+        assert waiting["count"] == len(waiting["tasks"])
+        task = waiting["tasks"][0]
+        for field in ("heading", "state", "tags", "file", "scheduled",
+                      "deadline", "parent", "is_project", "properties"):
+            assert field in task, f"missing {field} in {task}"
+        assert task["state"] == "WAITING"
+        assert isinstance(task["tags"], list)
+        assert task["file"].endswith(".org")
+
+    def test_json_empty_block(self, org_dir):
+        """An empty block (no matching tasks) still appears with count 0 and
+        an empty tasks array — the fixtures have no Deferred tasks."""
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0
+        deferred = next(b for b in data["blocks"] if b["name"] == "Deferred")
+        assert deferred["count"] == 0
+        assert deferred["tasks"] == []
+
+    def test_json_single_key(self, org_dir):
+        """A single-block view (e.g. 'w' Waiting) emits just that one block
+        and echoes the requested key."""
+        data, stderr, rc = run_cli_json("agenda-view", "w", org_dir=org_dir)
+        assert rc == 0
+        assert data["key"] == "w"
+        assert [b["name"] for b in data["blocks"]] == ["Waiting"]
+
+    def test_json_full_includes_body(self, org_dir):
+        """--full adds a `body` field to each task entry."""
+        data, stderr, rc = run_cli_json(
+            "agenda-view", "t", "--full", org_dir=org_dir)
+        assert rc == 0
+        tasks = data["blocks"][0]["tasks"]
+        assert tasks, "Tasks block should be non-empty in fixtures"
+        assert all("body" in t for t in tasks)
+
+    def test_json_invalid_key(self, org_dir):
+        """--json on an unknown key emits a JSON error object on stderr."""
+        stdout, stderr, rc = run_cli("--json", "agenda-view", "INVALID",
+                                     org_dir=org_dir)
+        assert rc == 1
+        err_data = None
+        for line in stderr.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("{"):
+                err_data = json.loads(line)
+                break
+        assert err_data is not None, f"No JSON error in stderr: {stderr}"
+        assert "Unknown agenda view key" in err_data["error"]
+
 
 # ===========================================================================
 # 41. fix-timestamps
@@ -2955,14 +3045,6 @@ class TestJsonInfrastructure:
                 break
         assert err_data is not None, f"No JSON error found in stderr: {stderr}"
         assert "error" in err_data
-
-    def test_json_rejected_for_agenda_view(self, org_dir):
-        """--json on agenda-view returns error."""
-        stdout, stderr, rc = run_cli("--json", "agenda-view", org_dir=org_dir)
-        assert rc == 1
-        err_data = json.loads(stderr.strip())
-        assert "error" in err_data
-        assert "agenda-view" in err_data["error"]
 
     def test_json_rejected_for_org_timestamp(self, org_dir):
         """--json on org-timestamp returns error."""

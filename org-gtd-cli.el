@@ -3334,10 +3334,94 @@ Refuses to delete projects (tasks with subtasks)."
 ;; Agenda view (uses org-agenda custom commands from gtd-core.el)
 ;; ══════════════════════════════════════════════════════════════════════════════
 
+(defun org-gtd-cli/agenda-task-alist-at-marker (marker)
+  "Build a task alist for the heading at MARKER (an agenda org-hd-marker).
+Returns an alist matching the per-task schema emitted by the `agenda'
+command (heading, state, priority, tags, file, scheduled, deadline,
+parent, is_project, properties), plus `body' when `--full' is set."
+  (let ((src-buf (marker-buffer marker)))
+    (with-current-buffer src-buf
+      (org-with-wide-buffer
+       (goto-char (marker-position marker))
+       (let* ((state (org-get-todo-state))
+              (heading (org-get-heading t t t t))
+              (priority-char (org-gtd-cli/get-explicit-priority))
+              (tags (org-get-tags nil t))
+              (scheduled (org-entry-get nil "SCHEDULED"))
+              (deadline (org-entry-get nil "DEADLINE"))
+              (src-file (buffer-file-name))
+              (rel-file (if src-file
+                            (org-gtd-cli/relative-filename src-file)
+                          "?"))
+              (parent-heading (save-excursion
+                                (if (org-up-heading-safe)
+                                    (org-get-heading t t t t)
+                                  nil)))
+              (is-project (org-gtd-cli/has-todo-children-p))
+              (task `((heading . ,heading)
+                      (state . ,(or state :null))
+                      (priority . ,(or priority-char :null))
+                      (tags . ,(vconcat (mapcar #'identity tags)))
+                      (file . ,rel-file)
+                      (scheduled . ,(or scheduled :null))
+                      (deadline . ,(or deadline :null))
+                      (parent . ,(or parent-heading :null))
+                      (is_project . ,(if is-project t :false))
+                      (properties . ,(org-gtd-cli/properties-at-point)))))
+         (when org-gtd-cli/full-mode
+           (setq task (append task
+                              `((body . ,(or (org-gtd-cli/get-body-at-point)
+                                             :null))))))
+         task)))))
+
+(defun org-gtd-cli/agenda-view-json (cmd-key)
+  "Emit the agenda view for CMD-KEY as JSON, grouped into blocks.
+Each block carries its overriding header name and the task entries beneath
+it (built with `org-gtd-cli/agenda-task-alist-at-marker').  Header lines in
+the agenda buffer are detected via the `org-agenda-structural-header' text
+property that org sets on each block header.  The `agenda' day section (the
+leading dated block of the \" \" view) has no overriding header; its tasks
+accumulate under a block named \"Agenda\"."
+  (let ((blocks '())
+        (cur-name "Agenda")
+        (cur-tasks '()))
+    (cl-flet ((flush ()
+                (when (or cur-tasks (not (equal cur-name "Agenda")))
+                  (push `((name . ,cur-name)
+                          (count . ,(length cur-tasks))
+                          (tasks . ,(apply #'vector (nreverse cur-tasks))))
+                        blocks))))
+      (with-current-buffer org-agenda-buffer
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let ((marker (or (get-text-property (point) 'org-hd-marker)
+                            (get-text-property (point) 'org-marker)))
+                (is-header (get-text-property (point) 'org-agenda-structural-header)))
+            (cond
+             (marker
+              (push (org-gtd-cli/agenda-task-alist-at-marker marker) cur-tasks))
+             (is-header
+              ;; A new block header starts here: flush the previous block,
+              ;; then begin a new one named after this header line.
+              (flush)
+              (setq cur-tasks '())
+              (setq cur-name
+                    (string-trim
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position)))))))
+          (forward-line 1))
+        (flush)))
+    (org-gtd-cli/output
+     `((version . 1)
+       (command . "agenda-view")
+       (key . ,cmd-key)
+       (blocks . ,(apply #'vector (nreverse blocks)))))))
+
 (defun org-gtd-cli/agenda-view (&optional key)
   "Run an org-agenda custom command in batch mode.
 KEY defaults to \" \" (the full GTD dashboard).
-Task lines include (file) for source identification."
+Task lines include (file) for source identification.
+In JSON mode, emits structured blocks via `org-gtd-cli/agenda-view-json'."
   (let ((cmd-key (or key " ")))
     (unless (assoc cmd-key org-agenda-custom-commands)
       (org-gtd-cli/error "Unknown agenda view key: \"%s\"\nAvailable views:" cmd-key)
@@ -3348,24 +3432,26 @@ Task lines include (file) for source identification."
     ;; Build the agenda buffer
     (let ((org-agenda-window-setup 'current-window))
       (org-agenda nil cmd-key))
-    ;; Walk the buffer and print with (file) suffixes on task lines
-    (with-current-buffer org-agenda-buffer
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let* ((marker (or (get-text-property (point) 'org-hd-marker)
-                           (get-text-property (point) 'org-marker)))
-               (line-text (buffer-substring-no-properties
-                           (line-beginning-position) (line-end-position))))
-          (if marker
-              (let* ((src-buf (marker-buffer marker))
-                     (src-file (and src-buf (buffer-file-name src-buf))))
-                (princ (format "%s (%s)\n"
-                               line-text
-                               (if src-file
-                                   (org-gtd-cli/relative-filename src-file)
-                                 "?"))))
-            (princ (format "%s\n" line-text))))
-        (forward-line 1)))
+    (if org-gtd-cli/json-mode
+        (org-gtd-cli/agenda-view-json cmd-key)
+      ;; Walk the buffer and print with (file) suffixes on task lines
+      (with-current-buffer org-agenda-buffer
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let* ((marker (or (get-text-property (point) 'org-hd-marker)
+                             (get-text-property (point) 'org-marker)))
+                 (line-text (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))
+            (if marker
+                (let* ((src-buf (marker-buffer marker))
+                       (src-file (and src-buf (buffer-file-name src-buf))))
+                  (princ (format "%s (%s)\n"
+                                 line-text
+                                 (if src-file
+                                     (org-gtd-cli/relative-filename src-file)
+                                   "?"))))
+              (princ (format "%s\n" line-text))))
+          (forward-line 1))))
     (kill-emacs 0)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
