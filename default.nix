@@ -11,7 +11,12 @@
 }:
 
 let
-  coreFile = ../../home/olli/features/editors/emacs/doom/modules/config/private/+gtd-core.el;
+  # Canonical shared GTD core lives here, with the tool, so this package (and
+  # its standalone subflake, ./flake.nix) is self-contained — no reach into the
+  # Doom tree. Doom's interactive config loads this same file via the repo root
+  # (see +gtd.el). Keep it a real file, never a symlink: Nix copies a symlink
+  # verbatim into the store (dangling), breaking the byte-compile.
+  coreFile = ./+gtd-core.el;
   elispFile = ./org-gtd-cli.el;
   pythonScript = ./org-gtd-cli.py;
 
