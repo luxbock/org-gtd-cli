@@ -24,7 +24,7 @@ import pytest
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 CLI_SCRIPT = Path(__file__).parent / "org-gtd-cli.py"
-CORE_FILE = Path(__file__).parent / "gtd-core.el"
+CORE_FILE = Path(__file__).parent / "+gtd-core.el"
 ELISP_FILE = Path(__file__).parent / "org-gtd-cli.el"
 
 # Fake gcal calendar id used by add-event tests; the real id lives as a

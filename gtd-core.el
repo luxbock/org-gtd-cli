@@ -1,1 +1,0 @@
-../../home/olli/features/editors/emacs/doom/modules/config/private/+gtd-core.el
