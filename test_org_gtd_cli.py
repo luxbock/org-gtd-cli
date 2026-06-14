@@ -2115,6 +2115,70 @@ class TestSetProperty:
         assert rc == 0
         assert ":AGENT_EFFORT:" not in (org_dir / "inbox.org").read_text()
 
+    def test_run_status_valid_values(self, org_dir):
+        """The 5 canonical dwelling-state values are accepted (already uppercase)."""
+        for v in ("RUNNING", "BLOCKED", "REVIEW", "DONE", "FAILED"):
+            data, stderr, rc = run_cli_json(
+                "set-property", "Buy groceries", "--key", "RUN_STATUS",
+                "--value", v, org_dir=org_dir)
+            assert rc == 0, f"{v}: {stderr}"
+            assert data["new_value"] == v
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["properties"]["RUN_STATUS"] == "FAILED"
+
+    def test_run_status_value_normalized_case_insensitive(self, org_dir):
+        """A lowercase variant is accepted and stored as canonical uppercase."""
+        data, _, rc = run_cli_json(
+            "set-property", "Buy groceries", "--key", "RUN_STATUS",
+            "--value", "running", org_dir=org_dir)
+        assert rc == 0
+        assert data["new_value"] == "RUNNING"
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["properties"]["RUN_STATUS"] == "RUNNING"
+
+    def test_run_status_invalid_value_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-property", "Buy groceries", "--key", "RUN_STATUS",
+            "--value", "PENDING", org_dir=org_dir)
+        assert rc == 1
+        assert "invalid value" in stderr.lower()
+        # The error lists all 5 canonical allowed values.
+        assert "RUNNING, BLOCKED, REVIEW, DONE, FAILED" in stderr
+        # Nothing written.
+        assert ":RUN_STATUS:" not in (org_dir / "inbox.org").read_text()
+
+    def test_beads_epic_freeform_roundtrip(self, org_dir):
+        """BEADS_EPIC is a free-form pointer property — not enum-validated,
+        accepts an arbitrary bead id through the generic writer path."""
+        data, stderr, rc = run_cli_json(
+            "set-property", "Buy groceries", "--key", "BEADS_EPIC",
+            "--value", "bd-42", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["new_value"] == "bd-42"
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["properties"]["BEADS_EPIC"] == "bd-42"
+        # --clear removes it.
+        data, _, rc = run_cli_json(
+            "set-property", "Buy groceries", "--key", "BEADS_EPIC",
+            "--clear", org_dir=org_dir)
+        assert rc == 0
+        assert data["new_value"] is None
+        assert ":BEADS_EPIC:" not in (org_dir / "inbox.org").read_text()
+
+    def test_run_status_and_beads_epic_both_in_show_json(self, org_dir):
+        """show --json surfaces both properties in the `properties` object."""
+        run_cli("set-property", "Buy groceries", "--key", "RUN_STATUS",
+                "--value", "running", org_dir=org_dir)
+        run_cli("set-property", "Buy groceries", "--key", "BEADS_EPIC",
+                "--value", "bd-7", org_dir=org_dir)
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["properties"]["RUN_STATUS"] == "RUNNING"
+        assert data["properties"]["BEADS_EPIC"] == "bd-7"
+
 
 class TestTaskProperties:
     """The generic `properties' JSON field exposes the :PROPERTIES: drawer

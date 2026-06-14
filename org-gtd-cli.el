@@ -3013,14 +3013,17 @@ TAGS-CSV is a comma-separated string of tags to remove."
 use the dedicated command (e.g. set-schedule, set-deadline, set-tags) instead.")
 
 (defconst org-gtd-cli/property-enums
-  '(("AGENT_EFFORT" . ("light" "standard" "deep")))
+  '(("AGENT_EFFORT" . ("light" "standard" "deep"))
+    ("RUN_STATUS" . ("RUNNING" "BLOCKED" "REVIEW" "DONE" "FAILED")))
   "Alist of upcased PROPERTY-NAME -> list of allowed (canonical) values.
 `set-property' rejects out-of-enum values for these keys (case-insensitive
 match) and stores the canonical form. This keeps the writer generic while
 giving known enum properties value-level validation. AGENT_EFFORT is the
 per-task model-tier hint on @agent leaf tasks (light/standard/deep); the
 tier->model mapping is deferred to the consuming SKILL — see
-~/Nextcloud/org/CLAUDE.md.")
+~/Nextcloud/org/CLAUDE.md. RUN_STATUS is the agent-orchestration job state
+machine value on VPA-owned @agent job tasks (canonical uppercase); see the
+\"Job state machine\" section of notes/decisions/agent-orchestration.md.")
 
 (defun org-gtd-cli/set-property (substring key value &optional clear index dry-run)
   "Set or clear a single org PROPERTY on an existing task.
