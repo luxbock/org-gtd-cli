@@ -24,8 +24,20 @@ EMACSCLIENT_BIN = "emacsclient"
 # Daemon mode: opt-in via ORG_GTD_CLI_DAEMON=1
 DAEMON_ENABLED = os.environ.get("ORG_GTD_CLI_DAEMON") == "1"
 _TMPDIR = os.environ.get("TMPDIR", "/tmp")
+# Daemon state (socket + user-emacs-dir) MUST be per-user. On a shared host
+# (e.g. convox, where both `olli` and `agent` reach this code) a path that is
+# not namespaced by uid lets whoever runs first create a 0700 dir that wedges
+# the other user's daemon: os.path.exists() reads the resulting EACCES as
+# "absent", and the wrapper then either latches onto a foreign, stale daemon or
+# silently fails to bind. Root the state at XDG_RUNTIME_DIR (/run/user/$UID —
+# already per-user and auto-cleaned on logout) when set, else a uid-suffixed
+# dir under TMPDIR. Either way the dir name carries our uid.
+_DAEMON_BASE = os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR") or _TMPDIR,
+    f"org-gtd-cli-{os.getuid()}",
+)
 # Socket dir needs 700 permissions (Emacs server security requirement)
-_SOCKET_DIR = os.path.join(_TMPDIR, "org-gtd-cli")
+_SOCKET_DIR = _DAEMON_BASE
 SOCKET_PATH = os.path.join(_SOCKET_DIR, "server")
 
 
@@ -136,12 +148,35 @@ def _run_batch(expr: str, json_mode: bool = False, full_mode: bool = False) -> i
         return result.returncode
 
 
+def _socket_is_ours() -> bool:
+    """True iff the daemon socket exists and is owned by the current user.
+
+    A bare os.path.exists() treats an EACCES (a foreign-owned 0700 dir
+    squatting our path) as "absent", after which the wrapper wedges trying to
+    bind a socket it has no permission to create. Checking st_uid makes reuse
+    safe and the failure mode loud instead of silent.
+    """
+    try:
+        return os.stat(SOCKET_PATH).st_uid == os.getuid()
+    except OSError:
+        return False
+
+
 def _ensure_daemon() -> None:
     """Start the Emacs daemon if it's not already running."""
-    if os.path.exists(SOCKET_PATH):
+    if _socket_is_ours():
         return
+    # If our per-uid dir somehow exists but is owned by another user, refuse
+    # rather than silently fall through to a daemon we cannot drive.
+    try:
+        if os.stat(_SOCKET_DIR).st_uid != os.getuid():
+            print(f"Error: daemon dir {_SOCKET_DIR} is owned by another user; "
+                  "refusing to reuse a foreign daemon", file=sys.stderr)
+            return
+    except FileNotFoundError:
+        pass
     os.makedirs(_SOCKET_DIR, mode=0o700, exist_ok=True)
-    user_emacs_dir = os.path.join(_TMPDIR, "org-gtd-cli-emacs.d")
+    user_emacs_dir = os.path.join(_DAEMON_BASE, "emacs.d")
     os.makedirs(user_emacs_dir, exist_ok=True)
     cmd = [
         EMACS_BIN, "--daemon", "-q",
@@ -154,7 +189,7 @@ def _ensure_daemon() -> None:
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Wait for socket to appear
     for _ in range(200):  # 200 * 50ms = 10s
-        if os.path.exists(SOCKET_PATH):
+        if _socket_is_ours():
             return
         time.sleep(0.05)
     print("Error: Emacs daemon failed to start (timeout)", file=sys.stderr)
@@ -202,7 +237,7 @@ def _run_daemon(expr: str, json_mode: bool = False, full_mode: bool = False, *, 
             # (the retry allocates its own output dir)
             try:
                 os.unlink(SOCKET_PATH)
-            except FileNotFoundError:
+            except OSError:
                 pass
             return _run_daemon(expr, json_mode, full_mode, _retried=True)
 

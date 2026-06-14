@@ -4047,7 +4047,7 @@ class TestDaemonSaveChatter:
 
     @staticmethod
     def _kill_daemon(daemon_tmp):
-        socket = os.path.join(daemon_tmp, "org-gtd-cli", "server")
+        socket = os.path.join(daemon_tmp, f"org-gtd-cli-{os.getuid()}", "server")
         if os.path.exists(socket):
             subprocess.run(
                 ["emacsclient", "--socket-name", socket, "--eval", "(kill-emacs)"],
@@ -4058,7 +4058,10 @@ class TestDaemonSaveChatter:
         no 'Saving file ...' chatter on either stream. Fails pre-fix."""
         daemon_tmp = tmp_path / "daemon-home"
         daemon_tmp.mkdir()
-        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": str(daemon_tmp)}
+        # XDG_RUNTIME_DIR="" forces the CLI's per-uid socket dir to root at our
+        # isolated TMPDIR instead of the runner's real /run/user/$UID.
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": str(daemon_tmp),
+               "XDG_RUNTIME_DIR": ""}
         try:
             stdout, stderr, rc = run_cli(
                 "--json", "set-body", "Buy groceries", "daemon chatter test",
@@ -4084,10 +4087,10 @@ class TestDaemonRobustness:
     2. Output race: the Python wrapper used fixed stdout/stderr/exit paths in
        $TMPDIR, so two concurrent invocations clobbered each other's results.
 
-    The daemon socket lives at $TMPDIR/org-gtd-cli/server, and unix socket
-    paths have a ~107-char limit — pytest's tmp_path is too deep, so these
-    tests build a short-lived daemon TMPDIR directly under the session tmpdir
-    (e.g. /tmp/claude) instead.
+    The daemon socket lives at $TMPDIR/org-gtd-cli-$UID/server (with
+    XDG_RUNTIME_DIR unset), and unix socket paths have a ~107-char limit —
+    pytest's tmp_path is too deep, so these tests build a short-lived daemon
+    TMPDIR directly under the session tmpdir (e.g. /tmp/claude) instead.
     """
 
     @staticmethod
@@ -4096,7 +4099,7 @@ class TestDaemonRobustness:
 
     @staticmethod
     def _kill_daemon(daemon_tmp):
-        socket = os.path.join(daemon_tmp, "org-gtd-cli", "server")
+        socket = os.path.join(daemon_tmp, f"org-gtd-cli-{os.getuid()}", "server")
         if os.path.exists(socket):
             try:
                 subprocess.run(
@@ -4116,7 +4119,8 @@ class TestDaemonRobustness:
         save (simulated by hammering the mtime during the call). Pre-fix this
         hit Emacs's interactive supersession prompts and hung forever."""
         daemon_tmp = self._make_daemon_tmp()
-        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp}
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
         inbox = org_dir / "inbox.org"
         try:
             # Open/mutate the task so the daemon holds a live inbox.org buffer.
@@ -4166,7 +4170,8 @@ class TestDaemonRobustness:
         their own stdout and exit code. Pre-fix, fixed result-file paths in
         $TMPDIR let one call read (or truncate) the other's output."""
         daemon_tmp = self._make_daemon_tmp()
-        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp}
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
         try:
             # Warm up so both concurrent calls reuse one daemon.
             stdout, stderr, rc = run_cli(
@@ -4215,7 +4220,8 @@ class TestDaemonRobustness:
         result files with the next queued call's output while the previous
         caller was still reading them."""
         daemon_tmp = self._make_daemon_tmp()
-        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp}
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
         try:
             # Warm up so all concurrent calls reuse one daemon.
             stdout, stderr, rc = run_cli(
