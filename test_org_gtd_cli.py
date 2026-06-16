@@ -1393,6 +1393,48 @@ class TestAddNote:
         assert "empty filename slug" in stderr
         assert not (org_dir / "agent-notes" / ".org").exists()
 
+    @staticmethod
+    def _run_with_stdin(args, input_text, org_dir):
+        env = os.environ.copy()
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        cmd = ["python3", str(CLI_SCRIPT)] + list(args)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=env,
+            input=input_text, timeout=30)
+        return result.stdout, result.stderr, result.returncode
+
+    def test_piped_body_rejected_loudly(self, org_dir):
+        """add-note has no body channel — a piped body must error loudly and
+        NOT create the note (silently dropping it would lose data)."""
+        stdout, stderr, rc = self._run_with_stdin(
+            ["add-note", "Note with piped body"],
+            "This body would be silently lost.\n", org_dir=org_dir)
+        assert rc == 1
+        assert "does not accept a body" in stderr
+        note_file = org_dir / "agent-notes" / "note-with-piped-body.org"
+        assert not note_file.exists(), \
+            f"note should NOT be created when a body is piped, found {note_file}"
+
+    def test_piped_body_rejected_json_on_stdout(self, org_dir):
+        """--json: the rejection error object is on stdout (the --json contract)."""
+        stdout, stderr, rc = self._run_with_stdin(
+            ["--json", "add-note", "Json piped body note"],
+            "lost body\n", org_dir=org_dir)
+        assert rc == 1
+        data = json.loads(stdout.strip().splitlines()[-1])
+        assert "does not accept a body" in data["error"]
+        assert not (org_dir / "agent-notes" / "json-piped-body-note.org").exists()
+
+    def test_empty_stdin_still_creates_note(self, org_dir):
+        """Empty/closed stdin (the common no-pipe case) is fine — the guard
+        only fires on non-empty piped content, so the note is still created."""
+        stdout, stderr, rc = self._run_with_stdin(
+            ["add-note", "Empty stdin note"], "", org_dir=org_dir)
+        assert rc == 0, f"stderr: {stderr}"
+        assert (org_dir / "agent-notes" / "empty-stdin-note.org").exists()
+
 
 # ===========================================================================
 # 22. append-body

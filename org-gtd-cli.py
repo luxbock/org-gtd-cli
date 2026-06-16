@@ -438,6 +438,22 @@ def cmd_add_note(args):
     if not title:
         print("Error: TITLE is required (positional or --title)", file=sys.stderr)
         return 1
+    # add-note writes only a structured skeleton (title + empty sections); it
+    # has no body channel. Silently dropping a piped body loses data, so reject
+    # it loudly instead of ignoring it. Only read when stdin is an actual
+    # pipe/redirect (not a TTY); empty/closed stdin reads as "" and is fine.
+    if not sys.stdin.isatty():
+        piped = sys.stdin.read()
+        if piped.strip():
+            msg = ("add-note does not accept a body on stdin — it writes only "
+                   "a title + section skeleton, so the piped content would be "
+                   "lost. The note was NOT created. Remove the pipe, then edit "
+                   "the created note file directly to add content.")
+            if args.json:
+                print(json.dumps({"error": msg}))
+            else:
+                print(f"Error: {msg}", file=sys.stderr)
+            return 1
     expr = (f'(org-gtd-cli/add-note {to_elisp(title)} '
             f'{to_elisp(args.link_task)} {to_elisp(args.tags)} '
             f'{to_elisp(args.sections)})')
