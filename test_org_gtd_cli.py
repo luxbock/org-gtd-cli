@@ -3168,6 +3168,146 @@ class TestRejectLiteralDash:
         assert "--body-file" in stderr
 
 
+class TestBodyFlagOnBodyCommands:
+    """--body on append-body / set-body (parity with add-task/add-subtask).
+
+    Regression: argparse allow_abbrev used to let --body prefix-match
+    --body-file on these two subcommands, so `--body "text"` was silently
+    treated as a filename and raised FileNotFoundError. These subparsers now
+    carry an explicit --body and allow_abbrev=False.
+    """
+
+    def _body_of(self, org_dir, substr):
+        stdout, stderr, rc = run_cli("--json", "show", substr, org_dir=org_dir)
+        assert rc == 0, stderr
+        return json.loads(stdout)["body"] or ""
+
+    def test_append_body_with_body_flag(self, org_dir):
+        """append-body SUBSTR --body TEXT appends, no FileNotFoundError."""
+        stdout, stderr, rc = run_cli(
+            "append-body", "Buy a small UPS", "--body", "Flag-appended note",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        assert "Flag-appended note" in self._body_of(org_dir, "Buy a small UPS")
+
+    def test_set_body_with_body_flag(self, org_dir):
+        """set-body SUBSTR --body TEXT replaces the body."""
+        stdout, stderr, rc = run_cli(
+            "set-body", "Buy a small UPS", "--body", "Flag-set replacement",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        body = self._body_of(org_dir, "Buy a small UPS")
+        assert "Flag-set replacement" in body
+        assert "USB UPS with auto-shutdown" not in body
+
+    def test_set_body_with_empty_body_flag_clears(self, org_dir):
+        """set-body SUBSTR --body "" clears the body."""
+        stdout, stderr, rc = run_cli(
+            "set-body", "Buy anti-escape coating", "--body", "",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        text = (org_dir / "tasks.org").read_text()
+        assert "Messor barbarus can climb" not in text
+        assert "PTFE anti-escape" not in text
+        assert "[2026-03-12 Thu]" in text
+
+    def test_append_body_abbrev_no_longer_matches_body_file(self, org_dir):
+        """With allow_abbrev=False, --bod must NOT prefix-match --body-file.
+
+        It should be a clean argparse error (exit 2), not a FileNotFoundError.
+        """
+        stdout, stderr, rc = run_cli(
+            "append-body", "Buy a small UPS", "--bod", "x",
+            org_dir=org_dir,
+        )
+        assert rc == 2, (stdout, stderr)
+        assert "FileNotFoundError" not in stderr
+        assert "unrecognized arguments" in stderr
+
+    def test_set_body_abbrev_no_longer_matches_body_file(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-body", "Buy a small UPS", "--bod", "x",
+            org_dir=org_dir,
+        )
+        assert rc == 2, (stdout, stderr)
+        assert "FileNotFoundError" not in stderr
+        assert "unrecognized arguments" in stderr
+
+    def test_append_body_flag_with_id(self, org_dir):
+        """--body works together with --id addressing."""
+        stdout, stderr, rc = run_cli(
+            "append-body", "--id", "test-id-capture-fix",
+            "--body", "Body via id-and-flag",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        assert "Body via id-and-flag" in (org_dir / "tasks.org").read_text()
+
+    def test_set_body_flag_with_id(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-body", "--id", "test-id-capture-fix",
+            "--body", "Replaced via id-and-flag",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        text = (org_dir / "tasks.org").read_text()
+        assert "Replaced via id-and-flag" in text
+        assert "existing Emacs instance" not in text
+
+    def test_append_body_flag_rejects_dash(self, org_dir):
+        """--body - is rejected the same way the positional dash is."""
+        stdout, stderr, rc = run_cli(
+            "append-body", "Buy a small UPS", "--body", "-",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        assert "--body-file" in stderr
+
+    def test_set_body_flag_rejects_dash(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-body", "Buy a small UPS", "--body", "-",
+            org_dir=org_dir,
+        )
+        assert rc == 1
+        assert "--body-file" in stderr
+
+    def test_append_body_flag_beats_positional(self, org_dir):
+        """When both --body and positional TEXT are given, --body wins."""
+        stdout, stderr, rc = run_cli(
+            "append-body", "Buy a small UPS", "positional-loses",
+            "--body", "flag-wins-append",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        body = self._body_of(org_dir, "Buy a small UPS")
+        assert "flag-wins-append" in body
+        assert "positional-loses" not in body
+
+    def test_body_file_still_works_append(self, org_dir, tmp_path):
+        """--body-file FILE still reads a file (no regression)."""
+        body_file = tmp_path / "append.txt"
+        body_file.write_text("File-appended content.")
+        stdout, stderr, rc = run_cli(
+            "append-body", "Buy a small UPS", "--body-file", str(body_file),
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        assert "File-appended content." in (org_dir / "tasks.org").read_text()
+
+    def test_body_file_still_works_set(self, org_dir, tmp_path):
+        body_file = tmp_path / "set.txt"
+        body_file.write_text("File-set content.")
+        stdout, stderr, rc = run_cli(
+            "set-body", "Buy a small UPS", "--body-file", str(body_file),
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        assert "File-set content." in (org_dir / "tasks.org").read_text()
+
+
 # ===========================================================================
 # JSON infrastructure
 # ===========================================================================

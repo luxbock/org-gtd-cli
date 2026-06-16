@@ -450,8 +450,10 @@ def cmd_append_body(args):
     if getattr(args, 'task_id', None) and args.substr and args.text is None:
         args.text = args.substr
         args.substr = None
-    text = resolve_body_text(args.text, args.body_file, auto_stdin=True)
-    if args.text == "-" and text is None:
+    # --body (explicit flag) wins over the positional TEXT when both are given.
+    body_text = args.body if args.body is not None else args.text
+    text = resolve_body_text(body_text, args.body_file, auto_stdin=True)
+    if body_text == "-" and text is None:
         return 1
     if text is None:
         print("Error: provide TEXT, --body-file, or pipe to stdin", file=sys.stderr)
@@ -471,8 +473,10 @@ def cmd_set_body(args):
     if getattr(args, 'task_id', None) and args.substr and args.text is None:
         args.text = args.substr
         args.substr = None
-    text = resolve_body_text(args.text, args.body_file, auto_stdin=True)
-    if args.text == "-" and text is None:
+    # --body (explicit flag) wins over the positional TEXT when both are given.
+    body_text = args.body if args.body is not None else args.text
+    text = resolve_body_text(body_text, args.body_file, auto_stdin=True)
+    if body_text == "-" and text is None:
         return 1
     if text is None and args.body_file is None:
         print("Error: provide TEXT, --body-file, or pipe to stdin", file=sys.stderr)
@@ -1095,23 +1099,31 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_property)
 
-    p = sub.add_parser("append-body", help="Append text to task body")
+    # allow_abbrev=False so --body cannot silently prefix-match --body-file
+    # (an old trap that turned `--body TEXT` into a bogus filename).
+    p = sub.add_parser("append-body", help="Append text to task body",
+                       allow_abbrev=False)
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring")
     p.add_argument("text", nargs="?", default=None, metavar="TEXT",
                    help="Text to append (optional when --body-file is used)")
     p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
+    p.add_argument("--body", default=None,
+                   help="Body text (alternative to positional TEXT)")
     p.add_argument("--body-file", dest="body_file",
                    help="Read text from FILE (use - for stdin)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_append_body)
 
-    p = sub.add_parser("set-body", help="Replace task body")
+    p = sub.add_parser("set-body", help="Replace task body",
+                       allow_abbrev=False)
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring")
     p.add_argument("text", nargs="?", default=None, metavar="TEXT",
                    help="New body text (optional when --body-file is used)")
     p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
+    p.add_argument("--body", default=None,
+                   help="Body text (alternative to positional TEXT)")
     p.add_argument("--body-file", dest="body_file",
                    help="Read text from FILE (use - for stdin)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
