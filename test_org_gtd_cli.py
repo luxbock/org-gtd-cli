@@ -2555,6 +2555,37 @@ class TestAgendaView:
         assert err_data is not None, f"No JSON error in stderr: {stderr}"
         assert "Unknown agenda view key" in err_data["error"]
 
+    def test_json_date_pages_agenda_block(self, org_dir):
+        """--date YYYY-MM-DD pages the dated "Agenda" block to that day.
+        The fixture task "Consider buying a new monitor" is
+        SCHEDULED: <2026-03-09 Mon>, so it appears in the Agenda block
+        when the day is shifted to 2026-03-09."""
+        data, stderr, rc = run_cli_json(
+            "agenda-view", "--date", "2026-03-09", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        assert data["version"] == 1
+        assert data["command"] == "agenda-view"
+        agenda = next(b for b in data["blocks"] if b["name"] == "Agenda")
+        headings = [t["heading"] for t in agenda["tasks"]]
+        assert "Consider buying a new monitor" in headings, headings
+
+    def test_json_date_isolation(self, org_dir):
+        """--date actually shifts the day: paging to 2026-03-01 (a week
+        before the task's SCHEDULED date) does NOT surface the 2026-03-09
+        task in the dated block, whereas paging to 2026-03-09 does.
+
+        (The span is a single day, so a future-scheduled task only shows
+        on its own day; an empty Agenda block is suppressed entirely by
+        the view, so it must not appear among the 2026-03-01 blocks.)"""
+        data, stderr, rc = run_cli_json(
+            "agenda-view", "--date", "2026-03-01", org_dir=org_dir)
+        assert rc == 0
+        agenda_blocks = [b for b in data["blocks"] if b["name"] == "Agenda"]
+        headings = [t["heading"]
+                    for b in agenda_blocks for t in b["tasks"]]
+        assert "Consider buying a new monitor" not in headings, headings
+
 
 # ===========================================================================
 # 41. fix-timestamps

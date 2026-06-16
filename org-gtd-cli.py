@@ -610,7 +610,7 @@ def cmd_set_property(args):
 
 def cmd_agenda_view(args):
     key = args.key if args.key else " "
-    expr = f'(org-gtd-cli/agenda-view {to_elisp(key)})'
+    expr = f'(org-gtd-cli/agenda-view {to_elisp(key)} {to_elisp(args.date)})'
     return run_elisp(expr, json_mode=args.json,
                      full_mode=getattr(args, 'full', False))
 
@@ -750,6 +750,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
                    help="Agenda view key (default: ' ' for full dashboard)")
     p.add_argument("--full", action="store_true",
                    help="Include body text in results (--json only)")
+    p.add_argument("--date", help="Target date YYYY-MM-DD for the dated block")
     p.set_defaults(func=cmd_agenda_view)
 
     p = sub.add_parser("subtasks", help="List children of a project")

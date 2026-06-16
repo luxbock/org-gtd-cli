@@ -3420,9 +3420,11 @@ accumulate under a block named \"Agenda\"."
        (key . ,cmd-key)
        (blocks . ,(apply #'vector (nreverse blocks)))))))
 
-(defun org-gtd-cli/agenda-view (&optional key)
+(defun org-gtd-cli/agenda-view (&optional key date)
   "Run an org-agenda custom command in batch mode.
 KEY defaults to \" \" (the full GTD dashboard).
+DATE, when non-nil, is a \"YYYY-MM-DD\" string that pages the dated
+\"Agenda\" block to that day via `org-agenda-start-day'.
 Task lines include (file) for source identification.
 In JSON mode, emits structured blocks via `org-gtd-cli/agenda-view-json'."
   (let ((cmd-key (or key " ")))
@@ -3433,7 +3435,8 @@ In JSON mode, emits structured blocks via `org-gtd-cli/agenda-view-json'."
           (org-gtd-cli/error "  \"%s\"  %s" (car cmd) (or (nth 1 cmd) ""))))
       (kill-emacs 1))
     ;; Build the agenda buffer
-    (let ((org-agenda-window-setup 'current-window))
+    (let ((org-agenda-window-setup 'current-window)
+          (org-agenda-start-day (or date org-agenda-start-day)))
       (org-agenda nil cmd-key))
     (if org-gtd-cli/json-mode
         (org-gtd-cli/agenda-view-json cmd-key)
