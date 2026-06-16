@@ -5617,3 +5617,121 @@ class TestStableIdAddressing:
         assert rc == 0, stderr
         assert "*** TODO Fix org-capture workspace issue" in tasks.read_text()
 
+
+# ===========================================================================
+# outline command: nested file structure as JSON
+# ===========================================================================
+
+def _find_node(nodes, heading):
+    """Recursively find the first node whose heading == heading, or None."""
+    for node in nodes:
+        if node.get("heading") == heading:
+            return node
+        found = _find_node(node.get("children", []), heading)
+        if found is not None:
+            return found
+    return None
+
+
+class TestOutline:
+    """Tests for the `outline --json` nested-tree command."""
+
+    def test_envelope_and_top_level(self, org_dir):
+        """Envelope fields plus top-level category nodes and their children."""
+        data, stderr, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data is not None
+        assert data["version"] == 1
+        assert data["command"] == "outline"
+        assert data["file"] == "tasks.org"
+        top_headings = [n["heading"] for n in data["nodes"]]
+        for expected in ("Computers", "Work", "Research"):
+            assert expected in top_headings, top_headings
+        for cat in ("Computers", "Work"):
+            node = _find_node(data["nodes"], cat)
+            assert node["is_category"] is True
+            assert node["todo_state"] is None
+            assert node["level"] == 1
+            assert node["children"], f"{cat} should have children"
+
+    def test_project_node(self, org_dir):
+        """A project node carries todo_state, progress, and TODO children."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Prepare onboarding guide")
+        assert node is not None
+        assert node["is_project"] is True
+        assert node["is_category"] is False
+        assert node["todo_state"] == "TODO"
+        assert node["progress"] == {"done": 0, "total": 2}
+        child_headings = [c["heading"] for c in node["children"]]
+        assert "Draft outline" in child_headings
+        assert "Write first chapter" in child_headings
+
+    def test_inherited_tags(self, org_dir):
+        """A child of `* Work :work:` inherits the work tag."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Write quarterly report")
+        assert node is not None
+        assert "work" in node["tags"], node["tags"]
+
+    def test_id_present_and_absent(self, org_dir):
+        """Explicit :ID: is surfaced; id-less tasks report id == None."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        computers = _find_node(data["nodes"], "Computers")
+        assert computers["id"] == "test-id-computers"
+        idless = _find_node(data["nodes"], "Write quarterly report")
+        assert idless is not None
+        assert idless["id"] is None
+
+    def test_deep_nesting_preserved(self, org_dir):
+        """Walk Computers -> Agents -> Improve agent workflow -> Design CLI tool."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        computers = _find_node(data["nodes"], "Computers")
+        agents = _find_node(computers["children"], "Agents")
+        assert agents is not None and agents["level"] == 2
+        workflow = _find_node(agents["children"], "Improve agent workflow")
+        assert workflow is not None and workflow["level"] == 3
+        design = _find_node(workflow["children"], "Design CLI tool")
+        assert design is not None and design["level"] == 4
+        leaf_headings = [c["heading"] for c in design["children"]]
+        assert "Add more test cases" in leaf_headings
+
+    def test_file_flag_inbox(self, org_dir):
+        """--file inbox.org returns the inbox TODOs as flat top-level nodes."""
+        data, stderr, rc = run_cli_json(
+            "outline", "--file", "inbox.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["file"] == "inbox.org"
+        node = _find_node(data["nodes"], "Buy groceries")
+        assert node is not None
+        for n in data["nodes"]:
+            assert n["is_category"] is False
+            assert n["todo_state"] == "TODO"
+            assert n["children"] == []
+
+    def test_full_body_html(self, org_dir):
+        """--full renders body_html; nodes without a body stay None."""
+        data, stderr, rc = run_cli_json("outline", "--full", org_dir=org_dir)
+        assert rc == 0, stderr
+        with_body = _find_node(
+            data["nodes"], "Set up automated backups for agent workspace")
+        assert with_body is not None
+        assert isinstance(with_body["body_html"], str)
+        assert "<p" in with_body["body_html"]
+        no_body = _find_node(data["nodes"], "Bare heading no body")
+        assert no_body is not None
+        assert no_body["body_html"] is None
+
+    def test_body_html_none_without_full(self, org_dir):
+        """Without --full, body_html is None even where a body exists."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        with_body = _find_node(
+            data["nodes"], "Set up automated backups for agent workspace")
+        assert with_body is not None
+        assert with_body["body_html"] is None
+

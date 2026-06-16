@@ -356,6 +356,12 @@ def cmd_categories(args):
     return run_elisp(expr, json_mode=args.json)
 
 
+def cmd_outline(args):
+    expr = f'(org-gtd-cli/outline {to_elisp(args.file)})'
+    return run_elisp(expr, json_mode=args.json,
+                     full_mode=getattr(args, 'full', False))
+
+
 def cmd_projects(args):
     return run_elisp("(org-gtd-cli/projects)", json_mode=args.json)
 
@@ -874,6 +880,12 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("categories", help="Show category tree for refile targets")
     p.add_argument("--file", help="Target file (default: tasks.org)")
     p.set_defaults(func=cmd_categories)
+
+    p = sub.add_parser("outline", help="Full nested outline of an org file")
+    p.add_argument("--file", help="Target file (default: tasks.org)")
+    p.add_argument("--full", action="store_true",
+                   help="Include server-rendered body_html")
+    p.set_defaults(func=cmd_outline)
 
     p = sub.add_parser("projects", help="List active projects with progress")
     p.set_defaults(func=cmd_projects)

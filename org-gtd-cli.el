@@ -1415,6 +1415,140 @@ at least one direct child with a TODO keyword."
        (projects . ,(apply #'vector (nreverse projects)))
        (count . ,(length results))))))
 
+;; --- outline ---
+
+(defun org-gtd-cli/outline-node-at-point ()
+  "Build the per-heading node alist for the outline at point (sans children).
+Point must be on a heading line in a widened org buffer.  Tags are
+INHERITED (`org-get-tags', NOT no-inherit) per the dashboard JSON
+convention.  Body HTML is rendered only when `org-gtd-cli/full-mode'
+is non-nil and the node has a non-empty body of its own."
+  (let* ((heading (org-get-heading t t t t))
+         (level (org-current-level))
+         (state (org-get-todo-state))
+         (priority (org-gtd-cli/get-explicit-priority))
+         (tags (org-get-tags))
+         (id (org-entry-get nil "ID"))
+         (is-category (null state))
+         (is-project (and state (org-gtd-cli/has-todo-children-p)))
+         (progress
+          (if is-project
+              (let ((child-level (1+ level))
+                    (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+                    (done-count 0)
+                    (total-count 0))
+                (save-excursion
+                  (forward-line 1)
+                  (while (and (< (point) subtree-end)
+                              (re-search-forward org-heading-regexp subtree-end t))
+                    (when (= (org-current-level) child-level)
+                      (let ((child-state (org-get-todo-state)))
+                        (when (and child-state
+                                   (member child-state org-todo-keywords-1))
+                          (cl-incf total-count)
+                          (when (member child-state org-done-keywords)
+                            (cl-incf done-count)))))))
+                `((done . ,done-count) (total . ,total-count)))
+            :null))
+         (body-html
+          (if org-gtd-cli/full-mode
+              (let ((body (org-gtd-cli/get-body-at-point)))
+                (if (and body (not (string-empty-p body)))
+                    (progn
+                      (require 'ox-html)
+                      (string-trim (org-export-string-as body 'html t)))
+                  :null))
+            :null)))
+    `((heading . ,heading)
+      (level . ,level)
+      (todo_state . ,(or state :null))
+      (priority . ,(or priority :null))
+      (tags . ,(vconcat (mapcar #'identity tags)))
+      (is_category . ,(if is-category t :false))
+      (is_project . ,(if is-project t :false))
+      (progress . ,progress)
+      (id . ,(or id :null))
+      (body_html . ,(if (and (stringp body-html) (string-empty-p body-html))
+                        :null
+                      body-html)))))
+
+(defun org-gtd-cli/outline-tree (file)
+  "Return the nested outline of FILE as a vector of top-level node alists.
+Walks the widened buffer once, maintaining a stack of open ancestors
+keyed by level.  Each heading's children are accumulated in document
+order, then finalized into a (children . [..]) field appended to the
+node alist.  A `record' here is the cons (DATA . REVERSED-CHILD-RECORDS)."
+  (with-current-buffer (find-file-noselect file)
+    (org-with-wide-buffer
+     (let ((roots '())        ; reversed list of top-level records
+           (stack '()))       ; list of (level . record), innermost first
+       (goto-char (point-min))
+       (while (re-search-forward org-heading-regexp nil t)
+         (goto-char (line-beginning-position))
+         (let* ((level (org-current-level))
+                (record (cons (org-gtd-cli/outline-node-at-point) '())))
+           ;; Pop ancestors that are not shallower than this heading.
+           (while (and stack (>= (car (car stack)) level))
+             (setq stack (cdr stack)))
+           (if stack
+               ;; Attach to nearest open ancestor (prepend; reversed later).
+               (let ((parent (cdr (car stack))))
+                 (setcdr parent (cons record (cdr parent))))
+             (push record roots))
+           (push (cons level record) stack))
+         (forward-line 1))
+       (apply #'vector
+              (mapcar #'org-gtd-cli/outline-finalize (nreverse roots)))))))
+
+(defun org-gtd-cli/outline-finalize (record)
+  "Convert a tree RECORD (DATA . REVERSED-CHILD-RECORDS) to its node alist."
+  (let ((data (car record))
+        (children (nreverse (cdr record))))
+    (append data
+            `((children . ,(apply #'vector
+                                  (mapcar #'org-gtd-cli/outline-finalize
+                                          children)))))))
+
+(defun org-gtd-cli/outline (&optional file-name)
+  "Emit the full nested outline of an org file as JSON.
+Interleaves category headings (plain, no TODO keyword) and tasks.
+FILE-NAME defaults to \"tasks.org\"; resolved relative to `org-directory'.
+This is a read — it never creates org ids.  Honors `org-gtd-cli/full-mode'
+(renders each node's own body to `body_html').  In text mode, prints a
+minimal indented heading tree."
+  (let* ((target (or (and file-name
+                          (not (equal file-name "nil"))
+                          (not (string-empty-p file-name))
+                          file-name)
+                     "tasks.org"))
+         (file (expand-file-name target org-directory)))
+    (unless (file-exists-p file)
+      (org-gtd-cli/error "File not found: %s" target)
+      (kill-emacs 1))
+    (let ((nodes (org-gtd-cli/outline-tree file)))
+      (if org-gtd-cli/json-mode
+          (org-gtd-cli/output
+           `((version . 1)
+             (command . "outline")
+             (file . ,(org-gtd-cli/relative-filename file))
+             (nodes . ,nodes)))
+        (org-gtd-cli/outline-print-text nodes))))
+  (kill-emacs 0))
+
+(defun org-gtd-cli/outline-print-text (nodes)
+  "Print NODES (a vector of node alists) as an indented heading tree."
+  (mapc
+   (lambda (node)
+     (let ((level (alist-get 'level node))
+           (heading (alist-get 'heading node))
+           (state (alist-get 'todo_state node)))
+       (princ (format "%s%s%s\n"
+                      (make-string (* 2 (1- level)) ?\s)
+                      (if (stringp state) (concat state " ") "")
+                      heading)))
+     (org-gtd-cli/outline-print-text (alist-get 'children node)))
+   nodes))
+
 ;; --- list-tags ---
 
 (defun org-gtd-cli/list-tags ()
