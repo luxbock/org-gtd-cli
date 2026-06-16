@@ -9,6 +9,7 @@
 (require 'org)
 (require 'org-agenda)
 (require 'org-archive)
+(require 'org-id)
 (require 'cl-lib)
 
 ;; Load `userlock' eagerly: it is NOT preloaded, and the C file-lock code
@@ -88,6 +89,12 @@
 (defvar org-gtd-cli/full-mode
   (equal (getenv "ORG_GTD_CLI_FULL") "1")
   "When non-nil, include body text in list commands (search, subtasks, agenda).")
+
+(defvar org-gtd-cli/forced-id nil
+  "When non-nil, `org-gtd-cli/find-task' resolves by this org :ID: instead of by substring.")
+
+(defvar org-gtd-cli/forced-create-id nil
+  "When non-nil, `org-gtd-cli/find-task' ensures the resolved task has an org id (lazy create).")
 
 (defun org-gtd-cli/json-encode (alist)
   "Serialize ALIST to a JSON string safe for `princ'/`message' output.
@@ -460,99 +467,144 @@ Idempotent: if SESSION-ID already exists, this is a no-op."
                                 (cdr (assq 'timestamp e)))))
              (princ "No session IDs found.\n"))))))))
 
-(defun org-gtd-cli/find-task (substring &optional index include-done exact)
-  "Find a task by SUBSTRING match across all agenda files.
-Returns a cons (buffer . position) or exits with appropriate code.
-If INDEX is non-nil, select the Nth match (1-based).
-If INCLUDE-DONE is non-nil, also match done tasks.
-If EXACT is non-nil, require full heading match instead of substring."
-  (setq substring (org-gtd-cli/strip-priority-cookie substring))
-  (let ((matches '()))
+(defun org-gtd-cli/find-task-by-id (id)
+  "Find the FIRST heading whose org :ID: equals ID across all agenda files.
+Returns a cons (buffer . position).  Matches ANY heading — category
+headings, DONE tasks, and active tasks alike — since the dashboard
+addresses arbitrary rows.  On no match, mirrors the no-match arm of
+`org-gtd-cli/find-task': emits a JSON error (json-mode) or text error,
+then exits 1."
+  (catch 'found
     (dolist (file (org-agenda-files))
       (when (file-exists-p file)
         (with-current-buffer (find-file-noselect file)
           (org-with-wide-buffer
            (goto-char (point-min))
            (while (re-search-forward org-heading-regexp nil t)
-             (let* ((state (org-get-todo-state))
-                    (heading (org-get-heading t t t t))
-                    (pos (line-beginning-position)))
-               (when (and state
-                          (or include-done
-                              (not (member state org-done-keywords)))
-                          (if exact
-                              (or (string= (downcase substring) (downcase heading))
-                                  (string= (downcase substring)
-                                           (downcase (org-gtd-cli/strip-markup heading))))
-                            (or (string-match-p (regexp-quote substring)
-                                                (downcase heading))
-                                (string-match-p (regexp-quote substring)
-                                                (downcase (org-gtd-cli/strip-markup heading))))))
-                 (push (list (current-buffer) pos
-                             state heading
-                             (org-gtd-cli/relative-filename file))
-                       matches))))))))
-    (setq matches (nreverse matches))
-    (cond
-     ((null matches)
-      (let* ((cat-paths (delete-dups
-                         (mapcar (lambda (m) (nth 3 m))
-                                 (org-gtd-cli/find-category-matches substring))))
-             (hint (cond
-                    ((null cat-paths)
-                     "Try a shorter substring, or use 'search' for partial matches.")
-                    ((null (cdr cat-paths))
-                     (format (concat "\"%s\" matches a category heading, not a task. "
-                                     "To add a task under it: "
-                                     "org-gtd-cli add-task --category \"%s\"")
-                             substring (car cat-paths)))
-                    (t
-                     (format (concat "\"%s\" matches category headings, not tasks: %s. "
-                                     "To add a task under one: "
-                                     "org-gtd-cli add-task --category \"%s\"")
-                             substring
-                             (mapconcat (lambda (p) (format "\"%s\"" p))
-                                        (seq-take cat-paths 3) ", ")
-                             (car cat-paths))))))
-        (if org-gtd-cli/json-mode
-            (message "%s" (org-gtd-cli/json-encode
-                           `((error . ,(format "No task found matching \"%s\"" substring))
-                             (hint . ,hint))))
-          (org-gtd-cli/error "No task found matching \"%s\"" substring)
-          (org-gtd-cli/error "Hint: %s" hint)))
-      (kill-emacs 1))
-     ((and (= (length matches) 1) (not index))
-      (cons (nth 0 (car matches)) (nth 1 (car matches))))
-     ((and index (> index 0) (<= index (length matches)))
-      (let ((m (nth (1- index) matches)))
-        (cons (nth 0 m) (nth 1 m))))
-     ((and index (or (<= index 0) (> index (length matches))))
-      (org-gtd-cli/error "Index %d out of range (1-%d)" index (length matches))
-      (kill-emacs 1))
-     (t
+             (when (equal (org-entry-get nil "ID") id)
+               (throw 'found (cons (current-buffer)
+                                   (line-beginning-position)))))))))
+    (let ((hint "Use a task id from list/show output, or address by SUBSTR."))
       (if org-gtd-cli/json-mode
-          ;; JSON: match list on stdout, hint on stderr
-          (let ((match-list '())
-                (i 1))
+          (message "%s" (org-gtd-cli/json-encode
+                         `((error . ,(format "No task found with id \"%s\"" id))
+                           (hint . ,hint))))
+        (org-gtd-cli/error "No task found with id \"%s\"" id)
+        (org-gtd-cli/error "Hint: %s" hint)))
+    (kill-emacs 1)))
+
+(defun org-gtd-cli/maybe-create-id (buf-pos)
+  "If `org-gtd-cli/forced-create-id', ensure an org id at BUF-POS (idempotent).
+Return BUF-POS.  `org-id-get-create' is a no-op when the entry already
+has an id, so this never dirties the buffer on re-find."
+  (when org-gtd-cli/forced-create-id
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (org-id-get-create))))
+  buf-pos)
+
+(defun org-gtd-cli/find-task (substring &optional index include-done exact)
+  "Find a task by SUBSTRING match across all agenda files.
+Returns a cons (buffer . position) or exits with appropriate code.
+If INDEX is non-nil, select the Nth match (1-based).
+If INCLUDE-DONE is non-nil, also match done tasks.
+If EXACT is non-nil, require full heading match instead of substring.
+When `org-gtd-cli/forced-id' is non-nil, resolve by org :ID: instead of
+SUBSTRING (ignoring INDEX/INCLUDE-DONE/EXACT).  When
+`org-gtd-cli/forced-create-id' is non-nil, the resolved task is given an
+org id if it lacks one (lazy create, idempotent)."
+  (if org-gtd-cli/forced-id
+      (org-gtd-cli/maybe-create-id
+       (org-gtd-cli/find-task-by-id org-gtd-cli/forced-id))
+    (setq substring (org-gtd-cli/strip-priority-cookie substring))
+    (let ((matches '()))
+      (dolist (file (org-agenda-files))
+        (when (file-exists-p file)
+          (with-current-buffer (find-file-noselect file)
+            (org-with-wide-buffer
+             (goto-char (point-min))
+             (while (re-search-forward org-heading-regexp nil t)
+               (let* ((state (org-get-todo-state))
+                      (heading (org-get-heading t t t t))
+                      (pos (line-beginning-position)))
+                 (when (and state
+                            (or include-done
+                                (not (member state org-done-keywords)))
+                            (if exact
+                                (or (string= (downcase substring) (downcase heading))
+                                    (string= (downcase substring)
+                                             (downcase (org-gtd-cli/strip-markup heading))))
+                              (or (string-match-p (regexp-quote substring)
+                                                  (downcase heading))
+                                  (string-match-p (regexp-quote substring)
+                                                  (downcase (org-gtd-cli/strip-markup heading))))))
+                   (push (list (current-buffer) pos
+                               state heading
+                               (org-gtd-cli/relative-filename file))
+                         matches))))))))
+      (setq matches (nreverse matches))
+      (cond
+       ((null matches)
+        (let* ((cat-paths (delete-dups
+                           (mapcar (lambda (m) (nth 3 m))
+                                   (org-gtd-cli/find-category-matches substring))))
+               (hint (cond
+                      ((null cat-paths)
+                       "Try a shorter substring, or use 'search' for partial matches.")
+                      ((null (cdr cat-paths))
+                       (format (concat "\"%s\" matches a category heading, not a task. "
+                                       "To add a task under it: "
+                                       "org-gtd-cli add-task --category \"%s\"")
+                               substring (car cat-paths)))
+                      (t
+                       (format (concat "\"%s\" matches category headings, not tasks: %s. "
+                                       "To add a task under one: "
+                                       "org-gtd-cli add-task --category \"%s\"")
+                               substring
+                               (mapconcat (lambda (p) (format "\"%s\"" p))
+                                          (seq-take cat-paths 3) ", ")
+                               (car cat-paths))))))
+          (if org-gtd-cli/json-mode
+              (message "%s" (org-gtd-cli/json-encode
+                             `((error . ,(format "No task found matching \"%s\"" substring))
+                               (hint . ,hint))))
+            (org-gtd-cli/error "No task found matching \"%s\"" substring)
+            (org-gtd-cli/error "Hint: %s" hint)))
+        (kill-emacs 1))
+       ((and (= (length matches) 1) (not index))
+        (org-gtd-cli/maybe-create-id
+         (cons (nth 0 (car matches)) (nth 1 (car matches)))))
+       ((and index (> index 0) (<= index (length matches)))
+        (let ((m (nth (1- index) matches)))
+          (org-gtd-cli/maybe-create-id (cons (nth 0 m) (nth 1 m)))))
+       ((and index (or (<= index 0) (> index (length matches))))
+        (org-gtd-cli/error "Index %d out of range (1-%d)" index (length matches))
+        (kill-emacs 1))
+       (t
+        (if org-gtd-cli/json-mode
+            ;; JSON: match list on stdout, hint on stderr
+            (let ((match-list '())
+                  (i 1))
+              (dolist (m matches)
+                (push `((index . ,i) (heading . ,(nth 3 m))
+                        (state . ,(nth 2 m))
+                        (file . ,(nth 4 m)))
+                      match-list)
+                (cl-incf i))
+              (org-gtd-cli/output
+               `((error . "Multiple matches")
+                 (matches . ,(apply #'vector (nreverse match-list)))
+                 (hint . "Use --index N to select one."))))
+          ;; Text: all on stderr
+          (org-gtd-cli/error "Multiple matches:")
+          (let ((i 1))
             (dolist (m matches)
-              (push `((index . ,i) (heading . ,(nth 3 m))
-                      (state . ,(nth 2 m))
-                      (file . ,(nth 4 m)))
-                    match-list)
-              (cl-incf i))
-            (org-gtd-cli/output
-             `((error . "Multiple matches")
-               (matches . ,(apply #'vector (nreverse match-list)))
-               (hint . "Use --index N to select one."))))
-        ;; Text: all on stderr
-        (org-gtd-cli/error "Multiple matches:")
-        (let ((i 1))
-          (dolist (m matches)
-            (org-gtd-cli/error "[%d] %s %s (%s)"
-                               i (nth 2 m) (nth 3 m) (nth 4 m))
-            (cl-incf i)))
-        (org-gtd-cli/error "\nUse --index N to select one."))
-      (kill-emacs 2)))))
+              (org-gtd-cli/error "[%d] %s %s (%s)"
+                                 i (nth 2 m) (nth 3 m) (nth 4 m))
+              (cl-incf i)))
+          (org-gtd-cli/error "\nUse --index N to select one."))
+        (kill-emacs 2))))))
 
 (defun org-gtd-cli/make-timestamp (date-str &optional time-str active)
   "Create an org timestamp from DATE-STR (YYYY-MM-DD) and optional TIME-STR.

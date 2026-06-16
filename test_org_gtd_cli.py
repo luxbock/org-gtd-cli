@@ -5512,3 +5512,108 @@ class TestGetSessionIds:
         assert rc == 0
         assert "pi_agent:plain-test" in stdout
 
+
+# ===========================================================================
+# Stable task addressing by org :ID: (--id) + lazy ID creation
+# ===========================================================================
+
+def _stderr_json(stderr):
+    """Parse the first JSON object line out of stderr (mixed with Emacs noise)."""
+    for line in stderr.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    return None
+
+
+def _id_under(filepath, heading):
+    """Return the :ID: value inside HEADING's properties drawer, or None.
+
+    Scans from the heading line until the next heading, returning the first
+    :ID: property found in between (the heading's own drawer).
+    """
+    text = filepath.read_text()
+    lines = text.splitlines()
+    in_entry = False
+    for line in lines:
+        if line.startswith("*"):
+            # A new heading: are we entering the target, or leaving it?
+            in_entry = heading in line
+            continue
+        if in_entry:
+            m = re.match(r"\s*:ID:\s+(\S+)\s*$", line)
+            if m:
+                return m.group(1)
+    return None
+
+
+class TestStableIdAddressing:
+    """--id resolution and lazy org-id creation on first mutation."""
+
+    def test_resolve_by_id_read_done_task(self, org_dir):
+        """show --id resolves a DONE task by its org :ID: regardless of done state."""
+        data, stderr, rc = run_cli_json(
+            "show", "--id", "test-id-capture-fix", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data is not None
+        assert data["heading"] == "Fix org-capture workspace issue"
+        assert data["state"] == "DONE"
+
+    def test_bad_id_errors(self, org_dir):
+        """show --id with an unknown id exits 1 with a JSON error on stderr."""
+        data, stderr, rc = run_cli_json(
+            "show", "--id", "no-such-id-zzz", org_dir=org_dir)
+        assert rc == 1
+        err = _stderr_json(stderr)
+        assert err is not None, f"No JSON error found in stderr: {stderr}"
+        assert "No task found with id" in err["error"]
+
+    def test_id_and_substr_mutually_exclusive(self, org_dir):
+        """Passing both --id and a SUBSTR positional is rejected."""
+        stdout, stderr, rc = run_cli(
+            "show", "--id", "test-id-work", "Buy groceries", org_dir=org_dir)
+        assert rc == 1
+        assert "mutually exclusive" in stderr
+
+    def test_lazy_create_on_substring_mutation(self, org_dir):
+        """A substring mutation on an id-less task lazily creates a stable :ID:."""
+        inbox = org_dir / "inbox.org"
+        assert _id_under(inbox, "Buy groceries") is None
+        stdout, stderr, rc = run_cli(
+            "set-state", "Buy groceries", "NEXT", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = inbox.read_text()
+        assert "* NEXT Buy groceries" in text
+        new_id = _id_under(inbox, "Buy groceries")
+        assert new_id is not None, "expected a lazily-created :ID: under Buy groceries"
+
+    def test_lazy_id_round_trips(self, org_dir):
+        """A freshly lazy-created id is immediately resolvable by --id."""
+        inbox = org_dir / "inbox.org"
+        rc = run_cli("set-state", "Buy groceries", "NEXT", org_dir=org_dir)[2]
+        assert rc == 0
+        new_id = _id_under(inbox, "Buy groceries")
+        assert new_id is not None
+        data, stderr, rc = run_cli_json("show", "--id", new_id, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data is not None
+        assert data["heading"] == "Buy groceries"
+
+    def test_dry_run_does_not_create_id(self, org_dir):
+        """--dry-run on an id-less task must NOT create an :ID:."""
+        inbox = org_dir / "inbox.org"
+        before = inbox.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Call the plumber", "NEXT", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert inbox.read_bytes() == before
+        assert _id_under(inbox, "Call the plumber") is None
+
+    def test_mutation_by_id(self, org_dir):
+        """set-state --id mutates the task addressed by its org :ID:."""
+        tasks = org_dir / "tasks.org"
+        stdout, stderr, rc = run_cli(
+            "set-state", "--id", "test-id-capture-fix", "TODO", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "*** TODO Fix org-capture workspace issue" in tasks.read_text()
+

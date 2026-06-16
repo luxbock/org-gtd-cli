@@ -57,6 +57,29 @@ def to_elisp(value: str | None) -> str:
     return f'"{escape_elisp(value)}"'
 
 
+def validate_target(args):
+    """Ensure exactly one of SUBSTR/parent or --id addresses the task (non-batch path)."""
+    substr = getattr(args, 'substr', None) or getattr(args, 'parent', None)
+    tid = getattr(args, 'task_id', None)
+    if tid and substr:
+        print("Error: --id and SUBSTR are mutually exclusive", file=sys.stderr)
+        return False
+    if not tid and not substr:
+        print("Error: provide SUBSTR or --id", file=sys.stderr)
+        return False
+    return True
+
+
+def id_wrap(expr, args, *, mutation):
+    """Wrap EXPR to bind forced-id / forced-create-id for this one call (let -> daemon-safe)."""
+    tid = getattr(args, 'task_id', None)
+    create = mutation and not getattr(args, 'dry_run', False)
+    if not tid and not create:
+        return expr
+    return (f'(let ((org-gtd-cli/forced-id {to_elisp(tid)}) '
+            f'(org-gtd-cli/forced-create-id {"t" if create else "nil"})) {expr})')
+
+
 def resolve_body_text(text: str | None, body_file: str | None,
                       auto_stdin: bool = False) -> str | None:
     """Resolve body text from positional arg, --body-file, or stdin.
@@ -312,16 +335,19 @@ def cmd_search(args):
 
 
 def cmd_show(args):
-    if not args.substr:
-        print("Error: SUBSTR is required", file=sys.stderr)
+    if not validate_target(args):
         return 1
     expr = (f'(org-gtd-cli/show {to_elisp(args.substr)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.plain else None)})')
+    expr = id_wrap(expr, args, mutation=False)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_subtasks(args):
+    if not validate_target(args):
+        return 1
     expr = f'(org-gtd-cli/subtasks {to_elisp(args.substr)} {to_elisp(args.index)})'
+    expr = id_wrap(expr, args, mutation=False)
     return run_elisp(expr, json_mode=args.json, full_mode=getattr(args, 'full', False))
 
 
@@ -363,8 +389,15 @@ def cmd_add_task(args):
 
 
 def cmd_add_subtask(args):
+    # With --id addressing the parent, a lone positional is the TITLE, but
+    # argparse fills the first optional positional (parent) — shift it over.
+    if getattr(args, 'task_id', None) and args.parent and not args.title:
+        args.title = args.parent
+        args.parent = None
     if not args.title:
         print("Error: TITLE is required", file=sys.stderr)
+        return 1
+    if not validate_target(args):
         return 1
     raw_body = resolve_body_text(args.body, args.body_file)
     if args.body == "-" and raw_body is None:
@@ -375,6 +408,7 @@ def cmd_add_subtask(args):
             f'{to_elisp(args.tags)} {to_elisp(args.schedule)} '
             f'{to_elisp(args.deadline)} {to_elisp(args.priority)} '
             f'{to_elisp(args.state)} {to_elisp(args.index)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -404,6 +438,11 @@ def cmd_add_note(args):
 
 
 def cmd_append_body(args):
+    # With --id addressing the task, a lone positional is the TEXT, but
+    # argparse fills the first optional positional (substr) — shift it over.
+    if getattr(args, 'task_id', None) and args.substr and args.text is None:
+        args.text = args.substr
+        args.substr = None
     text = resolve_body_text(args.text, args.body_file, auto_stdin=True)
     if args.text == "-" and text is None:
         return 1
@@ -411,12 +450,20 @@ def cmd_append_body(args):
         print("Error: provide TEXT, --body-file, or pipe to stdin", file=sys.stderr)
         return 1
     text = unescape_body_newlines(text) if text else text
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/append-body {to_elisp(args.substr)} '
             f'{to_elisp(text)} {to_elisp(args.index)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_body(args):
+    # With --id addressing the task, a lone positional is the TEXT, but
+    # argparse fills the first optional positional (substr) — shift it over.
+    if getattr(args, 'task_id', None) and args.substr and args.text is None:
+        args.text = args.substr
+        args.substr = None
     text = resolve_body_text(args.text, args.body_file, auto_stdin=True)
     if args.text == "-" and text is None:
         return 1
@@ -426,8 +473,11 @@ def cmd_set_body(args):
     text = unescape_body_newlines(text) if text else text
     # set-body allows empty string to remove body — pass "" not nil
     text_elisp = '""' if text is not None and text == "" else to_elisp(text)
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/set-body {to_elisp(args.substr)} '
             f'{text_elisp} {to_elisp(args.index)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -447,28 +497,47 @@ def cmd_get_session_ids(args):
 
 
 def cmd_set_done(args):
-    if not args.substr:
-        print("Error: SUBSTR is required", file=sys.stderr)
+    if not validate_target(args):
         return 1
     expr = (f'(org-gtd-cli/set-done {to_elisp(args.substr)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_state(args):
+    # With --id addressing the task, a lone positional is the STATE, but
+    # argparse fills the first optional positional (substr) — shift it over.
+    if getattr(args, 'task_id', None) and args.substr and not args.state:
+        args.state = args.substr
+        args.substr = None
+    if not args.state:
+        print("Error: STATE is required", file=sys.stderr)
+        return 1
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
             f'{to_elisp(args.state)} {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_priority(args):
+    # With --id addressing the task, a lone positional is the PRIORITY, but
+    # argparse fills the first optional positional (substr) — shift it over.
+    if getattr(args, 'task_id', None) and args.substr and not args.priority:
+        args.priority = args.substr
+        args.substr = None
     if not args.priority and not args.clear:
         print("Error: provide a PRIORITY (A, B, or C) or --clear", file=sys.stderr)
+        return 1
+    if not validate_target(args):
         return 1
     expr = (f'(org-gtd-cli/set-priority {to_elisp(args.substr)} '
             f'{to_elisp(args.priority)} {to_elisp("t" if args.clear else None)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -480,13 +549,15 @@ def cmd_set_cancelled(args):
 
 
 def cmd_set_next(args):
+    if not validate_target(args):
+        return 1
     expr = f'(org-gtd-cli/set-next {to_elisp(args.substr)} {to_elisp(args.index)})'
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_refile(args):
-    if not args.substr:
-        print("Error: SUBSTR is required", file=sys.stderr)
+    if not validate_target(args):
         return 1
     if args.to and args.category:
         print("Error: --to and --category are mutually exclusive", file=sys.stderr)
@@ -497,6 +568,7 @@ def cmd_refile(args):
     expr = (f'(org-gtd-cli/refile {to_elisp(args.substr)} '
             f'{to_elisp(args.to)} {to_elisp(args.category)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -517,43 +589,72 @@ def cmd_move(args):
         print("Error: one of --up, --down, --before, --after is required",
               file=sys.stderr)
         return 1
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/move {to_elisp(args.substr)} '
             f'{to_elisp(direction)} {to_elisp(sibling)} {to_elisp(args.index)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_rename(args):
+    # With --id addressing the task, a lone positional is the NEWTITLE, but
+    # argparse fills the first optional positional (substr) — shift it over.
+    if getattr(args, 'task_id', None) and args.substr and not args.newtitle:
+        args.newtitle = args.substr
+        args.substr = None
+    if not args.newtitle:
+        print("Error: NEWTITLE is required", file=sys.stderr)
+        return 1
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/rename {to_elisp(args.substr)} '
             f'{to_elisp(args.newtitle)} {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_schedule(args):
+    # With --id addressing the task, a lone positional is the DATE, but
+    # argparse fills the first optional positional (substr) — shift it over.
+    if getattr(args, 'task_id', None) and args.substr and not args.date:
+        args.date = args.substr
+        args.substr = None
     if not args.date and not args.clear:
         print("Error: provide a DATE or --clear", file=sys.stderr)
+        return 1
+    if not validate_target(args):
         return 1
     expr = (f'(org-gtd-cli/set-schedule {to_elisp(args.substr)} '
             f'{to_elisp(args.date)} {to_elisp(args.time)} '
             f'{to_elisp("t" if args.clear else None)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_deadline(args):
+    # With --id addressing the task, a lone positional is the DATE, but
+    # argparse fills the first optional positional (substr) — shift it over.
+    if getattr(args, 'task_id', None) and args.substr and not args.date:
+        args.date = args.substr
+        args.substr = None
     if not args.date and not args.clear:
         print("Error: provide a DATE or --clear", file=sys.stderr)
+        return 1
+    if not validate_target(args):
         return 1
     expr = (f'(org-gtd-cli/set-deadline {to_elisp(args.substr)} '
             f'{to_elisp(args.date)} {to_elisp(args.time)} '
             f'{to_elisp("t" if args.clear else None)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_set_tags(args):
-    if not args.substr:
-        print("Error: SUBSTR is required", file=sys.stderr)
+    if not validate_target(args):
         return 1
     add_flag = getattr(args, 'add', None)
     remove_flag = getattr(args, 'remove', None)
@@ -562,12 +663,14 @@ def cmd_set_tags(args):
         expr = (f'(org-gtd-cli/add-tags {to_elisp(args.substr)} '
                 f'{to_elisp(add_flag)} '
                 f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+        expr = id_wrap(expr, args, mutation=True)
         return run_elisp(expr, json_mode=args.json)
     if remove_flag:
         # Route --remove to remove-tags
         expr = (f'(org-gtd-cli/remove-tags {to_elisp(args.substr)} '
                 f'{to_elisp(remove_flag)} '
                 f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+        expr = id_wrap(expr, args, mutation=True)
         return run_elisp(expr, json_mode=args.json)
     if args.tags is None:
         print("Error: --tags, --add, or --remove is required", file=sys.stderr)
@@ -575,12 +678,12 @@ def cmd_set_tags(args):
     expr = (f'(org-gtd-cli/set-tags {to_elisp(args.substr)} '
             f'{to_elisp(args.tags)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_add_tags(args):
-    if not args.substr:
-        print("Error: SUBSTR is required", file=sys.stderr)
+    if not validate_target(args):
         return 1
     if args.tags is None:
         print("Error: --tags is required", file=sys.stderr)
@@ -588,6 +691,7 @@ def cmd_add_tags(args):
     expr = (f'(org-gtd-cli/add-tags {to_elisp(args.substr)} '
             f'{to_elisp(args.tags)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -601,10 +705,13 @@ def cmd_set_property(args):
     if args.value is not None and args.clear:
         print("Error: --value and --clear are mutually exclusive", file=sys.stderr)
         return 1
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/set-property {to_elisp(args.substr)} '
             f'{to_elisp(args.key)} {to_elisp(args.value)} '
             f'{to_elisp("t" if args.clear else None)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -616,26 +723,27 @@ def cmd_agenda_view(args):
 
 
 def cmd_archive(args):
-    if args.all and args.substr:
+    if args.all and (args.substr or getattr(args, 'task_id', None)):
         print("Error: --all and SUBSTR are mutually exclusive", file=sys.stderr)
-        return 1
-    if not args.all and not args.substr:
-        print("Error: provide SUBSTR or --all", file=sys.stderr)
         return 1
     if args.all:
         expr = f'(org-gtd-cli/archive-all {to_elisp("t" if args.dry_run else None)})'
-    else:
-        expr = (f'(org-gtd-cli/archive {to_elisp(args.substr)} '
-                f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+        return run_elisp(expr, json_mode=args.json)
+    # Single-task form: address by SUBSTR or --id
+    if not validate_target(args):
+        return 1
+    expr = (f'(org-gtd-cli/archive {to_elisp(args.substr)} '
+            f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
 def cmd_delete(args):
-    if not args.heading:
-        print("Error: HEADING is required", file=sys.stderr)
+    if not validate_target(args):
         return 1
-    expr = (f'(org-gtd-cli/delete {to_elisp(args.heading)} '
+    expr = (f'(org-gtd-cli/delete {to_elisp(args.substr)} '
             f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -720,6 +828,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("show", help="Show full task details")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring to match (optional with --batch)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--plain", action="store_true", help="Minimal output")
     p.set_defaults(func=cmd_show)
@@ -754,7 +863,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_agenda_view)
 
     p = sub.add_parser("subtasks", help="List children of a project")
-    p.add_argument("substr", metavar="SUBSTR", help="Parent heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Parent heading substring")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--full", action="store_true",
                    help="Include body text in results")
@@ -794,9 +905,12 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_add_task)
 
     p = sub.add_parser("add-subtask", help="Add a child task under a parent")
-    p.add_argument("parent", metavar="SUBSTR", help="Parent heading substring")
+    p.add_argument("parent", nargs="?", default=None, metavar="SUBSTR",
+                   help="Parent heading substring")
     p.add_argument("title", nargs="?", default=None, metavar="TITLE",
                    help="Subtask title (optional with --batch)")
+    p.add_argument("--id", dest="task_id",
+                   help="Resolve the PARENT task by its org :ID:")
     p.add_argument("--body", help="Body text")
     p.add_argument("--body-file", dest="body_file",
                    help="Read body from FILE (use - for stdin)")
@@ -832,6 +946,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("set-done", help="Mark task DONE (with auto-progress)")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring (optional with --batch)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_done)
@@ -843,22 +958,28 @@ Run 'org-gtd-cli <command> -h' for command details."""
                     "set-done's auto-progress side effects (sibling NEXT "
                     "promotion, project-needs-review tagging) — prefer "
                     "set-done for completing tasks.")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("state", metavar="STATE",
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
+    p.add_argument("state", nargs="?", default=None, metavar="STATE",
                    help="Target state: TODO, NEXT, DONE, WAITING, DEFER, CANCELLED")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_state)
 
     p = sub.add_parser("set-next", help="Promote task/child to NEXT")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_set_next)
 
     p = sub.add_parser("set-priority", help="Set priority A/B/C")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
     p.add_argument("priority", nargs="?", default=None, metavar="PRIORITY",
                    help="Priority: A, B, or C")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--clear", action="store_true", help="Remove priority")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
@@ -873,6 +994,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("refile", help="Move task to a different heading")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring (optional with --batch)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--to", help="Exact match on heading text")
     p.add_argument("--category", help="Substring match on category headings")
     p.add_argument("--index", help="Disambiguate with 1-based index")
@@ -880,7 +1002,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_refile)
 
     p = sub.add_parser("move", help="Reorder a task among siblings")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     direction = p.add_mutually_exclusive_group()
     direction.add_argument("--up", action="store_true", help="Move up")
     direction.add_argument("--down", action="store_true", help="Move down")
@@ -890,16 +1014,21 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_move)
 
     p = sub.add_parser("rename", help="Change task heading text")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
-    p.add_argument("newtitle", metavar="NEWTITLE", help="New heading text")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
+    p.add_argument("newtitle", nargs="?", default=None, metavar="NEWTITLE",
+                   help="New heading text")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_rename)
 
     p = sub.add_parser("set-schedule", help="Set/clear SCHEDULED timestamp")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
     p.add_argument("date", nargs="?", default=None, metavar="DATE",
                    help="Date (YYYY-MM-DD)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--time", help="Time (HH:MM)")
     p.add_argument("--clear", action="store_true", help="Remove schedule")
     p.add_argument("--index", help="Disambiguate with 1-based index")
@@ -907,9 +1036,11 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_set_schedule)
 
     p = sub.add_parser("set-deadline", help="Set/clear DEADLINE timestamp")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
     p.add_argument("date", nargs="?", default=None, metavar="DATE",
                    help="Date (YYYY-MM-DD)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--time", help="Time (HH:MM)")
     p.add_argument("--clear", action="store_true", help="Remove deadline")
     p.add_argument("--index", help="Disambiguate with 1-based index")
@@ -919,6 +1050,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("set-tags", help="Replace all tags")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring (optional with --batch)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     tag_group = p.add_mutually_exclusive_group()
     tag_group.add_argument("--tags", help="Tags to set (comma-separated, empty string to clear)")
     tag_group.add_argument("--add", help="Tags to add (comma-separated)")
@@ -930,6 +1062,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("add-tags", help="Append tags (no duplicates)")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring (optional with --batch)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--tags", help="Tags to add (comma-separated, optional with --batch)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
@@ -937,7 +1070,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
 
     p = sub.add_parser("set-property",
                        help="Set or clear a generic org property on a task")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--key", required=True, metavar="NAME",
                    help="Property name (e.g. AGENT_EFFORT)")
     p.add_argument("--value", default=None, metavar="VALUE",
@@ -948,18 +1083,22 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_set_property)
 
     p = sub.add_parser("append-body", help="Append text to task body")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
     p.add_argument("text", nargs="?", default=None, metavar="TEXT",
                    help="Text to append (optional when --body-file is used)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--body-file", dest="body_file",
                    help="Read text from FILE (use - for stdin)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_append_body)
 
     p = sub.add_parser("set-body", help="Replace task body")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
     p.add_argument("text", nargs="?", default=None, metavar="TEXT",
                    help="New body text (optional when --body-file is used)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--body-file", dest="body_file",
                    help="Read text from FILE (use - for stdin)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
@@ -1024,14 +1163,16 @@ Example:
     p = sub.add_parser("archive", help="Archive completed tasks")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--all", action="store_true", help="Archive all eligible tasks")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_archive)
 
     p = sub.add_parser("delete", help="Delete a task (exact match, no projects)")
-    p.add_argument("heading", nargs="?", default=None, metavar="HEADING",
+    p.add_argument("substr", nargs="?", default=None, metavar="HEADING",
                    help="Exact heading text (optional with --batch)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_delete)
