@@ -2508,12 +2508,34 @@ class TestAgendaView:
         assert waiting["count"] >= 1
         assert waiting["count"] == len(waiting["tasks"])
         task = waiting["tasks"][0]
-        for field in ("heading", "state", "tags", "file", "scheduled",
+        for field in ("heading", "state", "tags", "id", "file", "scheduled",
                       "deadline", "parent", "is_project", "properties"):
             assert field in task, f"missing {field} in {task}"
         assert task["state"] == "WAITING"
         assert isinstance(task["tags"], list)
         assert task["file"].endswith(".org")
+
+    def test_json_inherited_tags_and_id(self, org_dir):
+        """agenda-view tasks carry INHERITED tags and an `id` field. "Write
+        quarterly report" (child of `* Work :work:`, no own tag, no :ID:)
+        inherits `work` and reports id None."""
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0
+        report = None
+        for block in data["blocks"]:
+            for t in block["tasks"]:
+                if t["heading"] == "Write quarterly report":
+                    report = t
+                    break
+        assert report is not None, "Write quarterly report not in agenda view"
+        assert "work" in report["tags"], report["tags"]
+        assert "id" in report
+        assert report["id"] is None
+        # Every agenda-view task carries an id field (string or null).
+        for block in data["blocks"]:
+            for t in block["tasks"]:
+                assert "id" in t
+                assert t["id"] is None or isinstance(t["id"], str)
 
     def test_json_empty_block(self, org_dir):
         """An empty block (no matching tasks) still appears with count 0 and
@@ -3241,6 +3263,34 @@ class TestJsonSearch:
         for task in data["tasks"]:
             assert task["state"] == "TODO"
 
+    def test_search_id_field(self, org_dir):
+        """Each search result carries an `id`: present when the heading has an
+        :ID:, None otherwise."""
+        # DONE task under Computers -> Emacs with an explicit :ID:.
+        data, _, rc = run_cli_json(
+            "search", "Fix org-capture", "--state", "all", org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["count"] == 1
+        task = data["tasks"][0]
+        assert task["id"] == "test-id-capture-fix"
+        # It also carries inherited category tags.
+        assert "emacs" in task["tags"]
+        assert "computers" in task["tags"]
+        # A task without an :ID: reports None.
+        data, _, rc = run_cli_json("search", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["tasks"][0]["id"] is None
+
+    def test_search_inherited_tags(self, org_dir):
+        """`search` reports INHERITED tags: "Write quarterly report" (under
+        `* Work :work:`, no own tag) carries `work`."""
+        data, _, rc = run_cli_json("search", "quarterly report", org_dir=org_dir)
+        assert rc == 0
+        report = next(t for t in data["tasks"]
+                      if t["heading"] == "Write quarterly report")
+        assert "work" in report["tags"], report["tags"]
+
 
 # ===========================================================================
 # JSON: agenda command
@@ -3272,8 +3322,27 @@ class TestJsonAgenda:
             assert "deadline" in task
             assert "parent" in task
             assert "is_project" in task
+            assert "id" in task
             # No index field in agenda
             assert "index" not in task
+
+    def test_agenda_id_field_and_inherited_tags(self, org_dir):
+        """`agenda` appends an `id` to each task (None when absent) and the
+        body/properties fields stay correctly placed (the id is a NEW trailing
+        record element, not an inserted one). Tags are inherited."""
+        # --full exercises the body/properties indices alongside the appended id.
+        data, _, rc = run_cli_json("agenda", "--full", "--tag", "work",
+                                   org_dir=org_dir)
+        assert rc == 0
+        report = next(t for t in data["tasks"]
+                      if t["heading"] == "Write quarterly report")
+        assert report["id"] is None
+        assert "work" in report["tags"], report["tags"]
+        # body/properties unshifted by the appended id element.
+        assert "body" in report
+        assert isinstance(report["properties"], dict)
+        for task in data["tasks"]:
+            assert task["id"] is None or isinstance(task["id"], str)
 
     def test_agenda_with_state_filter(self, org_dir):
         data, _, rc = run_cli_json("agenda", "--state", "TODO", org_dir=org_dir)
@@ -3391,12 +3460,48 @@ class TestJsonShow:
             assert "state" in child
             assert "priority" in child
             assert "tags" in child
+            assert "id" in child
             assert "scheduled" in child
             assert "deadline" in child
             assert "is_project" in child
             # No file or parent (redundant in subtask context)
             assert "file" not in child
             assert "parent" not in child
+
+    def test_show_inherited_tags(self, org_dir):
+        """`show` reports INHERITED tags: a child of `* Work :work:` with no
+        own tag still carries `work`."""
+        data, _, rc = run_cli_json("show", "Write quarterly report",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert "work" in data["tags"], data["tags"]
+
+    def test_show_id_present_and_absent(self, org_dir):
+        """`show` surfaces an explicit :ID: and reports None when absent —
+        on both the top-level task and its subtask children."""
+        # Task WITH an id (DONE, under Computers -> Emacs).
+        with_id, _, rc = run_cli_json("show", "Fix org-capture workspace issue",
+                                      org_dir=org_dir)
+        assert rc == 0
+        assert with_id["id"] == "test-id-capture-fix"
+        # That same task also inherits its category tags.
+        assert "emacs" in with_id["tags"]
+        assert "computers" in with_id["tags"]
+        # Task WITHOUT an id.
+        no_id, _, rc = run_cli_json("show", "Write quarterly report",
+                                    org_dir=org_dir)
+        assert rc == 0
+        assert no_id["id"] is None
+        # A project's subtask children each carry an `id` key (None here).
+        proj, _, rc = run_cli_json("show", "Prepare onboarding guide",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert proj["subtasks"]
+        for child in proj["subtasks"]:
+            assert "id" in child
+            assert child["id"] is None
+            # children inherit the project's `work` category tag
+            assert "work" in child["tags"], child["tags"]
 
 
 # ===========================================================================
@@ -3454,9 +3559,35 @@ class TestJsonSubtasks:
         data, _, rc = run_cli_json("subtasks", project["heading"], org_dir=org_dir)
         assert rc == 0
         child = data["subtasks"][0]
-        for field in ["heading", "state", "priority", "tags",
+        for field in ["heading", "state", "priority", "tags", "id",
                        "scheduled", "deadline", "is_project"]:
             assert field in child, f"Missing field: {field}"
+
+    def test_subtasks_inherited_tags(self, org_dir):
+        """`subtasks` children report INHERITED tags: the children of
+        "Prepare onboarding guide" (a project under `* Work :work:`) carry
+        the inherited `work` tag despite having no own tag."""
+        data, _, rc = run_cli_json("subtasks", "Prepare onboarding guide",
+                                   org_dir=org_dir)
+        assert rc == 0
+        headings = {c["heading"] for c in data["subtasks"]}
+        assert {"Draft outline", "Write first chapter"} <= headings
+        for child in data["subtasks"]:
+            assert "work" in child["tags"], (child["heading"], child["tags"])
+
+    def test_subtasks_parent_and_child_id(self, org_dir):
+        """`subtasks` emits an `id` on the parent object and on each child.
+        Absent ids report None (the onboarding project and its children have
+        no :ID:)."""
+        data, _, rc = run_cli_json("subtasks", "Prepare onboarding guide",
+                                   org_dir=org_dir)
+        assert rc == 0
+        # Parent-level id field present, None here.
+        assert "id" in data
+        assert data["id"] is None
+        for child in data["subtasks"]:
+            assert "id" in child
+            assert child["id"] is None
 
 
 # ===========================================================================
@@ -3502,11 +3633,28 @@ class TestJsonProjects:
         assert rc == 0
         if data["count"] > 0:
             proj = data["projects"][0]
-            for field in ["heading", "path", "state", "tags", "file",
+            for field in ["heading", "path", "state", "tags", "id", "file",
                            "parent", "progress"]:
                 assert field in proj, f"Missing field: {field}"
             assert "done" in proj["progress"]
             assert "total" in proj["progress"]
+
+    def test_projects_inherited_tags_and_id(self, org_dir):
+        """`projects` reports INHERITED tags and an `id` per project. The
+        onboarding project under `* Work :work:` carries `work`; ids are
+        None for these tag-less project headings."""
+        data, _, rc = run_cli_json("projects", org_dir=org_dir)
+        assert rc == 0
+        by_heading = {p["heading"]: p for p in data["projects"]}
+        onboarding = by_heading.get("Prepare onboarding guide")
+        assert onboarding is not None
+        assert "work" in onboarding["tags"], onboarding["tags"]
+        assert onboarding["id"] is None
+        # The NixOS projects inherit the `computers` category tag.
+        ship = by_heading.get("Ship epiphyte updates")
+        assert ship is not None
+        assert "computers" in ship["tags"], ship["tags"]
+        assert "id" in ship
 
     def test_project_path_vs_heading(self, org_dir):
         """Path should be full category path, heading should be just the name."""

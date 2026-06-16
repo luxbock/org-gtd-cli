@@ -833,11 +833,12 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                           (org-gtd-cli/has-todo-children-p)))
                      (let ((body-text (when org-gtd-cli/full-mode
                                         (org-gtd-cli/get-body-at-point)))
-                           (props (org-gtd-cli/properties-at-point)))
+                           (props (org-gtd-cli/properties-at-point))
+                           (id (org-entry-get nil "ID")))
                        (push (list state heading priority-char
                                    (vconcat (mapcar #'identity tags))
                                    tags-str rel-file scheduled deadline
-                                   parent-heading is-project body-text props)
+                                   parent-heading is-project body-text props id)
                              results)))))))))))
     (setq results (nreverse results))
     (if org-gtd-cli/json-mode
@@ -872,6 +873,7 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                     (state . ,(nth 0 r))
                     (priority . ,(or (nth 2 r) :null))
                     (tags . ,(or (nth 3 r) []))
+                    (id . ,(or (nth 12 r) :null))
                     (file . ,(nth 5 r))
                     (scheduled . ,(or (nth 6 r) :null))
                     (deadline . ,(or (nth 7 r) :null))
@@ -978,10 +980,11 @@ FILE-NAME restricts search to a single file in org-directory."
                             found))))
                    (let ((body-text (when org-gtd-cli/full-mode
                                       (org-gtd-cli/get-body-at-point)))
-                         (props (org-gtd-cli/properties-at-point)))
+                         (props (org-gtd-cli/properties-at-point))
+                         (id (org-entry-get nil "ID")))
                      (push (list state heading rel-file
                                  (vconcat (mapcar #'identity tags))
-                                 parent-heading is-project body-text props)
+                                 parent-heading is-project body-text props id)
                            matches))))))))))
     (setq matches (nreverse matches))
     (if org-gtd-cli/json-mode
@@ -996,10 +999,12 @@ FILE-NAME restricts search to a single file in org-directory."
                    (is-project (nth 5 m))
                    (body (nth 6 m))
                    (props (nth 7 m))
+                   (id (nth 8 m))
                    (task `((index . ,i)
                            (heading . ,heading)
                            (state . ,state)
                            (tags . ,(or tags []))
+                           (id . ,(or id :null))
                            (file . ,rel-file)
                            (parent . ,(or parent :null))
                            (is_project . ,(if is-project t :false))
@@ -1092,7 +1097,8 @@ minus the version/command wrapper."
   (let* ((heading (org-get-heading t t t t))
          (state (org-get-todo-state))
          (priority-char (org-gtd-cli/get-explicit-priority))
-         (tags (org-get-tags nil t))
+         (tags (org-get-tags))
+         (id (org-entry-get nil "ID"))
          (file (buffer-file-name))
          (rel-file (org-gtd-cli/relative-filename file))
          (scheduled (org-entry-get nil "SCHEDULED"))
@@ -1118,7 +1124,8 @@ minus the version/command wrapper."
           (let* ((child-state (org-get-todo-state))
                  (child-heading (org-get-heading t t t t))
                  (child-priority (org-gtd-cli/get-explicit-priority))
-                 (child-tags (org-get-tags nil t))
+                 (child-tags (org-get-tags))
+                 (child-id (org-entry-get nil "ID"))
                  (child-scheduled (org-entry-get nil "SCHEDULED"))
                  (child-deadline (org-entry-get nil "DEADLINE"))
                  (child-is-project (org-gtd-cli/has-todo-children-p)))
@@ -1130,6 +1137,7 @@ minus the version/command wrapper."
                     (state . ,(or child-state :null))
                     (priority . ,(or child-priority :null))
                     (tags . ,(vconcat (mapcar #'identity child-tags)))
+                    (id . ,(or child-id :null))
                     (scheduled . ,(or child-scheduled :null))
                     (deadline . ,(or child-deadline :null))
                     (is_project . ,(if child-is-project t :false)))
@@ -1139,6 +1147,7 @@ minus the version/command wrapper."
         (state . ,(or state :null))
         (priority . ,(or priority-char :null))
         (tags . ,(vconcat (mapcar #'identity tags)))
+        (id . ,(or id :null))
         (file . ,rel-file)
         (scheduled . ,(or scheduled :null))
         (deadline . ,(or deadline :null))
@@ -1229,7 +1238,8 @@ field with the full task state (same schema as show --json)."
                       (child-scheduled (org-entry-get nil "SCHEDULED"))
                       (child-deadline (org-entry-get nil "DEADLINE"))
                       (child-priority (org-gtd-cli/get-explicit-priority))
-                      (child-tags (org-get-tags nil t))
+                      (child-tags (org-get-tags))
+                      (child-id (org-entry-get nil "ID"))
                       (child-is-project (org-gtd-cli/has-todo-children-p)))
                  (cl-incf total-count)
                  (when (and child-state (member child-state org-done-keywords))
@@ -1243,7 +1253,8 @@ field with the full task state (same schema as show --json)."
                                child-priority
                                child-tags
                                child-is-project
-                               child-body)
+                               child-body
+                               child-id)
                          children))))))
          (if (= total-count 0)
              (progn
@@ -1256,7 +1267,8 @@ field with the full task state (same schema as show --json)."
                   (if (org-up-heading-safe)
                       (org-get-heading t t t t)
                     nil))
-                children done-count total-count)
+                children done-count total-count
+                (org-entry-get nil "ID"))
              (princ (format "Project: %s (%s)\n" heading rel-file))
              (dolist (child (nreverse children))
                (let ((line-str (concat "  " (nth 0 child) " " (nth 1 child)
@@ -1275,8 +1287,9 @@ field with the full task state (same schema as show --json)."
              (princ (format "\nProgress: %d/%d done\n" done-count total-count))))))))
   (kill-emacs 0))
 
-(defun org-gtd-cli/output-subtasks-json (heading state rel-file parent children done-count total-count)
-  "Output JSON for the subtasks command."
+(defun org-gtd-cli/output-subtasks-json (heading state rel-file parent children done-count total-count &optional id)
+  "Output JSON for the subtasks command.
+ID is the parent heading's own org :ID: (or nil)."
   (let ((subtask-list '()))
     (dolist (child (nreverse children))
       (let ((subtask `((heading . ,(nth 1 child))
@@ -1284,6 +1297,7 @@ field with the full task state (same schema as show --json)."
                        (priority . ,(let ((p (nth 4 child)))
                                       (if (and p (not (string-empty-p p))) p :null)))
                        (tags . ,(vconcat (mapcar #'identity (nth 5 child))))
+                       (id . ,(or (nth 8 child) :null))
                        (scheduled . ,(or (nth 2 child) :null))
                        (deadline . ,(or (nth 3 child) :null))
                        (is_project . ,(if (nth 6 child) t :false)))))
@@ -1295,6 +1309,7 @@ field with the full task state (same schema as show --json)."
        (command . "subtasks")
        (heading . ,heading)
        (state . ,(or state :null))
+       (id . ,(or id :null))
        (file . ,rel-file)
        (parent . ,(or parent :null))
        (progress . ((done . ,done-count) (total . ,total-count)))
@@ -1379,13 +1394,14 @@ at least one direct child with a TODO keyword."
                      (when (> total-count 0)
                        (let ((heading (org-get-heading t t t t))
                              (path (org-gtd-cli/heading-path-at-point))
-                             (tags (org-get-tags nil t))
+                             (tags (org-get-tags))
+                             (id (org-entry-get nil "ID"))
                              (parent (save-excursion
                                        (if (org-up-heading-safe)
                                            (org-get-heading t t t t)
                                          nil))))
                          (push (list heading path state tags
-                                     rel-file parent done-count total-count)
+                                     rel-file parent done-count total-count id)
                                results))))))))))))
     (setq results (nreverse results))
     (if org-gtd-cli/json-mode
@@ -1405,6 +1421,7 @@ at least one direct child with a TODO keyword."
               (path . ,(nth 1 r))
               (state . ,(nth 2 r))
               (tags . ,(vconcat (mapcar #'identity (nth 3 r))))
+              (id . ,(or (nth 8 r) :null))
               (file . ,(nth 4 r))
               (parent . ,(or (nth 5 r) :null))
               (progress . ((done . ,(nth 6 r)) (total . ,(nth 7 r)))))
@@ -3535,7 +3552,8 @@ parent, is_project, properties), plus `body' when `--full' is set."
        (let* ((state (org-get-todo-state))
               (heading (org-get-heading t t t t))
               (priority-char (org-gtd-cli/get-explicit-priority))
-              (tags (org-get-tags nil t))
+              (tags (org-get-tags))
+              (id (org-entry-get nil "ID"))
               (scheduled (org-entry-get nil "SCHEDULED"))
               (deadline (org-entry-get nil "DEADLINE"))
               (src-file (buffer-file-name))
@@ -3551,6 +3569,7 @@ parent, is_project, properties), plus `body' when `--full' is set."
                       (state . ,(or state :null))
                       (priority . ,(or priority-char :null))
                       (tags . ,(vconcat (mapcar #'identity tags)))
+                      (id . ,(or id :null))
                       (file . ,rel-file)
                       (scheduled . ,(or scheduled :null))
                       (deadline . ,(or deadline :null))
