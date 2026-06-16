@@ -594,10 +594,22 @@ org id if it lacks one (lazy create, idempotent)."
             (let ((match-list '())
                   (i 1))
               (dolist (m matches)
-                (push `((index . ,i) (heading . ,(nth 3 m))
-                        (state . ,(nth 2 m))
-                        (file . ,(nth 4 m)))
-                      match-list)
+                (let* ((mbuf (nth 0 m)) (mpos (nth 1 m))
+                       (parent (with-current-buffer mbuf
+                                 (org-with-wide-buffer
+                                  (goto-char mpos)
+                                  (and (org-up-heading-safe)
+                                       (org-get-heading t t t t)))))
+                       (path (with-current-buffer mbuf
+                               (org-with-wide-buffer
+                                (goto-char mpos)
+                                (org-gtd-cli/heading-path-at-point)))))
+                  (push `((index . ,i) (heading . ,(nth 3 m))
+                          (state . ,(nth 2 m))
+                          (file . ,(nth 4 m))
+                          (parent . ,(or parent :null))
+                          (path . ,path))
+                        match-list))
                 (cl-incf i))
               (org-gtd-cli/output
                `((error . "Multiple matches")
@@ -1328,7 +1340,12 @@ ID is the parent heading's own org :ID: (or nil)."
   "Show the category tree for an org file.
 Displays plain (non-TODO) headings as full paths, stopping at the
 first TODO heading in each branch. Useful for finding refile targets.
-FILE-NAME defaults to \"tasks.org\"."
+FILE-NAME defaults to \"tasks.org\".
+
+In JSON mode each `categories' element is an object with `path' (the
+full slash-separated heading path) and `heading' (the leaf heading),
+so callers can walk `.categories[].heading'. The text output is one
+line per category: \"<path> (<file>)\"."
   (let* ((target (or (and file-name
                           (not (equal file-name "nil"))
                           (not (string-empty-p file-name))
@@ -1348,7 +1365,9 @@ FILE-NAME defaults to \"tasks.org\"."
              (let ((state (org-get-todo-state)))
                (unless state
                  (setq found t)
-                 (push (org-gtd-cli/heading-path-at-point) categories)))))))
+                 (push `((path . ,(org-gtd-cli/heading-path-at-point))
+                         (heading . ,(org-get-heading t t t t)))
+                       categories)))))))
       (if org-gtd-cli/json-mode
           (org-gtd-cli/output
            `((version . 1)
@@ -1360,7 +1379,7 @@ FILE-NAME defaults to \"tasks.org\"."
         (if found
             (let ((rel-file (org-gtd-cli/relative-filename file)))
               (dolist (cat (nreverse categories))
-                (princ (format "%s (%s)\n" cat rel-file))))
+                (princ (format "%s (%s)\n" (alist-get 'path cat) rel-file))))
           (org-gtd-cli/error "No categories found")))))
   (kill-emacs 0))
 

@@ -3799,11 +3799,32 @@ class TestJsonCategories:
         assert len(data["categories"]) > 0
         assert "file" in data
 
-    def test_categories_are_path_strings(self, org_dir):
+    def test_categories_are_objects_with_path_and_heading(self, org_dir):
+        """Each category is a walkable object with `path` + `heading` (#5)."""
         data, _, rc = run_cli_json("categories", org_dir=org_dir)
         assert rc == 0
         for cat in data["categories"]:
-            assert isinstance(cat, str)
+            assert isinstance(cat, dict)
+            assert isinstance(cat["path"], str)
+            assert isinstance(cat["heading"], str)
+            # heading is the leaf (last "/"-segment) of path.
+            assert cat["heading"] == cat["path"].rsplit("/", 1)[-1]
+
+    def test_categories_heading_walk_yields_leaf_headings(self, org_dir):
+        """A `.categories[].heading` walk now resolves (was empty before #5)."""
+        data, _, rc = run_cli_json("categories", org_dir=org_dir)
+        assert rc == 0
+        headings = [cat["heading"] for cat in data["categories"]]
+        paths = [cat["path"] for cat in data["categories"]]
+        # Top-level category: leaf heading == path.
+        assert "Work" in headings
+        assert "Work" in paths
+        # Nested category: leaf heading is the last segment, path is full.
+        assert "Agents" in headings
+        assert "Computers/Agents" in paths
+        # Deep category retains its leaf heading.
+        assert "Resources" in headings
+        assert "Computers/Agents/Improve agent workflow/Resources" in paths
 
 
 # ===========================================================================
@@ -5717,6 +5738,29 @@ class TestCorrectiveErrors:
         assert len(data["matches"]) > 1
         assert "hint" in data
         assert "--index" in data["hint"]
+
+    def test_show_ambiguous_json_matches_have_parent_and_path(self, org_dir):
+        """Ambiguous match entries carry parent + path for disambiguation (#4)."""
+        # "Buy" matches several tasks, incl. parented ones in tasks.org and a
+        # top-level one ("Buy groceries") in inbox.org with no parent.
+        data, stderr, rc = run_cli_json("show", "Buy", org_dir=org_dir)
+        assert rc == 2
+        assert data is not None
+        matches = data["matches"]
+        assert len(matches) > 1
+        # Every entry keeps the original keys AND gains parent + path.
+        for m in matches:
+            assert set(["index", "heading", "state", "file", "parent", "path"]).issubset(m.keys())
+        by_heading = {m["heading"]: m for m in matches}
+        # A parented subtask: "Buy a formicarium" lives under "Pet Ants".
+        formicarium = by_heading["Buy a formicarium"]
+        assert formicarium["parent"] == "Pet Ants"
+        assert formicarium["path"] == "Family/Pet Ants/Buy a formicarium"
+        # A top-level heading has a null parent (the :null convention), and its
+        # path is just the heading itself.
+        groceries = by_heading["Buy groceries"]
+        assert groceries["parent"] is None
+        assert groceries["path"] == "Buy groceries"
 
     def test_refile_category_not_found_json_hint(self, org_dir):
         """refile --category nonexistent shows hint in the JSON error on stdout."""
