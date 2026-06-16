@@ -195,13 +195,18 @@ EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
 ;; ══════════════════════════════════════════════════════════════════════════════
 
 (defun org-gtd-cli/error (fmt &rest args)
-  "Write a diagnostic/error message to stderr.
+  "Write a diagnostic/error message.
 In Emacs batch mode, `message' writes to stderr while `princ' writes to stdout.
-In JSON mode, outputs {\"error\": \"...\"}  to stderr.
+In JSON mode, outputs {\"error\": \"...\"} to STDOUT (so that `... 2>/dev/null
+| jq' and `json.loads(stdout)' see the error object); the `--json' contract is
+that stdout always carries exactly one JSON object — data, error-with-hint, or
+ambiguous-matches — while stderr carries only opaque Emacs diagnostics.
+In text mode, the message goes to stderr.
 Use this for errors, warnings, and hints — never for command output data."
   (if org-gtd-cli/json-mode
       (let ((msg (apply #'format fmt args)))
-        (message "%s" (org-gtd-cli/json-encode `((error . ,msg)))))
+        (princ (org-gtd-cli/json-encode `((error . ,msg))))
+        (princ "\n"))
     (apply #'message fmt args)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
@@ -486,9 +491,10 @@ then exits 1."
                                    (line-beginning-position)))))))))
     (let ((hint "Use a task id from list/show output, or address by SUBSTR."))
       (if org-gtd-cli/json-mode
-          (message "%s" (org-gtd-cli/json-encode
-                         `((error . ,(format "No task found with id \"%s\"" id))
-                           (hint . ,hint))))
+          ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+          (org-gtd-cli/output
+           `((error . ,(format "No task found with id \"%s\"" id))
+             (hint . ,hint)))
         (org-gtd-cli/error "No task found with id \"%s\"" id)
         (org-gtd-cli/error "Hint: %s" hint)))
     (kill-emacs 1)))
@@ -566,9 +572,10 @@ org id if it lacks one (lazy create, idempotent)."
                                           (seq-take cat-paths 3) ", ")
                                (car cat-paths))))))
           (if org-gtd-cli/json-mode
-              (message "%s" (org-gtd-cli/json-encode
-                             `((error . ,(format "No task found matching \"%s\"" substring))
-                               (hint . ,hint))))
+              ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+              (org-gtd-cli/output
+               `((error . ,(format "No task found matching \"%s\"" substring))
+                 (hint . ,hint)))
             (org-gtd-cli/error "No task found matching \"%s\"" substring)
             (org-gtd-cli/error "Hint: %s" hint)))
         (kill-emacs 1))
@@ -2311,9 +2318,10 @@ within the just-completed task's own file."
     (unless (member new-state all-states)
       (let ((valid-str (mapconcat #'identity all-states ", ")))
         (if org-gtd-cli/json-mode
-            (message "%s" (org-gtd-cli/json-encode
-                           `((error . ,(format "\"%s\" is not a valid state" new-state))
-                             (hint . ,(format "Valid states: %s" valid-str)))))
+            ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+            (org-gtd-cli/output
+             `((error . ,(format "\"%s\" is not a valid state" new-state))
+               (hint . ,(format "Valid states: %s" valid-str))))
           (org-gtd-cli/error "Error: \"%s\" is not a valid state" new-state)
           (org-gtd-cli/error "Valid states: %s" valid-str)))
       (kill-emacs 1)))
@@ -2474,9 +2482,10 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                                      target self-match-count (if (= self-match-count 1) "" "es"))
                            (format "Target heading \"%s\" not found" target))))
                 (if org-gtd-cli/json-mode
-                    (message "%s" (org-gtd-cli/json-encode
-                                   `((error . ,msg)
-                                     (hint . "Use 'categories' to see available targets."))))
+                    ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+                    (org-gtd-cli/output
+                     `((error . ,msg)
+                       (hint . "Use 'categories' to see available targets.")))
                   (org-gtd-cli/error "Error: %s" msg)
                   (org-gtd-cli/error "Hint: use 'categories' to see available targets.")))
               (kill-emacs 1)))
@@ -2485,9 +2494,10 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
           (cond
            ((null matches)
             (if org-gtd-cli/json-mode
-                (message "%s" (org-gtd-cli/json-encode
-                               `((error . ,(format "Category heading \"%s\" not found" category))
-                                 (hint . "Use 'categories' to see available targets."))))
+                ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+                (org-gtd-cli/output
+                 `((error . ,(format "Category heading \"%s\" not found" category))
+                   (hint . "Use 'categories' to see available targets.")))
               (org-gtd-cli/error "Error: category heading \"%s\" not found" category)
               (org-gtd-cli/error "Hint: use 'categories' to see available targets."))
             (kill-emacs 1))
@@ -2582,11 +2592,11 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                      (when (org-up-heading-safe)
                        (org-get-todo-state))))
            (if org-gtd-cli/json-mode
-               (message "%s"
-                        (org-gtd-cli/json-encode
-                         `((error . ,(format "Cannot set-next on subproject: \"%s\" has subtasks" heading))
-                           (hint . "Use set-next on the parent project, or set-state on a specific subtask.")
-                           (exit_code . 1))))
+               ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+               (org-gtd-cli/output
+                `((error . ,(format "Cannot set-next on subproject: \"%s\" has subtasks" heading))
+                  (hint . "Use set-next on the parent project, or set-state on a specific subtask.")
+                  (exit_code . 1)))
              (org-gtd-cli/error
               "Cannot set-next on subproject: \"%s\" has subtasks\nHint: Use set-next on the parent project, or set-state on a specific subtask."
               heading))
@@ -2601,11 +2611,11 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
              (when (and (save-excursion (org-up-heading-safe))
                         (not parent-is-project))
                (if org-gtd-cli/json-mode
-                   (message "%s"
-                            (org-gtd-cli/json-encode
-                             `((error . ,(format "Cannot set-next: \"%s\" is not inside a project" heading))
-                               (hint . "Use set-state SUBSTR NEXT to set state directly.")
-                               (exit_code . 1))))
+                   ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+                   (org-gtd-cli/output
+                    `((error . ,(format "Cannot set-next: \"%s\" is not inside a project" heading))
+                      (hint . "Use set-state SUBSTR NEXT to set state directly.")
+                      (exit_code . 1)))
                  (org-gtd-cli/error
                   "Cannot set-next: \"%s\" is not inside a project\nHint: Use set-state SUBSTR NEXT to set state directly."
                   heading))

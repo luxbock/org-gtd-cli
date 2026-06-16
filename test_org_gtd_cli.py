@@ -331,22 +331,27 @@ class TestFindTaskCategoryHint:
     the no-match error hint should point at add-task --category with the
     full slash path instead of the generic 'shorter substring' advice."""
 
-    def _json_error(self, stderr):
-        for line in stderr.strip().splitlines():
+    def _json_error(self, stdout):
+        # Under --json, the error+hint object is written to STDOUT (so that
+        # `... 2>/dev/null | jq` and `json.loads(stdout)` see it).
+        for line in stdout.strip().splitlines():
             line = line.strip()
             if line.startswith("{"):
                 return json.loads(line)
-        raise AssertionError(f"No JSON error found in stderr: {stderr}")
+        raise AssertionError(f"No JSON error found in stdout: {stdout}")
 
     def test_add_subtask_category_substring_json(self, org_dir):
         # "Pet Ants" is a category heading (* Family / ** Pet Ants), not a task
         stdout, stderr, rc = run_cli(
             "--json", "add-subtask", "Pet Ants", "New child", org_dir=org_dir)
         assert rc == 1
-        err = self._json_error(stderr)
+        err = self._json_error(stdout)
         assert 'No task found matching "Pet Ants"' in err["error"]
         assert "category heading, not a task" in err["hint"]
         assert 'add-task --category "Family/Pet Ants"' in err["hint"]
+        # The error+hint object is on stdout, not stderr.
+        assert "category heading, not a task" in stdout
+        assert stderr.find('No task found matching') == -1
 
     def test_add_subtask_category_substring_text(self, org_dir):
         stdout, stderr, rc = run_cli(
@@ -360,7 +365,7 @@ class TestFindTaskCategoryHint:
         stdout, stderr, rc = run_cli(
             "--json", "add-subtask", "zzqqxxk-nonexistent", "child", org_dir=org_dir)
         assert rc == 1
-        err = self._json_error(stderr)
+        err = self._json_error(stdout)
         assert 'No task found matching "zzqqxxk-nonexistent"' in err["error"]
         assert err["hint"] == "Try a shorter substring, or use 'search' for partial matches."
         assert "add-task --category" not in err["hint"]
@@ -369,10 +374,13 @@ class TestFindTaskCategoryHint:
         # find-task is shared, so `show` gets the category-aware hint as well
         stdout, stderr, rc = run_cli("--json", "show", "Holiday Trip", org_dir=org_dir)
         assert rc == 1
-        err = self._json_error(stderr)
+        err = self._json_error(stdout)
         assert 'No task found matching "Holiday Trip"' in err["error"]
         assert "category heading, not a task" in err["hint"]
         assert 'add-task --category "Travel/Holiday Trip"' in err["hint"]
+        # The add-task --category guidance is now in the stdout JSON object.
+        assert "add-task --category" in stdout
+        assert stderr.find('No task found matching') == -1
 
 
 # ===========================================================================
@@ -1308,18 +1316,18 @@ class TestAddNote:
         assert note_file.read_text() == original
 
     def test_colliding_slug_json_error(self, org_dir):
-        """In --json mode the collision error is emitted as JSON on stderr."""
+        """In --json mode the collision error is emitted as JSON on stdout."""
         stdout, stderr, rc = run_cli("add-note", "Collision test", org_dir=org_dir)
         assert rc == 0
         stdout, stderr, rc = run_cli("--json", "add-note", "Collision test", org_dir=org_dir)
         assert rc == 1
         err_data = None
-        for line in stderr.strip().split("\n"):
+        for line in stdout.strip().split("\n"):
             line = line.strip()
             if line.startswith("{"):
                 err_data = json.loads(line)
                 break
-        assert err_data is not None, f"No JSON error found in stderr: {stderr}"
+        assert err_data is not None, f"No JSON error found in stdout: {stdout}"
         assert "already exists" in err_data["error"]
 
     def test_non_ascii_title_errors_instead_of_empty_slug(self, org_dir):
@@ -1591,17 +1599,13 @@ class TestSetNext:
         assert "has subtasks" in stderr
 
     def test_subproject_set_next_json_error(self, org_dir):
+        # Under --json the error+hint object is emitted on STDOUT, so
+        # run_cli_json parses it directly.
         data, stderr, rc = run_cli_json("set-next", "Implement CLI tool", org_dir=org_dir)
         assert rc == 1
-        err = None
-        for line in stderr.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                err = json.loads(line)
-                break
-        assert err is not None, f"No JSON found in stderr: {stderr}"
-        assert "has subtasks" in err["error"]
-        assert "hint" in err
+        assert data is not None, f"No JSON found in stdout (stderr: {stderr})"
+        assert "has subtasks" in data["error"]
+        assert "hint" in data
 
 
 # ===========================================================================
@@ -2564,17 +2568,17 @@ class TestAgendaView:
         assert all("body" in t for t in tasks)
 
     def test_json_invalid_key(self, org_dir):
-        """--json on an unknown key emits a JSON error object on stderr."""
+        """--json on an unknown key emits a JSON error object on stdout."""
         stdout, stderr, rc = run_cli("--json", "agenda-view", "INVALID",
                                      org_dir=org_dir)
         assert rc == 1
         err_data = None
-        for line in stderr.strip().split("\n"):
+        for line in stdout.strip().split("\n"):
             line = line.strip()
             if line.startswith("{"):
                 err_data = json.loads(line)
                 break
-        assert err_data is not None, f"No JSON error in stderr: {stderr}"
+        assert err_data is not None, f"No JSON error in stdout: {stdout}"
         assert "Unknown agenda view key" in err_data["error"]
 
     def test_json_date_pages_agenda_block(self, org_dir):
@@ -3148,26 +3152,19 @@ class TestJsonInfrastructure:
         assert data["tasks"] == []
         assert data["count"] == 0
 
-    def test_json_error_on_stderr(self, org_dir):
-        """--json errors produce JSON on stderr."""
+    def test_json_error_on_stdout(self, org_dir):
+        """--json errors produce a JSON error object on stdout."""
         data, stderr, rc = run_cli_json("show", "nonexistent_xyz_12345", org_dir=org_dir)
         assert rc == 1
-        # stderr contains Emacs loading messages mixed with our JSON errors
-        # Find the first line that looks like JSON
-        err_data = None
-        for line in stderr.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("{"):
-                err_data = json.loads(line)
-                break
-        assert err_data is not None, f"No JSON error found in stderr: {stderr}"
-        assert "error" in err_data
+        # run_cli_json parses stdout; the error object lives there.
+        assert data is not None, f"No JSON error found in stdout (stderr: {stderr})"
+        assert "error" in data
 
     def test_json_rejected_for_org_timestamp(self, org_dir):
-        """--json on org-timestamp returns error."""
+        """--json on org-timestamp returns a JSON error object on stdout."""
         stdout, stderr, rc = run_cli("--json", "org-timestamp", "2026-03-15", org_dir=org_dir)
         assert rc == 1
-        err_data = json.loads(stderr.strip())
+        err_data = json.loads(stdout.strip())
         assert "error" in err_data
         assert "org-timestamp" in err_data["error"]
 
@@ -4197,13 +4194,13 @@ class TestJsonNonAsciiEncoding:
         assert NON_ASCII_BODY in bodies
 
     def test_json_error_non_ascii_c_locale(self, org_dir):
-        """Error JSON (on stderr) must also be valid UTF-8 under C locale."""
+        """Error JSON (on stdout) must also be valid UTF-8 under C locale."""
         stdout, stderr, rc = run_cli(
             "--json", "show", "nø such tæsk",
             org_dir=org_dir, env_overrides=C_LOCALE)
         assert rc == 1
-        # The error blob is emitted on stderr as JSON; it must parse.
-        err = json.loads(stderr.strip().splitlines()[-1])
+        # The error blob is emitted on stdout as JSON; it must parse.
+        err = json.loads(stdout.strip().splitlines()[-1])
         assert "error" in err
 
 
@@ -4253,6 +4250,34 @@ class TestDaemonSaveChatter:
             # The save notice must appear on neither stream.
             assert "Saving file" not in stdout
             assert "Saving file" not in stderr
+        finally:
+            self._kill_daemon(str(daemon_tmp))
+
+    def test_daemon_json_refile_no_chatter_on_stdout(self, org_dir, tmp_path):
+        """Issue 1a regression: a *chatty* mutation (refile, which triggers
+        org's "Copied: Subtree(s)...", "Refile to ...: done" and "Sorting...done"
+        notices) must, in DAEMON mode under --json, emit a single clean JSON
+        object on stdout. The Emacs chatter belongs on stderr (via the
+        daemon-dispatch `message` rebind + `save-silently`), never on stdout."""
+        daemon_tmp = tmp_path / "daemon-home"
+        daemon_tmp.mkdir()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": str(daemon_tmp),
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            # "Buy groceries" (inbox) refiled under the "Shopping" category
+            # (a category heading in tasks.org) exercises the full copy/sort
+            # path that prints the chatter.
+            stdout, stderr, rc = run_cli(
+                "--json", "refile", "Buy groceries", "--category", "Shopping",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            # (a) stdout parses as a single JSON object.
+            data = json.loads(stdout)
+            assert data["command"] == "refile"
+            # (b) none of the Emacs chatter substrings leak onto stdout.
+            for chatter in ("Copied:", "Refile to", "Sorting"):
+                assert chatter not in stdout, \
+                    f"chatter {chatter!r} leaked onto stdout: {stdout!r}"
         finally:
             self._kill_daemon(str(daemon_tmp))
 
@@ -4382,12 +4407,14 @@ class TestDaemonRobustness:
                     assert data["task"]["body"] == f"round {i}"
 
                 # Each failing show keeps its exit code and does not receive
-                # another call's stdout.
+                # another call's stdout. The error object is on STDOUT under
+                # --json; a read-only failing `show` produces no chatter, so
+                # stdout is exactly the error object.
                 for out_err, err_err, rc_err in err_results:
                     assert rc_err == 1, \
                         f"round {i}: rc {rc_err}, stdout: {out_err}"
                     assert "set-body" not in out_err
-                    err = json.loads(err_err.strip().splitlines()[-1])
+                    err = json.loads(out_err.strip().splitlines()[-1])
                     assert "error" in err
         finally:
             self._kill_daemon(daemon_tmp)
@@ -4524,18 +4551,13 @@ class TestSetNextNonProjectParent:
 
     def test_set_next_leaf_under_organizational_heading_json(self, org_dir):
         """set-next on a leaf under organizational heading returns JSON error."""
+        # Under --json the error+hint object is on STDOUT, so run_cli_json
+        # parses it directly.
         data, stderr, rc = run_cli_json("set-next", "Write quarterly report", org_dir=org_dir)
         assert rc == 1
-        # Extract JSON line from stderr (may contain Emacs loading messages)
-        err = None
-        for line in stderr.splitlines():
-            line = line.strip()
-            if line.startswith("{"):
-                err = json.loads(line)
-                break
-        assert err is not None, f"No JSON found in stderr: {stderr}"
-        assert "not inside a project" in err["error"]
-        assert "set-state" in err["hint"]
+        assert data is not None, f"No JSON found in stdout (stderr: {stderr})"
+        assert "not inside a project" in data["error"]
+        assert "set-state" in data["hint"]
 
     def test_set_next_leaf_under_project_still_works(self, org_dir):
         """set-next on a leaf under a project (parent has TODO keyword) works."""
@@ -5298,6 +5320,13 @@ class TestBatchLoudErrors:
         assert result.stderr.strip() != ""
         assert "usage:" not in result.stdout  # no generic help dump
 
+    def _assert_loud_json(self, result):
+        # In --json mode the error object goes to STDOUT (the --json
+        # contract), so stdout — not stderr — must be loud.
+        assert result.returncode == 1
+        assert result.stdout.strip() != ""
+        assert "usage:" not in result.stdout  # no generic help dump
+
     def test_batch_flag_without_subcommand_text(self, org_dir):
         r = self._run(["--batch"], "", org_dir)
         self._assert_loud(r)
@@ -5307,8 +5336,8 @@ class TestBatchLoudErrors:
 
     def test_batch_flag_without_subcommand_json(self, org_dir):
         r = self._run(["--json", "--batch"], "", org_dir)
-        self._assert_loud(r)
-        err = json.loads(r.stderr.strip())
+        self._assert_loud_json(r)
+        err = json.loads(r.stdout.strip())
         assert "subcommand" in err["error"]
 
     # --- batch subcommand: malformed stdin ---
@@ -5320,8 +5349,8 @@ class TestBatchLoudErrors:
 
     def test_batch_subcommand_invalid_json(self, org_dir):
         r = self._run(["--json", "batch"], "this is not json", org_dir)
-        self._assert_loud(r)
-        err = json.loads(r.stderr.strip())
+        self._assert_loud_json(r)
+        err = json.loads(r.stdout.strip())
         assert "invalid JSON" in err["error"]
 
     def test_batch_subcommand_non_array(self, org_dir):
@@ -5344,8 +5373,8 @@ class TestBatchLoudErrors:
             ["--json", "batch"],
             '[{"command": "set-done", "args": "Write quarterly report"}]',
             org_dir)
-        self._assert_loud(r)
-        err = json.loads(r.stderr.strip())
+        self._assert_loud_json(r)
+        err = json.loads(r.stdout.strip())
         assert "args" in err["error"]
 
     # --- legacy --batch <subcommand>: malformed stdin ---
@@ -5358,8 +5387,8 @@ class TestBatchLoudErrors:
     def test_batch_flag_non_array(self, org_dir):
         r = self._run(["--json", "--batch", "set-done"], '{"heading": "x"}',
                       org_dir)
-        self._assert_loud(r)
-        err = json.loads(r.stderr.strip())
+        self._assert_loud_json(r)
+        err = json.loads(r.stdout.strip())
         assert "array" in err["error"]
 
     def test_batch_flag_invalid_item_type(self, org_dir):
@@ -5441,20 +5470,14 @@ class TestCorrectiveErrors:
     """Tests for corrective error messages with hints."""
 
     def test_show_no_match_json_has_hint(self, org_dir):
-        """show on nonexistent task includes hint in JSON on stderr."""
+        """show on nonexistent task includes hint in the JSON error on stdout."""
+        # run_cli_json parses stdout, where the error+hint object now lives.
         data, stderr, rc = run_cli_json("show", "zzz_nonexistent_zzz", org_dir=org_dir)
         assert rc == 1
-        # Error JSON goes to stderr
-        err_data = None
-        for line in stderr.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("{"):
-                err_data = json.loads(line)
-                break
-        assert err_data is not None
-        assert "error" in err_data
-        assert "hint" in err_data
-        assert "search" in err_data["hint"].lower()
+        assert data is not None, f"No JSON error found in stdout (stderr: {stderr})"
+        assert "error" in data
+        assert "hint" in data
+        assert "search" in data["hint"].lower()
 
     def test_show_ambiguous_json_has_matches(self, org_dir):
         """show on ambiguous SUBSTR returns match list + hint in JSON."""
@@ -5468,46 +5491,27 @@ class TestCorrectiveErrors:
         assert "--index" in data["hint"]
 
     def test_refile_category_not_found_json_hint(self, org_dir):
-        """refile --category nonexistent shows hint in JSON on stderr."""
+        """refile --category nonexistent shows hint in the JSON error on stdout."""
+        # run_cli_json parses stdout, where the error+hint object now lives.
         data, stderr, rc = run_cli_json(
             "refile", "Write quarterly report", "--category", "zzz_nonexistent",
             org_dir=org_dir,
         )
         assert rc == 1
-        err_data = None
-        for line in stderr.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    err_data = json.loads(line)
-                    if "hint" in err_data:
-                        break
-                except json.JSONDecodeError:
-                    pass
-        assert err_data is not None
-        assert "hint" in err_data
-        assert "categories" in err_data["hint"].lower()
+        assert data is not None, f"No JSON error found in stdout (stderr: {stderr})"
+        assert "hint" in data
+        assert "categories" in data["hint"].lower()
 
     def test_set_state_invalid_json_hint(self, org_dir):
-        """set-state with invalid state shows valid states in JSON on stderr."""
+        """set-state with invalid state shows valid states in the JSON error on stdout."""
         data, stderr, rc = run_cli_json(
             "set-state", "Write quarterly report", "INVALID",
             org_dir=org_dir,
         )
         assert rc == 1
-        err_data = None
-        for line in stderr.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    err_data = json.loads(line)
-                    if "hint" in err_data:
-                        break
-                except json.JSONDecodeError:
-                    pass
-        assert err_data is not None
-        assert "hint" in err_data
-        assert "TODO" in err_data["hint"]
+        assert data is not None, f"No JSON error found in stdout (stderr: {stderr})"
+        assert "hint" in data
+        assert "TODO" in data["hint"]
 
     def test_priority_cookie_stripped_from_show(self, org_dir):
         """show with priority cookie in SUBSTR still matches."""
@@ -5520,6 +5524,43 @@ class TestCorrectiveErrors:
         stdout, stderr, rc = run_cli("show", "zzz_nonexistent_zzz", org_dir=org_dir)
         assert rc == 1
         assert "search" in stderr.lower()
+
+
+class TestJsonErrorsOnStdout:
+    """Issue 1b regression: under --json, every error/error-with-hint object
+    is written to STDOUT (so `... 2>/dev/null | jq` and `json.loads(stdout)`
+    work). Text-mode errors stay on stderr (covered elsewhere)."""
+
+    def test_show_no_match_error_object_on_stdout(self, org_dir):
+        """A --json `show` with no match: stdout is a single {error, hint}
+        object and exit code is 1 (the error must NOT be stderr-only)."""
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "zzqq_no_such_task_zzqq", org_dir=org_dir)
+        assert rc == 1
+        data = json.loads(stdout)  # raises if stdout is empty / not JSON
+        assert 'No task found matching "zzqq_no_such_task_zzqq"' in data["error"]
+        assert "hint" in data
+        # The error text must not have leaked onto stderr as our JSON object.
+        assert "zzqq_no_such_task_zzqq" not in stderr
+
+    def test_category_collision_hint_on_stdout(self, org_dir):
+        """A --json substring that matches only a category heading yields the
+        add-task --category guidance in the stdout JSON object."""
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "Pet Ants", org_dir=org_dir)
+        assert rc == 1
+        data = json.loads(stdout)
+        assert "category heading, not a task" in data["hint"]
+        assert 'add-task --category "Family/Pet Ants"' in data["hint"]
+
+    def test_bad_id_error_object_on_stdout(self, org_dir):
+        """A --json `--id <bogus>` no-match: error object on stdout, exit 1."""
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "--id", "no-such-id-zzqq", org_dir=org_dir)
+        assert rc == 1
+        data = json.loads(stdout)
+        assert 'No task found with id "no-such-id-zzqq"' in data["error"]
+        assert "hint" in data
 
 
 class TestMutationTaskField:
@@ -5708,13 +5749,13 @@ class TestStableIdAddressing:
         assert data["state"] == "DONE"
 
     def test_bad_id_errors(self, org_dir):
-        """show --id with an unknown id exits 1 with a JSON error on stderr."""
+        """show --id with an unknown id exits 1 with a JSON error on stdout."""
+        # run_cli_json parses stdout, where the error object now lives.
         data, stderr, rc = run_cli_json(
             "show", "--id", "no-such-id-zzz", org_dir=org_dir)
         assert rc == 1
-        err = _stderr_json(stderr)
-        assert err is not None, f"No JSON error found in stderr: {stderr}"
-        assert "No task found with id" in err["error"]
+        assert data is not None, f"No JSON error found in stdout (stderr: {stderr})"
+        assert "No task found with id" in data["error"]
 
     def test_id_and_substr_mutually_exclusive(self, org_dir):
         """Passing both --id and a SUBSTR positional is rejected."""

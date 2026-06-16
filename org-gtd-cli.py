@@ -309,8 +309,9 @@ class CompactHelpFormatter(argparse.RawDescriptionHelpFormatter):
 
 def cmd_org_timestamp(args):
     if args.json:
-        print('{"error": "--json is not supported for org-timestamp"}',
-              file=sys.stderr)
+        # --json error objects go to stdout (the --json contract: stdout
+        # carries exactly one JSON object, stderr only opaque diagnostics).
+        print('{"error": "--json is not supported for org-timestamp"}')
         return 1
     expr = (f'(org-gtd-cli/org-timestamp {to_elisp(args.date)} '
             f'{to_elisp(args.time)} {to_elisp("t" if args.inactive else None)})')
@@ -1211,12 +1212,16 @@ BATCH_COMMANDS = {
 
 
 def batch_input_error(msg: str, json_mode: bool) -> int:
-    """Print a batch input error to stderr (JSON error object in --json mode).
+    """Print a batch input error.
+
+    In --json mode the error object goes to STDOUT (the --json contract:
+    stdout carries exactly one JSON object, stderr only opaque diagnostics);
+    in text mode it goes to stderr.
 
     Returns 1 so callers can `return batch_input_error(...)`.
     """
     if json_mode:
-        print(json.dumps({"error": msg}), file=sys.stderr)
+        print(json.dumps({"error": msg}))
     else:
         print(f"Error: {msg}", file=sys.stderr)
     return 1
