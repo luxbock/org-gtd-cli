@@ -92,7 +92,7 @@ Signals that do **not** justify a finding (drop them):
 - Generic LLM mistakes unrelated to GTD (prose phrasing, off-topic tangents).
 - Single retries that the SKILL's existing guidance already covers — the SKILL is fine, that agent just didn't read it carefully.
 - "The SKILL could be shorter / clearer / restructured" without a concrete failure to point at.
-- Issues already fixed: check `git log -- home/common/claude/skills/gtd*/ pkgs/org-gtd-cli/` if a finding might be stale.
+- Issues already fixed: check `git log -- skills/ org-gtd-cli.py org-gtd-cli.el +gtd-core.el` if a finding might be stale.
 
 ## Step 3 — categorize each finding
 
@@ -100,7 +100,7 @@ For every finding that survives Step 2, decide which bucket it belongs in. Some 
 
 ### Bucket A — `org-gtd-cli` improvements
 
-The CLI itself needs a change: a missing flag, a confusing error message, a JSON field that should be added, a command that doesn't handle some edge case, a hint that should be more specific, a behavior that surprises agents who read the SKILL. Code lives in `pkgs/org-gtd-cli/` (Python wrapper + Elisp engine).
+The CLI itself needs a change: a missing flag, a confusing error message, a JSON field that should be added, a command that doesn't handle some edge case, a hint that should be more specific, a behavior that surprises agents who read the SKILL. Code lives at the org-gtd-cli repo root (`org-gtd-cli.py` Python wrapper + `org-gtd-cli.el` / `+gtd-core.el` Elisp engine).
 
 → Files under **`Computers/Agents/Agentic GTD System/org-gtd-cli tool`**.
 
@@ -155,7 +155,7 @@ After presenting findings, ask the user **per finding** (or in one batch if they
 
 The point of this skill is the audit, not the bookkeeping. Filing every finding into GTD adds overhead the user often doesn't want — small SKILL wording tweaks and obvious CLI fixes are usually faster to just do.
 
-- **"Fix it"** — go ahead and edit the SKILL or `pkgs/org-gtd-cli/`. For SKILL fixes that's `home/common/claude/skills/gtd*/SKILL.md` (and `references/`). For CLI fixes that's `pkgs/org-gtd-cli/org-gtd-cli.py` / `org-gtd-cli.el`. Make a focused change, then stop and let the user review.
+- **"Fix it"** — go ahead and edit the SKILL or the CLI code. For SKILL fixes that's `skills/gtd*/SKILL.md` (and `references/`). For CLI fixes that's `org-gtd-cli.py` / `org-gtd-cli.el` / `+gtd-core.el` at the repo root. Make a focused change, then stop and let the user review.
 - **"File it"** — do **not** invoke `gtd-capture` yourself. Tell the user the finding is ready to file and let them invoke `/gtd-capture` explicitly. They prefer to drive the capture themselves so the body / category / tags reflect their judgment. If it helps, restate the finding in a form that's easy to paste into `/gtd-capture`, and remind them which bucket it belongs in:
   - `Computers/Agents/Agentic GTD System/org-gtd-cli tool` for Bucket A
   - `Computers/Agents/Agentic GTD System/GTD SKILL's` for Bucket B
