@@ -2205,42 +2205,93 @@ Returns a list of message strings in printing order."
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
               (old-state (org-get-todo-state)))
          (if is-dry-run
-             (if org-gtd-cli/json-mode
-                 (let ((result `((version . 1)
-                                 (command . "set-done")
-                                 (heading . ,heading)
-                                 (file . ,rel-file)
-                                 (old_state . ,old-state)
-                                 (new_state . "DONE")
-                                 (dry_run . t)
-                                 (side_effects . ,(org-gtd-cli/parse-side-effects-preview
-                                                   (org-gtd-cli/auto-progress-preview rel-file)
-                                                   rel-file)))))
-                   (org-gtd-cli/output result))
-               (princ (format "Would mark done: %s (%s)\n" heading rel-file))
-               (dolist (msg (org-gtd-cli/auto-progress-preview rel-file))
-                 (princ msg)))
+             ;; Dry-run can't call `org-todo', so detect a blocked transition
+             ;; up front with `org-entry-blocked-p' (same predicate
+             ;; `org-enforce-todo-dependencies' uses).  A blocked parent must
+             ;; NOT preview success.
+             (if (org-entry-blocked-p)
+                 (let ((blocker (and (boundp 'org-block-entry-blocking)
+                                     (stringp org-block-entry-blocking)
+                                     org-block-entry-blocking)))
+                   (if org-gtd-cli/json-mode
+                       (org-gtd-cli/output
+                        `((error . ,(format "Cannot mark \"%s\" DONE: blocked by an incomplete subtask" heading))
+                          (hint . ,(if blocker
+                                       (format "Complete or cancel \"%s\" first, then retry." blocker)
+                                     "Complete or cancel its open subtasks first, then retry."))
+                          (dry_run . t)
+                          (exit_code . 1)))
+                     (if blocker
+                         (org-gtd-cli/error
+                          "Would be blocked: cannot mark \"%s\" DONE — blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
+                          heading blocker)
+                       (org-gtd-cli/error
+                        "Would be blocked: cannot mark \"%s\" DONE — blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
+                        heading)))
+                   (kill-emacs 1))
+               (if org-gtd-cli/json-mode
+                   (let ((result `((version . 1)
+                                   (command . "set-done")
+                                   (heading . ,heading)
+                                   (file . ,rel-file)
+                                   (old_state . ,old-state)
+                                   (new_state . "DONE")
+                                   (dry_run . t)
+                                   (side_effects . ,(org-gtd-cli/parse-side-effects-preview
+                                                     (org-gtd-cli/auto-progress-preview rel-file)
+                                                     rel-file)))))
+                     (org-gtd-cli/output result))
+                 (princ (format "Would mark done: %s (%s)\n" heading rel-file))
+                 (dolist (msg (org-gtd-cli/auto-progress-preview rel-file))
+                   (princ msg))))
            ;; Real path
            (let ((org-inhibit-logging nil))
              (org-todo "DONE"))
-           (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
-             (save-excursion
-               (goto-char (cdr buf-pos))
-               (org-gtd-cli/reorder-siblings-by-state))
-             (save-buffer)
-             (if org-gtd-cli/json-mode
-                 (org-gtd-cli/mutation-output
-                  `((version . 1)
-                    (command . "set-done")
-                    (heading . ,heading)
-                    (file . ,rel-file)
-                    (old_state . ,old-state)
-                    (new_state . "DONE")
-                    (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
-                  heading)
-               (princ (format "Done: %s (%s)\n" heading rel-file))
-               (dolist (msg auto-msgs)
-                 (princ msg)))))))))
+           ;; `org-todo' on an entry blocked by `org-enforce-todo-dependencies'
+           ;; (e.g. a project with incomplete children) does NOT signal a
+           ;; catchable error — it emits a "blocked" notice via `message' and
+           ;; leaves the state unchanged.  Verify the transition actually took
+           ;; before reporting success, otherwise we would falsely claim DONE,
+           ;; run auto-progress, and persist stray changes.
+           (if (not (equal (org-get-todo-state) "DONE"))
+               (let ((blocker (and (boundp 'org-block-entry-blocking)
+                                   (stringp org-block-entry-blocking)
+                                   org-block-entry-blocking)))
+                 (if org-gtd-cli/json-mode
+                     ;; JSON: error+hint object goes to stdout (see
+                     ;; `org-gtd-cli/error').
+                     (org-gtd-cli/output
+                      `((error . ,(format "Cannot mark \"%s\" DONE: blocked by an incomplete subtask" heading))
+                        (hint . ,(if blocker
+                                     (format "Complete or cancel \"%s\" first, then retry." blocker)
+                                   "Complete or cancel its open subtasks first, then retry."))
+                        (exit_code . 1)))
+                   (if blocker
+                       (org-gtd-cli/error
+                        "Cannot mark \"%s\" DONE: blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
+                        heading blocker)
+                     (org-gtd-cli/error
+                      "Cannot mark \"%s\" DONE: blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
+                      heading)))
+                 (kill-emacs 1))
+             (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
+               (save-excursion
+                 (goto-char (cdr buf-pos))
+                 (org-gtd-cli/reorder-siblings-by-state))
+               (save-buffer)
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/mutation-output
+                    `((version . 1)
+                      (command . "set-done")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_state . ,old-state)
+                      (new_state . "DONE")
+                      (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
+                    heading)
+                 (princ (format "Done: %s (%s)\n" heading rel-file))
+                 (dolist (msg auto-msgs)
+                   (princ msg))))))))))
   (kill-emacs 0))
 
 (defun org-gtd-cli/parse-side-effects (msgs)

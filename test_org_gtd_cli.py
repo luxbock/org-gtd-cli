@@ -908,6 +908,62 @@ class TestDone:
         assert "Run smoke tests" not in stdout
         assert "NEXT Install certificates" in (org_dir / "tasks.org").read_text()
 
+    def test_blocked_parent_does_not_complete(self, org_dir):
+        # `org-enforce-todo-dependencies' blocks a project with incomplete
+        # children from becoming DONE. set-done must surface this as an error
+        # (rc 1, JSON error object on stdout) rather than falsely reporting
+        # success — and must NOT auto-progress a sibling/child to NEXT.
+        # "Prepare onboarding guide" is a project with two open TODO children.
+        data, stderr, rc = run_cli_json(
+            "set-done", "Prepare onboarding guide", org_dir=org_dir)
+        assert rc != 0
+        # The error object must parse from stdout.
+        assert data is not None
+        assert "blocked by an incomplete subtask" in data["error"]
+        assert 'Prepare onboarding guide' in data["error"]
+        # The parent stays TODO on disk and the open children are untouched —
+        # verified via a follow-up --json show.
+        text = (org_dir / "tasks.org").read_text()
+        assert "** TODO Prepare onboarding guide" in text
+        assert "** DONE Prepare onboarding guide" not in text
+        show, _, show_rc = run_cli_json(
+            "show", "Prepare onboarding guide", org_dir=org_dir)
+        assert show_rc == 0
+        assert show["state"] == "TODO"
+        # No child was spuriously promoted to NEXT.
+        assert "NEXT Draft outline" not in text
+        assert "NEXT Write first chapter" not in text
+        assert "*** TODO Draft outline" in text
+        assert "*** TODO Write first chapter" in text
+
+    def test_parent_completes_when_all_children_done(self, org_dir):
+        # Once every child of "Prepare onboarding guide" is DONE, the parent
+        # project must complete successfully via set-done.
+        run_cli("set-done", "Draft outline", org_dir=org_dir)
+        run_cli("set-done", "Write first chapter", org_dir=org_dir)
+        data, stderr, rc = run_cli_json(
+            "set-done", "Prepare onboarding guide", org_dir=org_dir)
+        assert rc == 0
+        assert data is not None
+        assert data["new_state"] == "DONE"
+        assert data["task"]["heading"] == "Prepare onboarding guide"
+        assert data["task"]["state"] == "DONE"
+        assert "** DONE Prepare onboarding guide" in (org_dir / "tasks.org").read_text()
+
+    def test_dry_run_blocked_parent_reports_blocked_and_mutates_nothing(self, org_dir):
+        # Dry-run set-done on a blocked parent must report it WOULD be blocked
+        # (rc 1, JSON error on stdout) and change nothing on disk.
+        before = (org_dir / "tasks.org").read_text()
+        data, stderr, rc = run_cli_json(
+            "set-done", "Prepare onboarding guide", "--dry-run", org_dir=org_dir)
+        assert rc != 0
+        assert data is not None
+        assert "blocked by an incomplete subtask" in data["error"]
+        assert data.get("dry_run") is True
+        # Nothing mutated.
+        assert (org_dir / "tasks.org").read_text() == before
+        assert "** TODO Prepare onboarding guide" in before
+
 
 # ===========================================================================
 # 14. set-state
@@ -4754,10 +4810,15 @@ class TestBatch:
     """Tests for --batch mode."""
 
     def test_batch_set_done_happy_path(self, org_dir):
-        """Batch set-done with 2 items, both succeed."""
+        """Batch set-done with 2 leaf tasks, both succeed."""
+        # "Prepare onboarding guide" was previously used here, but it is a
+        # project with incomplete children — `org-enforce-todo-dependencies'
+        # blocks it from becoming DONE, so set-done correctly fails it (see
+        # TestDone.test_blocked_parent_does_not_complete). Use a second
+        # completable leaf task instead so this stays a true happy path.
         data, stderr, rc = run_batch(
             "set-done",
-            ["Write quarterly report", "Prepare onboarding guide"],
+            ["Write quarterly report", "Add aliases to common systemctl"],
             org_dir=org_dir,
         )
         assert rc == 0
@@ -4767,6 +4828,33 @@ class TestBatch:
         assert data["summary"]["succeeded"] == 2
         assert data["summary"]["failed"] == 0
         assert all(r["success"] is True for r in data["results"])
+
+    def test_batch_set_done_blocked_parent_is_per_item_failure(self, org_dir):
+        """Batch set-done isolates a blocked project as a per-item failure.
+
+        Encodes the org-enforce-todo-dependencies fix at the batch layer: a
+        completable leaf succeeds while a project with open children fails
+        with a "blocked" error, and the parent stays TODO on disk."""
+        data, stderr, rc = run_batch(
+            "set-done",
+            ["Write quarterly report", "Prepare onboarding guide"],
+            org_dir=org_dir,
+        )
+        assert rc == 0  # at least one item succeeded
+        assert data is not None
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["succeeded"] == 1
+        assert data["summary"]["failed"] == 1
+        assert data["results"][0]["success"] is True
+        assert data["results"][1]["success"] is False
+        # The per-item error surfaces org's own dependency-block notice
+        # (captured via `message` by the batch delegate shim, which is
+        # preferred over the JSON error payload).
+        assert "blocked" in data["results"][1]["error"].lower()
+        assert "Draft outline" in data["results"][1]["error"]
+        text = (org_dir / "tasks.org").read_text()
+        assert "** TODO Prepare onboarding guide" in text
+        assert "** DONE Prepare onboarding guide" not in text
 
     def test_batch_set_done_partial_failure(self, org_dir):
         """Batch set-done: one valid, one invalid heading."""
