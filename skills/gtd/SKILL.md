@@ -385,6 +385,11 @@ if [ -n "${CODEX_THREAD_ID:-}" ]; then
   org-gtd-cli add-session-id "<heading>" "codex:$CODEX_THREAD_ID"
 fi
 
+# Hermes exports HERMES_SESSION_ID into the environment of its terminal tool.
+if [ -n "${HERMES_SESSION_ID:-}" ]; then
+  org-gtd-cli add-session-id "<heading>" "hermes:$HERMES_SESSION_ID"
+fi
+
 # Get all session IDs for a task
 org-gtd-cli --json get-session-ids "<heading>"
 # Returns: {"sessions": [{"agent": "claude_code", "session_id": "...", "timestamp": "..."}]}
@@ -392,7 +397,7 @@ org-gtd-cli --json get-session-ids "<heading>"
 
 Session IDs also appear in the `sessions` field of `show --json` output.
 
-Format: `<agent>:<session-id>` where agent maps to `cass` connector slugs (e.g. `claude_code`, `codex`, `pi_agent`). If no harness session/thread ID is available, skip this step rather than inventing one. Do not assume `CODEX_THREAD_ID` is stable across future Codex releases; use it only when present.
+Format: `<agent>:<session-id>` where agent maps to `cass` connector slugs (e.g. `claude_code`, `codex`, `hermes`, `pi_agent`). If no harness session/thread ID is available, skip this step rather than inventing one. Do not assume `CODEX_THREAD_ID` is stable across future Codex releases; use it only when present.
 
 ## Mutation responses
 

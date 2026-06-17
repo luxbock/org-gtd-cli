@@ -59,7 +59,7 @@ Follow `[[file:...]]` links, `[[*Heading]]` references, or linked notes in `agen
 
 ### Before starting
 
-**Surface useful context with `cass`**, before you start doing non-trivial work, call the cm_context MCP tool with a short description of your task. This retrieves relevant playbook rules, anti-patterns, and history snippets.
+**Surface useful context** before you start doing non-trivial work: ask `cm` for relevant playbook rules, anti-patterns, and history snippets for your task — via the `cm context "<task>" --json` CLI, or the `cm_context` MCP tool if your harness exposes one. (Both back onto the same `cm`/`cass` store.)
 
 **When you start working on a task**, attach the current harness session/thread ID as metadata if one is available:
 
@@ -72,6 +72,11 @@ fi
 # in Codex's stable public environment-variable documentation.
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   org-gtd-cli add-session-id "<TASK>" "codex:$CODEX_THREAD_ID"
+fi
+
+# Hermes exports HERMES_SESSION_ID into the environment of its terminal tool.
+if [ -n "${HERMES_SESSION_ID:-}" ]; then
+  org-gtd-cli add-session-id "<TASK>" "hermes:$HERMES_SESSION_ID"
 fi
 ```
 

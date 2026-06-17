@@ -191,6 +191,11 @@ fi
 if [ -n "${CODEX_THREAD_ID:-}" ]; then
   org-gtd-cli add-session-id "<task heading>" "codex:$CODEX_THREAD_ID"
 fi
+
+# Hermes exports HERMES_SESSION_ID into the environment of its terminal tool.
+if [ -n "${HERMES_SESSION_ID:-}" ]; then
+  org-gtd-cli add-session-id "<task heading>" "hermes:$HERMES_SESSION_ID"
+fi
 ```
 
 This links the task to this conversation in `cass` session history.
