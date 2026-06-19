@@ -27,6 +27,17 @@
 ;; Prevent lock file conflicts with running Doom instance
 (setq create-lockfiles nil)
 
+;; Don't maintain org-id's global location registry. Mutations lazily create a
+;; stable `:ID:' via `org-id-get-create' (see `org-gtd-cli/maybe-create-id'),
+;; whose `org-id-add-location' wants to read `org-id-locations-file' — which
+;; lives under our throwaway `user-emacs-directory' and never exists, producing
+;; the harmless "Could not read 'org-id-locations' ... setting it to nil"
+;; warning on every batch mutation (and once per daemon start). We resolve IDs
+;; by scanning agenda files directly (`org-gtd-cli/find-task-by-id'), never via
+;; the registry, so disabling it makes `org-id-add-location' a no-op — killing
+;; the warning while `org-id-get-create' still writes the `:ID:' property.
+(setq org-id-track-globally nil)
+
 ;; Suppress "Saving file..."/"Wrote ..." chatter from `save-buffer'. In daemon
 ;; mode the Lisp `message' is rebound to capture stderr (see
 ;; `org-gtd-cli/daemon-dispatch'), but `save-buffer'/`write-region' emit those
@@ -2111,8 +2122,11 @@ Returns a list of message strings in printing order."
                    states)))))
         (when all-sibling-states
           (cond
-           ;; A sibling already has NEXT — do nothing
-           ((member "NEXT" all-sibling-states))
+           ;; A sibling is already active — do nothing. NEXT and WAITING both
+           ;; count as "in motion" (matching `gtd/has-active-in-subtree-p' and
+           ;; the stuck-project skip functions): a project with a WAITING child
+           ;; is not stuck, so we must NOT promote a later TODO past it.
+           ((seq-some (lambda (s) (member s '("NEXT" "WAITING"))) all-sibling-states))
            ;; All siblings done — leave parent open for manual review.
            ;; We deliberately do NOT auto-complete the project (and therefore
            ;; do not cascade to grandparents): the last subtask being done
@@ -2158,7 +2172,7 @@ Returns a list of message strings in printing order."
   (let ((msgs '()))
     (when (gtd/is-project-subtree-p)
       (let ((saved-pos (point))
-            (has-next nil)
+            (has-active nil)
             (all-done t))
         ;; Scan ALL siblings, treating saved-pos as DONE
         (save-excursion
@@ -2167,12 +2181,14 @@ Returns a list of message strings in printing order."
             (catch 'scanned
               (while t
                 (let ((s (if (= (point) saved-pos) "DONE" (org-get-todo-state))))
-                  (when (equal s "NEXT") (setq has-next t))
+                  ;; NEXT or WAITING both count as "active" (see the real
+                  ;; `org-gtd-cli/auto-progress' guard) — keep the preview honest.
+                  (when (member s '("NEXT" "WAITING")) (setq has-active t))
                   (when (and s (not (member s org-done-keywords)))
                     (setq all-done nil)))
                 (unless (org-get-next-sibling) (throw 'scanned nil))))))
         (cond
-         (has-next nil)
+         (has-active nil)
          ;; All done → parent left open for manual review (no auto-close, no cascade)
          (all-done
           (save-excursion

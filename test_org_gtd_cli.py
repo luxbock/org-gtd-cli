@@ -868,6 +868,47 @@ class TestDone:
         assert "Auto-progressed" not in stdout
         assert "Auto-completed" not in stdout
 
+    def _write_waiting_project(self, org_dir):
+        # A project where, after the NEXT is completed, a WAITING sibling sits
+        # between the just-done task and the next bare TODO. Distinctive
+        # headings avoid collisions with other agenda files.
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Wproj Area\n"
+            "** TODO Wproj root project\n"
+            "*** DONE Wproj already finished\n"
+            "*** NEXT Wproj current step\n"
+            "*** WAITING Wproj blocked step\n"
+            "*** TODO Wproj later step\n"
+        )
+
+    def test_waiting_sibling_blocks_promotion(self, org_dir):
+        # Completing the NEXT must NOT promote a later TODO past a WAITING
+        # sibling: a WAITING child means the project is already in motion
+        # (not stuck), so nothing should be auto-promoted.
+        self._write_waiting_project(org_dir)
+        data, stderr, rc = run_cli_json("set-done", "Wproj current step", org_dir=org_dir)
+        assert rc == 0
+        assert data["new_state"] == "DONE"
+        # No promotion happened.
+        assert not data.get("side_effects")
+        text = (org_dir / "tasks.org").read_text()
+        assert "DONE Wproj current step" in text
+        # The WAITING task is untouched and the later TODO was NOT jumped.
+        assert "WAITING Wproj blocked step" in text
+        assert "TODO Wproj later step" in text
+        assert "NEXT Wproj later step" not in text
+
+    def test_waiting_sibling_blocks_promotion_dry_run(self, org_dir):
+        # The dry-run preview must agree with the real run: no promotion.
+        self._write_waiting_project(org_dir)
+        before = (org_dir / "tasks.org").read_text()
+        stdout, stderr, rc = run_cli("set-done", "Wproj current step", "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        assert "Would auto-progress" not in stdout
+        # Dry run mutates nothing.
+        assert (org_dir / "tasks.org").read_text() == before
+
     def test_dry_run_leaves_parent_open_preview(self, org_dir):
         stdout, stderr, rc = run_cli("set-done", "Test migration on staging", "--dry-run", org_dir=org_dir)
         assert rc == 0
