@@ -2788,21 +2788,26 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
          (cond
           ((string= direction "up")
            (org-move-subtree-up)
+           ;; The subtree has moved, so BUF-POS is now stale.  Save first
+           ;; (so a failed re-find can't lose the move) and enrich by
+           ;; re-finding via the unchanged HEADING, as `set-done' does.
+           (save-buffer)
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
                 `((version . 1) (command . "move")
                   (heading . ,heading) (file . ,rel-file)
                   (direction . "up") (sibling . :null))
-                buf-pos)
+                heading)
              (princ (format "Moved: \"%s\" up (%s)\n" heading rel-file))))
           ((string= direction "down")
            (org-move-subtree-down)
+           (save-buffer)
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
                 `((version . 1) (command . "move")
                   (heading . ,heading) (file . ,rel-file)
                   (direction . "down") (sibling . :null))
-                buf-pos)
+                heading)
              (princ (format "Moved: \"%s\" down (%s)\n" heading rel-file))))
           ((or (string= direction "before") (string= direction "after"))
            ;; Find sibling
@@ -2859,18 +2864,18 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                  (org-end-of-subtree t)
                  (unless (eobp) (forward-char))
                  (insert task-text "\n"))))
+           (save-buffer)
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
                 `((version . 1) (command . "move")
                   (heading . ,heading) (file . ,rel-file)
                   (direction . ,direction) (sibling . ,sibling-substring))
-                buf-pos)
+                heading)
              (princ (format "Moved: \"%s\" %s \"%s\" (%s)\n"
                             heading direction sibling-substring rel-file))))
           (t
            (org-gtd-cli/error "Error: unknown direction \"%s\"" direction)
-           (kill-emacs 1)))
-         (save-buffer)))))
+           (kill-emacs 1)))))))
   (kill-emacs 0))
 
 ;; --- rename ---

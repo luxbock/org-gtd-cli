@@ -1667,6 +1667,100 @@ class TestMove:
         assert_line_before(f, "Lone task to move", "Middle filler task")
         assert text.index("Lone task to move") > text.index("Parent Two")
 
+    # ---- regression: reorder 3+ siblings via every direction ----
+    # The reorder used to enrich the JSON response from the PRE-move buffer
+    # position (BUF-POS).  Once the subtree relocates, that position is
+    # stale: it no longer sits on the task's heading, so the response either
+    # threw `Invalid search bound (wrong side of point)` (--up/--down/--before,
+    # which then never reached save-buffer, losing the move) or silently
+    # returned a NEIGHBOUR's task data (--after).  The fix saves first and
+    # re-finds the moved task by heading, as set-done does after it reorders.
+    # Siblings here carry tags + property drawers + bodies so a stale position
+    # lands mid-subtree (a non-heading line), reproducing the original throw.
+    REORDER_FIXTURE = """\
+* TODO Reorder project
+:PROPERTIES:
+:ID:       11111111-1111-1111-1111-111111111111
+:END:
+** TODO Alpha task :work:@agent:
+:PROPERTIES:
+:ID:       aaaaaaaa-1111-1111-1111-111111111111
+:END:
+Body of alpha.
+[2026-06-21 Sun 20:24]
+** TODO Beta task :work:@agent:
+:PROPERTIES:
+:ID:       bbbbbbbb-1111-1111-1111-111111111111
+:END:
+Body of beta.
+[2026-06-21 Sun 20:24]
+** WAITING Gamma task :work:@agent:
+:PROPERTIES:
+:ID:       cccccccc-1111-1111-1111-111111111111
+:END:
+Body of gamma.
+[2026-06-21 Sun 20:24]
+** TODO Delta task :work:@agent:
+:PROPERTIES:
+:ID:       dddddddd-1111-1111-1111-111111111111
+:END:
+Body of delta.
+[2026-06-21 Sun 20:24]
+"""
+
+    def _move_json(self, *args, org_dir):
+        """Run `--json move ...`, fail loudly on any emacs backtrace, and
+        return the moved task's heading from the enriched response."""
+        stdout, stderr, rc = run_cli("--json", "move", *args, org_dir=org_dir)
+        blob = stdout + stderr
+        assert "wrong side of point" not in blob.lower(), (
+            f"move {args} surfaced the stale-position backtrace:\n{blob}")
+        assert rc == 0, f"move {args} failed rc={rc}\nstdout={stdout}\nstderr={stderr}"
+        data = json.loads(stdout.strip().splitlines()[-1])
+        assert data["command"] == "move"
+        return data["task"]["heading"]
+
+    @staticmethod
+    def _order(filepath):
+        """Subtask headings (level-2), in document order, sans keyword/tags."""
+        order = []
+        for line in filepath.read_text().splitlines():
+            if line.startswith("** "):
+                body = line[3:].split(" :", 1)[0]          # drop trailing tags
+                body = body.split(None, 1)[-1]             # drop TODO/WAITING
+                order.append(body.strip())
+        return order
+
+    def test_move_reorders_siblings_every_direction(self, org_dir):
+        f = org_dir / "reorder.org"
+        f.write_text(self.REORDER_FIXTURE)
+        assert self._order(f) == ["Alpha task", "Beta task", "Gamma task", "Delta task"]
+
+        # --up: the originally-throwing case. Move Delta up past Gamma.
+        moved = self._move_json("Delta task", "--up", org_dir=org_dir)
+        assert moved == "Delta task"
+        assert self._order(f) == ["Alpha task", "Beta task", "Delta task", "Gamma task"]
+
+        # --down: move Alpha down past Beta.
+        moved = self._move_json("Alpha task", "--down", org_dir=org_dir)
+        assert moved == "Alpha task"
+        assert self._order(f) == ["Beta task", "Alpha task", "Delta task", "Gamma task"]
+
+        # --before: move Gamma before Beta.
+        moved = self._move_json("Gamma task", "--before", "Beta task", org_dir=org_dir)
+        assert moved == "Gamma task"
+        assert self._order(f) == ["Gamma task", "Beta task", "Alpha task", "Delta task"]
+
+        # --after: used to return the NEIGHBOUR's heading. Move Beta after Delta.
+        moved = self._move_json("Beta task", "--after", "Delta task", org_dir=org_dir)
+        assert moved == "Beta task"
+        assert self._order(f) == ["Gamma task", "Alpha task", "Delta task", "Beta task"]
+
+        # Subtrees travelled intact: each heading still owns its :ID: + body.
+        text = f.read_text()
+        assert "cccccccc-1111-1111-1111-111111111111" in text  # Gamma id preserved
+        assert "Body of beta." in text
+
 
 # ===========================================================================
 # 25. org-timestamp --inactive
