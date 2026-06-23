@@ -13,7 +13,7 @@ interactive Doom Emacs config via `+gtd-core.el`.
 
 - Emacs (with org-mode) on `PATH`
 - Python 3
-- An org directory (default `~/Nextcloud/org/`, override with `ORG_DIRECTORY`)
+- An org directory (default `~/org/`, override with `ORG_DIRECTORY`)
   containing `inbox.org`, `tasks.org`, and `calendar.org`.
 
 ## Install

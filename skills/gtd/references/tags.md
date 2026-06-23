@@ -23,7 +23,7 @@
 The following is useful background information about how the following tags are used:
 
 - `nixos` - takes place in the `~/nixos-config` repository
-- `org_gtd` - takes place in `~/Nextcloud/org` repository
+- `org_gtd` - takes place in `~/org` repository
 - `org` - is a sub-category of `nixos`
 - `emacs` - is a sub-category of `nixos`
 - `epiphyte` - my homelab server, often a subcategory of `nixos`, though not always

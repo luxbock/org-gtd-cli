@@ -3,6 +3,7 @@
   lib,
   coreutils,
   emacs-nox,
+  procps,
   python3,
   python3Packages,
   runCommand,
@@ -67,6 +68,7 @@ symlinkJoin {
         nativeBuildInputs = [
           emacs-nox
           coreutils
+          procps
           python3
           python3Packages.pytest
           python3Packages.pytest-xdist
@@ -75,7 +77,7 @@ symlinkJoin {
       ''
         cp ${pythonScript} org-gtd-cli.py
         cp ${./test_org_gtd_cli.py} test_org_gtd_cli.py
-        cp ${coreFile} gtd-core.el
+        cp ${coreFile} +gtd-core.el
         cp ${elispFile} org-gtd-cli.el
         cp -r ${./fixtures} fixtures
         python3 -m pytest test_org_gtd_cli.py -q -n 4

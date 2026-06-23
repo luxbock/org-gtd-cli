@@ -573,42 +573,6 @@ class TestSearch:
         assert rc != 0
 
 
-class TestConflictedCopyExclusion:
-    """Nextcloud conflict copies must not be scanned as agenda files.
-
-    org-agenda-file-regexp is overridden in org-gtd-cli.el to reject
-    "(conflicted copy ...)" names; otherwise every result is duplicated
-    and org IDs get cloned.
-    """
-
-    CONFLICT_NAME = "inbox (conflicted copy 2026-06-06 143022).org"
-
-    def _make_conflict_copy(self, org_dir):
-        shutil.copy(org_dir / "inbox.org", org_dir / self.CONFLICT_NAME)
-
-    def test_search_has_no_duplicates(self, org_dir):
-        self._make_conflict_copy(org_dir)
-        stdout, stderr, rc = run_cli("--json", "search", "groceries", org_dir=org_dir)
-        assert rc == 0
-        data = json.loads(stdout)
-        assert data["count"] == 1
-        headings = [t["heading"] for t in data["tasks"]]
-        assert headings.count("Buy groceries") == 1
-        files = [t["file"] for t in data["tasks"]]
-        assert self.CONFLICT_NAME not in files
-
-    def test_conflict_file_not_scanned(self, org_dir):
-        self._make_conflict_copy(org_dir)
-        stdout, stderr, rc = run_cli(
-            "--json", "search", "--state", "all", "--tag", "@agent", org_dir=org_dir
-        )
-        assert rc == 0
-        data = json.loads(stdout)
-        files = {t["file"] for t in data["tasks"]}
-        assert self.CONFLICT_NAME not in files
-        assert all("conflicted copy" not in f for f in files)
-
-
 # ===========================================================================
 # 8. show
 # ===========================================================================
@@ -4616,21 +4580,27 @@ class TestDaemonSaveChatter:
     """
 
     @staticmethod
+    def _make_daemon_tmp():
+        # unix socket paths cap at ~107 chars; pytest's tmp_path is too deep
+        # under xdist, so root the daemon socket dir directly under TMPDIR.
+        return tempfile.mkdtemp(prefix="ogc-", dir=os.environ.get("TMPDIR", "/tmp"))
+
+    @staticmethod
     def _kill_daemon(daemon_tmp):
         socket = os.path.join(daemon_tmp, f"org-gtd-cli-{os.getuid()}", "server")
         if os.path.exists(socket):
             subprocess.run(
                 ["emacsclient", "--socket-name", socket, "--eval", "(kill-emacs)"],
                 capture_output=True, timeout=10)
+        shutil.rmtree(daemon_tmp, ignore_errors=True)
 
-    def test_daemon_json_mutation_no_save_chatter(self, org_dir, tmp_path):
+    def test_daemon_json_mutation_no_save_chatter(self, org_dir):
         """A --json mutation run against a fresh daemon emits ONLY JSON, with
         no 'Saving file ...' chatter on either stream. Fails pre-fix."""
-        daemon_tmp = tmp_path / "daemon-home"
-        daemon_tmp.mkdir()
+        daemon_tmp = self._make_daemon_tmp()
         # XDG_RUNTIME_DIR="" forces the CLI's per-uid socket dir to root at our
         # isolated TMPDIR instead of the runner's real /run/user/$UID.
-        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": str(daemon_tmp),
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
                "XDG_RUNTIME_DIR": ""}
         try:
             stdout, stderr, rc = run_cli(
@@ -4645,17 +4615,16 @@ class TestDaemonSaveChatter:
             assert "Saving file" not in stdout
             assert "Saving file" not in stderr
         finally:
-            self._kill_daemon(str(daemon_tmp))
+            self._kill_daemon(daemon_tmp)
 
-    def test_daemon_json_refile_no_chatter_on_stdout(self, org_dir, tmp_path):
+    def test_daemon_json_refile_no_chatter_on_stdout(self, org_dir):
         """Issue 1a regression: a *chatty* mutation (refile, which triggers
         org's "Copied: Subtree(s)...", "Refile to ...: done" and "Sorting...done"
         notices) must, in DAEMON mode under --json, emit a single clean JSON
         object on stdout. The Emacs chatter belongs on stderr (via the
         daemon-dispatch `message` rebind + `save-silently`), never on stdout."""
-        daemon_tmp = tmp_path / "daemon-home"
-        daemon_tmp.mkdir()
-        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": str(daemon_tmp),
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
                "XDG_RUNTIME_DIR": ""}
         try:
             # "Buy groceries" (inbox) refiled under the "Shopping" category
@@ -4673,7 +4642,7 @@ class TestDaemonSaveChatter:
                 assert chatter not in stdout, \
                     f"chatter {chatter!r} leaked onto stdout: {stdout!r}"
         finally:
-            self._kill_daemon(str(daemon_tmp))
+            self._kill_daemon(daemon_tmp)
 
 
 class TestDaemonRobustness:

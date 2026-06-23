@@ -9,7 +9,7 @@ effort: low
 
 CLI for managing org-mode GTD files. Wraps Emacs in batch mode — no running Emacs instance needed.
 
-`ORG_DIRECTORY` points to the users org files (default: `~/Nextcloud/org/`). Can be changed to something else for testing purposes.
+`ORG_DIRECTORY` points to the users org files (default: `~/org/`). Can be changed to something else for testing purposes.
 
 ## Body text constraints
 

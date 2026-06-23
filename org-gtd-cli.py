@@ -17,7 +17,7 @@ import time
 # --- Paths (set by Nix wrapper or environment) ---
 CORE_FILE = os.environ.get("ORG_GTD_CORE_FILE", "")
 ELISP_FILE = os.environ.get("ORG_GTD_ELISP_FILE", "")
-ORG_DIR = os.environ.get("ORG_DIRECTORY", os.path.expanduser("~/Nextcloud/org/"))
+ORG_DIR = os.environ.get("ORG_DIRECTORY", os.path.expanduser("~/org/"))
 EMACS_BIN = "emacs"
 EMACSCLIENT_BIN = "emacsclient"
 
@@ -829,7 +829,7 @@ Maintenance:
   org-timestamp     Generate formatted org timestamp
 
 Environment:
-  ORG_DIRECTORY     Path to org files (default: ~/Nextcloud/org/)
+  ORG_DIRECTORY     Path to org files (default: ~/org/)
 
 Exit codes: 0 success, 1 error, 2 ambiguous match
 

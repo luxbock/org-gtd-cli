@@ -48,7 +48,7 @@ The GTD skill family (look up these SKILLs via your harness's skill loader):
 | `gtd/references/conventions.md` | TODO states, tag taxonomy, file structure. | — |
 | `gtd/references/tags.md` | Tag definitions inlined into capture/find/process. | — |
 
-The CLI itself is `org-gtd-cli` — a Python wrapper around batch/daemon Emacs that operates on `~/Nextcloud/org/*.org`. Full reference: `notes/reference/org-gtd-cli.md` in this repo.
+The CLI itself is `org-gtd-cli` — a Python wrapper around batch/daemon Emacs that operates on `~/org/*.org`. Full reference: `notes/reference/org-gtd-cli.md` in this repo.
 
 For org-mode markup itself — link syntax, timestamps, drawers, properties, etc. — the **source of truth is the official org manual**: <https://orgmode.org/manual/>. If a SKILL claim about org syntax conflicts with the manual, the manual wins.
 

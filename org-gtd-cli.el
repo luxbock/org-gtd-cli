@@ -62,7 +62,7 @@
 
 ;; Org directory from environment or default
 (setq org-directory (or (getenv "ORG_DIRECTORY")
-                        (expand-file-name "~/Nextcloud/org/")))
+                        (expand-file-name "~/org/")))
 ;; Ensure trailing slash
 (unless (string-suffix-p "/" org-directory)
   (setq org-directory (concat org-directory "/")))
@@ -70,19 +70,6 @@
 (setq org-agenda-files (list org-directory)
       org-default-notes-file (concat org-directory "inbox.org")
       org-startup-with-inline-images nil)
-
-;; `org-agenda-files' expands `org-directory' to files via
-;; `org-agenda-file-regexp' (default "\\`[^.].*\\.org\\'").  Nextcloud sync
-;; conflicts leave duplicates like "tasks (conflicted copy 2026-06-06
-;; 143022).org" next to the original, and the default regexp happily picks
-;; them up — duplicating every search/agenda/find-task result and cloning
-;; org IDs.  Emacs regexps have no negative lookahead, so instead of
-;; rejecting the literal "conflicted copy" substring we reject any file name
-;; containing a parenthesis: every Nextcloud conflict name has one, no real
-;; GTD file does.  Emacs backup/autosave junk ("inbox.org~", "#inbox.org#",
-;; ".#inbox.org") is already excluded by the "\\.org\\'" suffix and
-;; leading-dot rules, so nothing extra is needed for those.
-(setq org-agenda-file-regexp "\\`[^.][^()]*\\.org\\'")
 
 ;; Override DEFER from core: drop @ to avoid interactive note prompt in batch
 (setq org-todo-keywords
@@ -162,7 +149,7 @@ EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
   (let ((org-gtd-cli--exit-code 0)
         (stderr-msgs '()))
     ;; If a file's mtime changes while a call is in flight (Doom auto-save or
-    ;; the Nextcloud client racing the daemon), Emacs raises interactive
+    ;; an external process editing files under the daemon), Emacs raises interactive
     ;; supersession prompts — minibuffer reads that block the headless daemon
     ;; forever, queueing every later emacsclient call behind them.  The revert
     ;; below makes the buffer authoritative, so suppress the prompts and let
@@ -3325,7 +3312,7 @@ match) and stores the canonical form. This keeps the writer generic while
 giving known enum properties value-level validation. AGENT_EFFORT is the
 per-task model-tier hint on @agent leaf tasks (light/standard/deep); the
 tier->model mapping is deferred to the consuming SKILL — see
-~/Nextcloud/org/CLAUDE.md. RUN_STATUS is the agent-orchestration job state
+~/org/CLAUDE.md. RUN_STATUS is the agent-orchestration job state
 machine value on VPA-owned @agent job tasks (canonical uppercase); see the
 \"Job state machine\" section of notes/decisions/agent-orchestration.md.")
 
