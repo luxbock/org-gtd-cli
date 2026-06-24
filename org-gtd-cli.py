@@ -6,6 +6,7 @@ This script parses arguments and calls Emacs in batch mode.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -58,7 +59,7 @@ def to_elisp(value: str | None) -> str:
 
 
 def validate_target(args):
-    """Ensure exactly one of SUBSTR/parent or --id addresses the task (non-batch path)."""
+    """Ensure exactly one of SUBSTR/parent or --id addresses the task (non-batch)."""
     substr = getattr(args, 'substr', None) or getattr(args, 'parent', None)
     tid = getattr(args, 'task_id', None)
     if tid and substr:
@@ -71,7 +72,7 @@ def validate_target(args):
 
 
 def id_wrap(expr, args, *, mutation):
-    """Wrap EXPR to bind forced-id / forced-create-id for this one call (let -> daemon-safe)."""
+    """Wrap EXPR to bind forced-id/forced-create-id for one call (daemon-safe let)."""
     tid = getattr(args, 'task_id', None)
     create = mutation and not getattr(args, 'dry_run', False)
     if not tid and not create:
@@ -167,7 +168,7 @@ def _run_batch(expr: str, json_mode: bool = False, full_mode: bool = False) -> i
         if full_mode:
             env["ORG_GTD_CLI_FULL"] = "1"
         # Emacs --batch sends its own diagnostics to stderr; let them through
-        result = subprocess.run(cmd, capture_output=False, env=env)
+        result = subprocess.run(cmd, capture_output=False, env=env, check=False)
         return result.returncode
 
 
@@ -227,7 +228,13 @@ def _read_file_safe(path: str) -> str:
         return ""
 
 
-def _run_daemon(expr: str, json_mode: bool = False, full_mode: bool = False, *, _retried: bool = False) -> int:
+def _run_daemon(
+    expr: str,
+    json_mode: bool = False,
+    full_mode: bool = False,
+    *,
+    _retried: bool = False,
+) -> int:
     """Run an elisp expression via emacsclient against the daemon."""
     _ensure_daemon()
 
@@ -252,20 +259,21 @@ def _run_daemon(expr: str, json_mode: bool = False, full_mode: bool = False, *, 
     try:
         result = subprocess.run(
             [EMACSCLIENT_BIN, "--socket-name", SOCKET_PATH, "--eval", wrapped],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
 
         if result.returncode != 0 and not _retried:
             # Stale socket or daemon died — clean up and retry once
             # (the retry allocates its own output dir)
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(SOCKET_PATH)
-            except OSError:
-                pass
             return _run_daemon(expr, json_mode, full_mode, _retried=True)
 
         if result.returncode != 0:
-            print(f"Error: emacsclient failed: {result.stderr.strip()}", file=sys.stderr)
+            print(
+                f"Error: emacsclient failed: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
             return 1
 
         stdout = _read_file_safe(stdout_file)
@@ -862,7 +870,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
 
     p = sub.add_parser("search", help="Find tasks by heading substring")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
-                   help="Heading substring to match (optional when --tag or --state is provided)")
+                   help="Heading substring to match "
+                        "(optional when --tag or --state is provided)")
     p.add_argument("--state", help="Filter by state (comma-separated, or 'all')")
     p.add_argument("--tag", "--tags", action="append", dest="tag",
                    help="Filter by tag (repeat for AND, comma within for OR)")
@@ -1085,7 +1094,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
                    help="Heading substring (optional with --batch)")
     p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     tag_group = p.add_mutually_exclusive_group()
-    tag_group.add_argument("--tags", help="Tags to set (comma-separated, empty string to clear)")
+    tag_group.add_argument(
+        "--tags", help="Tags to set (comma-separated, empty string to clear)"
+    )
     tag_group.add_argument("--add", help="Tags to add (comma-separated)")
     tag_group.add_argument("--remove", help="Tags to remove (comma-separated)")
     p.add_argument("--index", help="Disambiguate with 1-based index")
@@ -1096,7 +1107,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring (optional with --batch)")
     p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
-    p.add_argument("--tags", help="Tags to add (comma-separated, optional with --batch)")
+    p.add_argument(
+        "--tags", help="Tags to add (comma-separated, optional with --batch)"
+    )
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_add_tags)
@@ -1155,7 +1168,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_add_session_id)
 
-    p = sub.add_parser("get-session-ids", help="Get agent session IDs from task LOGBOOK")
+    p = sub.add_parser(
+        "get-session-ids", help="Get agent session IDs from task LOGBOOK"
+    )
     p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_get_session_ids)
@@ -1300,7 +1315,10 @@ def cmd_batch(args):
     if command == "add-subtask":
         shared_arg = getattr(args, 'parent', None)
         if not shared_arg:
-            print("Error: --batch add-subtask requires parent SUBSTR positional", file=sys.stderr)
+            print(
+                "Error: --batch add-subtask requires parent SUBSTR positional",
+                file=sys.stderr,
+            )
             return 1
     elif command == "refile":
         shared_arg = getattr(args, 'category', None)

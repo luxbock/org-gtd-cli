@@ -5,11 +5,37 @@
 ;; Canonical copy lives here, with the org-gtd-cli package, so that tool's
 ;; standalone subflake (./flake.nix) is self-contained.
 ;;
-;; This file contains only top-level `setq` and `defun` forms -- no `require`,
-;; no `after!`, no function calls at load time. Each consumer loads it in a
-;; context where org symbols are available:
+;; This file contains only top-level `setq`, `defvar`, and `defun` forms -- no
+;; `require`, no `after!`, no function calls at load time. Each consumer loads
+;; it in a context where org symbols are available:
 ;;   - Doom: loaded by +gtd.el (after! org) via absolute path off the repo root
 ;;   - CLI: loaded via `-l` before org-gtd-cli.el (which does the requires)
+
+;; ── Byte-compile forward declarations ───────────────────────────────────────
+;; These `defvar's (no value) declare org / org-agenda dynamic variables
+;; special for the byte-compiler. The file is compiled standalone in the Nix
+;; build with only `org' on the load path, so the org-agenda vars are otherwise
+;; unknown. Bare `defvar's have no runtime effect (they never set a value).
+(defvar org-refile-use-outline-path)
+(defvar org-outline-path-complete-in-steps)
+(defvar org-refile-allow-creating-parent-nodes)
+(defvar org-archive-mark-done)
+(defvar org-refile-targets)
+(defvar org-refile-target-verify-function)
+(defvar org-agenda-restrict-begin)
+(defvar org-agenda-skip-scheduled-if-done)
+(defvar org-agenda-skip-deadline-if-done)
+(defvar org-agenda-skip-timestamp-if-done)
+(defvar org-agenda-todo-ignore-with-date)
+(defvar org-agenda-todo-ignore-deadlines)
+(defvar org-agenda-todo-ignore-scheduled)
+(defvar org-agenda-todo-ignore-timestamp)
+(defvar org-agenda-tags-todo-honor-ignore-options)
+(defvar org-agenda-start-day)
+(defvar org-agenda-span)
+(defvar org-agenda-compact-blocks)
+(defvar org-agenda-tags-column)
+(defvar org-agenda-custom-commands)
 
 ;; ── TODO keywords & state machine ───────────────────────────────────────────
 
@@ -184,14 +210,16 @@ TODO keywords, priority cookies, tags, and comment markers are stripped."
 ;; ── Agenda skip functions ───────────────────────────────────────────────────
 
 (defun gtd/list-sublevels-for-projects-indented ()
-  "Set org-tags-match-list-sublevels so when restricted to a subtree we list all subtasks."
+  "Set `org-tags-match-list-sublevels' so a subtree restriction
+lists all subtasks."
   (if (marker-buffer org-agenda-restrict-begin)
       (setq org-tags-match-list-sublevels 'indented)
     (setq org-tags-match-list-sublevels nil))
   nil)
 
 (defun gtd/list-sublevels-for-projects ()
-  "Set org-tags-match-list-sublevels so when restricted to a subtree we list all subtasks."
+  "Set `org-tags-match-list-sublevels' so a subtree restriction
+lists all subtasks."
   (if (marker-buffer org-agenda-restrict-begin)
       (setq org-tags-match-list-sublevels t)
     (setq org-tags-match-list-sublevels nil))
@@ -277,8 +305,9 @@ TODO keywords, priority cookies, tags, and comment markers are stripped."
 
 (defun gtd/skip-project-tasks-maybe ()
   "Show tasks related to the current restriction.
-When restricted to a project, skip project and sub project tasks, NEXT tasks, and loose tasks.
-When not restricted, skip project and sub-project tasks, and project related tasks."
+When restricted to a project, skip project and sub-project tasks,
+NEXT tasks, and loose tasks.  When not restricted, skip project and
+sub-project tasks, and project related tasks."
   (save-restriction
     (widen)
     (let* ((subtree-end (save-excursion (org-end-of-subtree t)))
@@ -318,7 +347,8 @@ When not restricted, skip project and sub-project tasks, and project related tas
       (re-search-forward "[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}" subtree-end t))))
 
 (defun gtd/subtree-has-recent-dates-p ()
-  "Return non-nil if the subtree at point contains dates within `gtd/archive-recent-days'."
+  "Return non-nil if the subtree at point has dates within
+`gtd/archive-recent-days'."
   (save-excursion
     (let* ((subtree-end (save-excursion (org-end-of-subtree t)))
            (cutoff (format-time-string "%Y-%m-%d"

@@ -89,10 +89,12 @@
   "When non-nil, include body text in list commands (search, subtasks, agenda).")
 
 (defvar org-gtd-cli/forced-id nil
-  "When non-nil, `org-gtd-cli/find-task' resolves by this org :ID: instead of by substring.")
+  "When non-nil, `org-gtd-cli/find-task' resolves by this org :ID:
+instead of by substring.")
 
 (defvar org-gtd-cli/forced-create-id nil
-  "When non-nil, `org-gtd-cli/find-task' ensures the resolved task has an org id (lazy create).")
+  "When non-nil, `org-gtd-cli/find-task' ensures the resolved task
+has an org id (lazy create).")
 
 (defun org-gtd-cli/json-encode (alist)
   "Serialize ALIST to a JSON string safe for `princ'/`message' output.
@@ -796,67 +798,65 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                    (org-time-string-to-time
                     (org-gtd-cli/make-timestamp to-date nil t))))
         (results '()))
-    ;; Build the match string for org-map-entries
-    (let ((match (or tag-filter "")))
-      (dolist (file (org-agenda-files))
-        (when (file-exists-p file)
-          (with-current-buffer (find-file-noselect file)
-            (org-with-wide-buffer
-             (goto-char (point-min))
-             (while (re-search-forward org-heading-regexp nil t)
-               (let* ((state (org-get-todo-state))
-                      (heading (org-get-heading t t t t))
-                      (priority-char (org-gtd-cli/get-explicit-priority))
-                      (tags (org-get-tags))
-                      (tags-str (when tags (concat ":" (mapconcat #'identity tags ":") ":")))
-                      (scheduled (org-entry-get nil "SCHEDULED"))
-                      (deadline (org-entry-get nil "DEADLINE"))
-                      (rel-file (org-gtd-cli/relative-filename file)))
-                 ;; Filter: must have a TODO state
-                 (when (and state
-                            ;; State filter
-                            (if state-filter
-                                (member state state-filter)
-                              ;; Default: non-done
-                              (not (member state org-done-keywords)))
-                            ;; Tag filter (AND/OR: | for AND groups, , for OR within group)
-                            (or (not tag-filter)
-                                (org-gtd-cli/match-tag-filter tag-filter tags))
-                            ;; Date range filter (on scheduled or deadline)
-                            ;; When date filters are active, tasks without
-                            ;; any date are excluded (they can't be in range)
-                            (or (not from-time)
-                                (let ((s-time (when scheduled
-                                                (org-time-string-to-time scheduled)))
-                                      (d-time (when deadline
-                                                (org-time-string-to-time deadline))))
-                                  (or (and s-time (not (time-less-p s-time from-time)))
-                                      (and d-time (not (time-less-p d-time from-time))))))
-                            (or (not to-time)
-                                (let ((s-time (when scheduled
-                                                (org-time-string-to-time scheduled)))
-                                      (d-time (when deadline
-                                                (org-time-string-to-time deadline))))
-                                  (or (and s-time (time-less-p s-time
-                                                               (time-add to-time (seconds-to-time 86400))))
-                                      (and d-time (time-less-p d-time
-                                                               (time-add to-time (seconds-to-time 86400))))))))
-                   (let ((parent-heading
-                          (save-excursion
-                            (if (org-up-heading-safe)
-                                (org-get-heading t t t t)
-                              nil)))
-                         (is-project
-                          (org-gtd-cli/has-todo-children-p)))
-                     (let ((body-text (when org-gtd-cli/full-mode
-                                        (org-gtd-cli/get-body-at-point)))
-                           (props (org-gtd-cli/properties-at-point))
-                           (id (org-entry-get nil "ID")))
-                       (push (list state heading priority-char
-                                   (vconcat (mapcar #'identity tags))
-                                   tags-str rel-file scheduled deadline
-                                   parent-heading is-project body-text props id)
-                             results)))))))))))
+    (dolist (file (org-agenda-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (goto-char (point-min))
+           (while (re-search-forward org-heading-regexp nil t)
+             (let* ((state (org-get-todo-state))
+                    (heading (org-get-heading t t t t))
+                    (priority-char (org-gtd-cli/get-explicit-priority))
+                    (tags (org-get-tags))
+                    (tags-str (when tags (concat ":" (mapconcat #'identity tags ":") ":")))
+                    (scheduled (org-entry-get nil "SCHEDULED"))
+                    (deadline (org-entry-get nil "DEADLINE"))
+                    (rel-file (org-gtd-cli/relative-filename file)))
+               ;; Filter: must have a TODO state
+               (when (and state
+                          ;; State filter
+                          (if state-filter
+                              (member state state-filter)
+                            ;; Default: non-done
+                            (not (member state org-done-keywords)))
+                          ;; Tag filter (AND/OR: | for AND groups, , for OR within group)
+                          (or (not tag-filter)
+                              (org-gtd-cli/match-tag-filter tag-filter tags))
+                          ;; Date range filter (on scheduled or deadline)
+                          ;; When date filters are active, tasks without
+                          ;; any date are excluded (they can't be in range)
+                          (or (not from-time)
+                              (let ((s-time (when scheduled
+                                              (org-time-string-to-time scheduled)))
+                                    (d-time (when deadline
+                                              (org-time-string-to-time deadline))))
+                                (or (and s-time (not (time-less-p s-time from-time)))
+                                    (and d-time (not (time-less-p d-time from-time))))))
+                          (or (not to-time)
+                              (let ((s-time (when scheduled
+                                              (org-time-string-to-time scheduled)))
+                                    (d-time (when deadline
+                                              (org-time-string-to-time deadline))))
+                                (or (and s-time (time-less-p s-time
+                                                             (time-add to-time (seconds-to-time 86400))))
+                                    (and d-time (time-less-p d-time
+                                                             (time-add to-time (seconds-to-time 86400))))))))
+                 (let ((parent-heading
+                        (save-excursion
+                          (if (org-up-heading-safe)
+                              (org-get-heading t t t t)
+                            nil)))
+                       (is-project
+                        (org-gtd-cli/has-todo-children-p)))
+                   (let ((body-text (when org-gtd-cli/full-mode
+                                      (org-gtd-cli/get-body-at-point)))
+                         (props (org-gtd-cli/properties-at-point))
+                         (id (org-entry-get nil "ID")))
+                     (push (list state heading priority-char
+                                 (vconcat (mapcar #'identity tags))
+                                 tags-str rel-file scheduled deadline
+                                 parent-heading is-project body-text props id)
+                           results))))))))))
     (setq results (nreverse results))
     (if org-gtd-cli/json-mode
         (org-gtd-cli/output-agenda-json results)
@@ -1357,15 +1357,14 @@ line per category: \"<path> (<file>)\"."
     (let ((categories '()))
       (with-current-buffer (find-file-noselect file)
         (org-with-wide-buffer
-         (let ((rel-file (org-gtd-cli/relative-filename file)))
-           (goto-char (point-min))
-           (while (re-search-forward org-heading-regexp nil t)
-             (let ((state (org-get-todo-state)))
-               (unless state
-                 (setq found t)
-                 (push `((path . ,(org-gtd-cli/heading-path-at-point))
-                         (heading . ,(org-get-heading t t t t)))
-                       categories)))))))
+         (goto-char (point-min))
+         (while (re-search-forward org-heading-regexp nil t)
+           (let ((state (org-get-todo-state)))
+             (unless state
+               (setq found t)
+               (push `((path . ,(org-gtd-cli/heading-path-at-point))
+                       (heading . ,(org-get-heading t t t t)))
+                     categories))))))
       (if org-gtd-cli/json-mode
           (org-gtd-cli/output
            `((version . 1)
@@ -2317,7 +2316,8 @@ Returns a list of message strings in printing order."
   (kill-emacs 0))
 
 (defun org-gtd-cli/parse-side-effects (msgs)
-  "Parse auto-progress message strings into a JSON-serializable side_effects vector."
+  "Parse auto-progress message strings into a JSON-serializable
+side_effects vector."
   (let ((effects '()))
     (dolist (msg msgs)
       (cond
