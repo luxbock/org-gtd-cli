@@ -1666,6 +1666,12 @@ any state (including DONE) and plain category/note headings."
                      priority)))
     (when body (setq body (org-gtd-cli/fill-text body)))
     (org-gtd-cli/validate-body-text body)
+    ;; `add-task' always files a freestanding task (inbox, a file, or under a
+    ;; non-TODO category heading) — never inside a project's sibling list. NEXT
+    ;; is project-internal, so reject it here rather than create an invalid
+    ;; standalone NEXT. Use `add-subtask' + `set-next' to make a project's NEXT.
+    (when (equal todo-state "NEXT")
+      (org-gtd-cli/reject-next title))
     (unless (file-exists-p target-file)
       (org-gtd-cli/error "Error: file not found: %s" target-file)
       (kill-emacs 1))
@@ -2377,6 +2383,32 @@ within the just-completed task's own file."
 
 ;; --- set-state ---
 
+(defun org-gtd-cli/reject-next (heading)
+  "Emit the \"NEXT is project-internal\" rejection for HEADING and exit 1.
+NEXT marks the concrete next action *among a project's children*; a
+freestanding task (filed directly under a category heading, or otherwise
+not nested inside a project) must never be NEXT.  Used by `add-task',
+`set-state', and `set-next' so the loophole is closed at every entry."
+  (let ((err (format (concat "Cannot set NEXT on \"%s\": NEXT is only valid for an "
+                             "actionable item inside a project (a TODO heading with "
+                             "sub-TODO children)")
+                     heading))
+        (hint (concat "File it as TODO instead, or attach it to a project first "
+                      "(refile it under a project heading), then set NEXT.")))
+    (if org-gtd-cli/json-mode
+        ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+        (org-gtd-cli/output `((error . ,err) (hint . ,hint) (exit_code . 1)))
+      (org-gtd-cli/error "%s\nHint: %s" err hint)))
+  (kill-emacs 1))
+
+(defun org-gtd-cli/ensure-next-allowed (heading)
+  "Reject NEXT when the heading at point is not a child of a project.
+Point must be on the target heading.  A valid NEXT target is a task with
+a TODO-keyword ancestor (`gtd/is-subproject-p'); anything else — a
+freestanding category-level task or a top-level task — is rejected."
+  (unless (gtd/is-subproject-p)
+    (org-gtd-cli/reject-next heading)))
+
 (defun org-gtd-cli/set-state (substring new-state &optional index dry-run)
   "Change a task's TODO state."
   ;; Validate state before doing anything
@@ -2408,6 +2440,11 @@ within the just-completed task's own file."
        (let* ((heading (org-get-heading t t t t))
               (old-state (org-get-todo-state))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
+         ;; NEXT is project-internal: reject (don't silently coerce) when the
+         ;; target isn't an actionable item inside a project. Guard the dry-run
+         ;; preview too, so a previewed invalid op fails the same way.
+         (when (equal new-state "NEXT")
+           (org-gtd-cli/ensure-next-allowed heading))
          (if is-dry-run
              (if org-gtd-cli/json-mode
                  (org-gtd-cli/output
@@ -2676,23 +2713,12 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
            (kill-emacs 1))
          (cond
           ((not has-children)
-           ;; Leaf task: reject if parent is organizational (no TODO keyword)
-           (let ((parent-is-project
-                  (save-excursion
-                    (when (org-up-heading-safe)
-                      (org-get-todo-state)))))
-             (when (and (save-excursion (org-up-heading-safe))
-                        (not parent-is-project))
-               (if org-gtd-cli/json-mode
-                   ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
-                   (org-gtd-cli/output
-                    `((error . ,(format "Cannot set-next: \"%s\" is not inside a project" heading))
-                      (hint . "Use set-state SUBSTR NEXT to set state directly.")
-                      (exit_code . 1)))
-                 (org-gtd-cli/error
-                  "Cannot set-next: \"%s\" is not inside a project\nHint: Use set-state SUBSTR NEXT to set state directly."
-                  heading))
-               (kill-emacs 1)))
+           ;; Leaf task: NEXT is only valid inside a project. Rejects both a
+           ;; freestanding category-level task and a top-level task (the old
+           ;; immediate-parent check let top-level tasks slip through). Do NOT
+           ;; steer the user toward `set-state ... NEXT' — that path now applies
+           ;; the same guard.
+           (org-gtd-cli/ensure-next-allowed heading)
            ;; Leaf task: set it to NEXT directly
            (let ((current-state (org-get-todo-state)))
              (cond

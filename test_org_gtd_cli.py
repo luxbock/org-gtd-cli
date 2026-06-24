@@ -998,9 +998,12 @@ class TestSetState:
         assert "NEXT Book a rental car" in (org_dir / "tasks.org").read_text()
 
     def test_preserves_priority_cookie(self, org_dir):
-        stdout, stderr, rc = run_cli("set-state", "Pay quarterly taxes", "NEXT", org_dir=org_dir)
+        # WAITING (not NEXT): "Pay quarterly taxes" is a standalone task, and
+        # NEXT is now rejected on non-project tasks. Priority-cookie handling
+        # is identical across state changes.
+        stdout, stderr, rc = run_cli("set-state", "Pay quarterly taxes", "WAITING", org_dir=org_dir)
         assert rc == 0
-        assert "NEXT [#A] Pay quarterly taxes" in (org_dir / "tasks.org").read_text()
+        assert "WAITING [#A] Pay quarterly taxes" in (org_dir / "tasks.org").read_text()
 
     def test_invalid_state_clean_error(self, org_dir):
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "INVALID", org_dir=org_dir)
@@ -1806,6 +1809,84 @@ class TestSetNext:
 
 
 # ===========================================================================
+# 26b. NEXT is project-internal: reject on freestanding tasks
+# ===========================================================================
+
+class TestNextProjectGuard:
+    """NEXT marks the next action among a project's children. A freestanding
+    task (under a category heading, or top-level) must never become NEXT — the
+    command must fail (non-zero) and explain why, never silently coerce to TODO.
+    "Write quarterly report" is a category-level standalone task in the fixture;
+    "Draft outline" is a real project child."""
+
+    REASON = "NEXT is only valid for an actionable item inside a project"
+
+    def test_add_task_next_into_category_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Standalone NEXT", "--category", "Work", "--state", "NEXT",
+            org_dir=org_dir)
+        assert rc == 1
+        assert self.REASON in stderr
+        # Must not have been created in any state.
+        assert "Standalone NEXT" not in (org_dir / "tasks.org").read_text()
+
+    def test_add_task_next_into_inbox_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Inbox NEXT", "--state", "NEXT", org_dir=org_dir)
+        assert rc == 1
+        assert self.REASON in stderr
+        assert "Inbox NEXT" not in (org_dir / "inbox.org").read_text()
+
+    def test_add_task_todo_into_category_still_works(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Standalone TODO", "--category", "Work", org_dir=org_dir)
+        assert rc == 0
+        assert "TODO Standalone TODO" in (org_dir / "tasks.org").read_text()
+
+    def test_set_state_next_on_standalone_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-state", "Write quarterly report", "NEXT", org_dir=org_dir)
+        assert rc == 1
+        assert self.REASON in stderr
+        # State unchanged — not coerced, not promoted.
+        assert "NEXT Write quarterly report" not in (org_dir / "tasks.org").read_text()
+        assert "TODO Write quarterly report" in (org_dir / "tasks.org").read_text()
+
+    def test_set_state_next_dry_run_on_standalone_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-state", "Write quarterly report", "NEXT", "--dry-run",
+            org_dir=org_dir)
+        assert rc == 1
+        assert self.REASON in stderr
+
+    def test_set_next_on_standalone_rejected(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-next", "Write quarterly report", org_dir=org_dir)
+        assert rc == 1
+        assert self.REASON in stderr
+
+    def test_set_state_next_on_project_child_allowed(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-state", "Draft outline", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        assert "NEXT Draft outline" in (org_dir / "tasks.org").read_text()
+
+    def test_set_next_on_project_child_allowed(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-next", "Write first chapter", org_dir=org_dir)
+        assert rc == 0
+        assert "NEXT Write first chapter" in (org_dir / "tasks.org").read_text()
+
+    def test_reject_json_shape(self, org_dir):
+        data, stderr, rc = run_cli_json(
+            "set-state", "Write quarterly report", "NEXT", org_dir=org_dir)
+        assert rc == 1
+        assert data is not None, f"No JSON in stdout (stderr: {stderr})"
+        assert self.REASON in data["error"]
+        assert "hint" in data
+
+
+# ===========================================================================
 # 27. subproject
 # ===========================================================================
 
@@ -2567,8 +2648,10 @@ class TestSiblingReordering:
         assert_line_before(f, "NEXT First todo", "TODO Second todo")
 
     def test_set_state_reorders(self, org_dir):
+        # Project C carries a TODO keyword so its children are project-internal
+        # and thus eligible for NEXT (the non-project NEXT guard).
         self._write_reorder_org(org_dir, """\
-* Project C
+* TODO Project C
 ** DONE Old done
 ** NEXT Active
 ** TODO Alpha
@@ -4381,7 +4464,9 @@ class TestJsonMutations:
         assert data["heading"] == "Buy groceries"
 
     def test_set_next_leaf_json(self, org_dir):
-        data, _, rc = run_cli_json("set-next", "Buy groceries", org_dir=org_dir)
+        # "Write first chapter" is a leaf inside the "Prepare onboarding guide"
+        # project; NEXT is now rejected on freestanding tasks like Buy groceries.
+        data, _, rc = run_cli_json("set-next", "Write first chapter", org_dir=org_dir)
         assert rc == 0
         assert data["command"] == "set-next"
         assert data["new_state"] == "NEXT"
@@ -4910,7 +4995,7 @@ class TestSetNextNonProjectParent:
         # "Write quarterly report" is under "Work" (no TODO keyword)
         stdout, stderr, rc = run_cli("set-next", "Write quarterly report", org_dir=org_dir)
         assert rc == 1
-        assert "not inside a project" in stderr
+        assert "NEXT is only valid for an actionable item inside a project" in stderr
 
     def test_set_next_leaf_under_organizational_heading_json(self, org_dir):
         """set-next on a leaf under organizational heading returns JSON error."""
@@ -4919,8 +5004,10 @@ class TestSetNextNonProjectParent:
         data, stderr, rc = run_cli_json("set-next", "Write quarterly report", org_dir=org_dir)
         assert rc == 1
         assert data is not None, f"No JSON found in stdout (stderr: {stderr})"
-        assert "not inside a project" in data["error"]
-        assert "set-state" in data["hint"]
+        assert "NEXT is only valid for an actionable item inside a project" in data["error"]
+        # The hint must NOT steer the user to the set-state NEXT loophole.
+        assert "set-state" not in data["hint"]
+        assert "refile" in data["hint"]
 
     def test_set_next_leaf_under_project_still_works(self, org_dir):
         """set-next on a leaf under a project (parent has TODO keyword) works."""
@@ -5384,17 +5471,19 @@ class TestBatchDelegation:
         data, stderr, rc = run_batch(
             "add-task",
             [{"title": "Scheduled batch task", "schedule": "2026-04-01",
-              "deadline": "2026-04-05", "priority": "A", "state": "NEXT",
+              "deadline": "2026-04-05", "priority": "A", "state": "WAITING",
               "tags": "work"}],
             org_dir=org_dir)
         assert rc == 0
         r = data["results"][0]
         assert r["success"] is True
         assert r["heading"] == "Scheduled batch task"
-        assert r["state"] == "NEXT"
+        # WAITING, not NEXT: add-task files a freestanding task and NEXT is
+        # rejected on non-project tasks; state passthrough is what's tested here.
+        assert r["state"] == "WAITING"
         assert r["file"] == "inbox.org"
         inbox = (org_dir / "inbox.org").read_text()
-        assert "* NEXT [#A] Scheduled batch task" in inbox
+        assert "* WAITING [#A] Scheduled batch task" in inbox
         assert "SCHEDULED: <2026-04-01" in inbox
         assert "DEADLINE: <2026-04-05" in inbox
         # Creation timestamp (inactive, today's date)
@@ -5998,8 +6087,10 @@ class TestMutationTaskField:
 
     def test_set_state_includes_task(self, org_dir):
         """set-state JSON response includes task object."""
+        # "Draft outline" is a project child (valid NEXT target); the parent
+        # "Prepare onboarding guide" is itself a project and can't be NEXT.
         data, stderr, rc = run_cli_json(
-            "set-state", "Prepare onboarding guide", "NEXT", org_dir=org_dir,
+            "set-state", "Draft outline", "NEXT", org_dir=org_dir,
         )
         assert rc == 0
         assert data is not None
@@ -6186,18 +6277,20 @@ class TestStableIdAddressing:
         """A substring mutation on an id-less task lazily creates a stable :ID:."""
         inbox = org_dir / "inbox.org"
         assert _id_under(inbox, "Buy groceries") is None
+        # WAITING, not NEXT: Buy groceries is a freestanding inbox task and NEXT
+        # is now rejected on non-project tasks; lazy-ID creation is the subject.
         stdout, stderr, rc = run_cli(
-            "set-state", "Buy groceries", "NEXT", org_dir=org_dir)
+            "set-state", "Buy groceries", "WAITING", org_dir=org_dir)
         assert rc == 0, stderr
         text = inbox.read_text()
-        assert "* NEXT Buy groceries" in text
+        assert "* WAITING Buy groceries" in text
         new_id = _id_under(inbox, "Buy groceries")
         assert new_id is not None, "expected a lazily-created :ID: under Buy groceries"
 
     def test_lazy_id_round_trips(self, org_dir):
         """A freshly lazy-created id is immediately resolvable by --id."""
         inbox = org_dir / "inbox.org"
-        rc = run_cli("set-state", "Buy groceries", "NEXT", org_dir=org_dir)[2]
+        rc = run_cli("set-state", "Buy groceries", "WAITING", org_dir=org_dir)[2]
         assert rc == 0
         new_id = _id_under(inbox, "Buy groceries")
         assert new_id is not None
@@ -6211,7 +6304,7 @@ class TestStableIdAddressing:
         inbox = org_dir / "inbox.org"
         before = inbox.read_bytes()
         stdout, stderr, rc = run_cli(
-            "set-state", "Call the plumber", "NEXT", "--dry-run", org_dir=org_dir)
+            "set-state", "Call the plumber", "WAITING", "--dry-run", org_dir=org_dir)
         assert rc == 0, stderr
         assert inbox.read_bytes() == before
         assert _id_under(inbox, "Call the plumber") is None
