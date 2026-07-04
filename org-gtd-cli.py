@@ -1248,9 +1248,17 @@ Example:
     return parser
 
 
+# Commands allowed in homogeneous `--batch <subcommand>` mode. Task-addressing
+# items may carry an `id` field (org :ID:) instead of `heading`, matching each
+# command's `--id` flag. Read commands (agenda-view, outline, categories) are
+# intentionally absent here — they have no per-task item, so they are exposed
+# only through the heterogeneous `batch` subcommand.
 BATCH_COMMANDS = {
     "add-event", "add-session-id", "add-subtask", "add-task", "delete",
     "refile", "set-done", "show", "set-tags", "add-tags",
+    "set-state", "set-next", "set-cancelled", "set-priority", "rename",
+    "move", "set-schedule", "set-deadline", "set-property",
+    "set-body", "append-body",
 }
 
 
