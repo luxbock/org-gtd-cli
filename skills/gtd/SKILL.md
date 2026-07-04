@@ -349,7 +349,7 @@ Use `--dry-run` on any modifying command that supports it to preview changes.
 Two forms execute multiple operations in one call (one Emacs process).
 
 - **Mutations** (both forms): `add-task`, `add-subtask`, `add-event`, `add-session-id`, `set-done`, `set-state`, `set-next`, `set-cancelled`, `set-priority`, `rename`, `move`, `set-schedule`, `set-deadline`, `set-tags`, `add-tags`, `set-body`, `append-body`, `set-property`, `refile`, `delete`.
-- **Reads**: `show` (both forms), plus `agenda-view`, `outline`, `categories` (mixed `batch` only — so one call can pair a mutation with a recomputed view).
+- **Reads**: `show` (both forms), plus `agenda-view`, `outline`, `categories` (mixed `batch` only — so one call can pair a mutation with a recomputed view). `render-file` is deliberately not batch-covered (a path-taking read with no per-task item — call it standalone).
 
 Task-addressing items take `heading` (substring) **or** `id` (org `:ID:`, matching each command's `--id` flag; `id` wins when both are given). New-item commands (`add-task`/`add-event`) take `title`; `add-subtask` takes `parent` + `title`.
 
