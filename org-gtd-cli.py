@@ -914,7 +914,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("outline", help="Full nested outline of an org file")
     p.add_argument("--file", help="Target file (default: tasks.org)")
     p.add_argument("--full", action="store_true",
-                   help="Include server-rendered body_html")
+                   help="Include each node's raw org body (--json only)")
     p.set_defaults(func=cmd_outline)
 
     p = sub.add_parser("projects", help="List active projects with progress")

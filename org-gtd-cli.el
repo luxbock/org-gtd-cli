@@ -1461,15 +1461,29 @@ at least one direct child with a TODO keyword."
   "Build the per-heading node alist for the outline at point (sans children).
 Point must be on a heading line in a widened org buffer.  Tags are
 INHERITED (`org-get-tags', NOT no-inherit) per the dashboard JSON
-convention.  Body HTML is rendered only when `org-gtd-cli/full-mode'
-is non-nil and the node has a non-empty body of its own."
+convention.  The node's own raw org `body' (via
+`org-gtd-cli/get-body-at-point', matching the null/trim conventions of
+`show' and `subtasks --full') is emitted only when `org-gtd-cli/full-mode'
+is non-nil.  Calendar events — state-less headings whose own body carries
+a plain active timestamp (`<...>', excluding SCHEDULED:/DEADLINE: planning
+lines, which `get-body-at-point' already drops) — are typed with
+`is_event' true and `is_category' false.  The first active timestamp of
+ANY heading's own body is surfaced as `timestamp' (null when none),
+regardless of full-mode."
   (let* ((heading (org-get-heading t t t t))
          (level (org-current-level))
          (state (org-get-todo-state))
          (priority (org-gtd-cli/get-explicit-priority))
          (tags (org-get-tags))
          (id (org-entry-get nil "ID"))
-         (is-category (null state))
+         (body (org-gtd-cli/get-body-at-point))
+         (timestamp
+          (and body
+               (string-match "<[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}[^>\n]*>" body)
+               (match-string 0 body)))
+         (stateless (null state))
+         (is-event (and stateless timestamp t))
+         (is-category (and stateless (not is-event)))
          (is-project (and state (org-gtd-cli/has-todo-children-p)))
          (progress
           (if is-project
@@ -1489,15 +1503,6 @@ is non-nil and the node has a non-empty body of its own."
                           (when (member child-state org-done-keywords)
                             (cl-incf done-count)))))))
                 `((done . ,done-count) (total . ,total-count)))
-            :null))
-         (body-html
-          (if org-gtd-cli/full-mode
-              (let ((body (org-gtd-cli/get-body-at-point)))
-                (if (and body (not (string-empty-p body)))
-                    (progn
-                      (require 'ox-html)
-                      (string-trim (org-export-string-as body 'html t)))
-                  :null))
             :null)))
     `((heading . ,heading)
       (level . ,level)
@@ -1505,12 +1510,12 @@ is non-nil and the node has a non-empty body of its own."
       (priority . ,(or priority :null))
       (tags . ,(vconcat (mapcar #'identity tags)))
       (is_category . ,(if is-category t :false))
+      (is_event . ,(if is-event t :false))
       (is_project . ,(if is-project t :false))
       (progress . ,progress)
       (id . ,(or id :null))
-      (body_html . ,(if (and (stringp body-html) (string-empty-p body-html))
-                        :null
-                      body-html)))))
+      (timestamp . ,(or timestamp :null))
+      (body . ,(if org-gtd-cli/full-mode (or body :null) :null)))))
 
 (defun org-gtd-cli/outline-tree (file)
   "Return the nested outline of FILE as a vector of top-level node alists.
@@ -1551,11 +1556,12 @@ node alist.  A `record' here is the cons (DATA . REVERSED-CHILD-RECORDS)."
 
 (defun org-gtd-cli/outline (&optional file-name)
   "Emit the full nested outline of an org file as JSON.
-Interleaves category headings (plain, no TODO keyword) and tasks.
-FILE-NAME defaults to \"tasks.org\"; resolved relative to `org-directory'.
-This is a read — it never creates org ids.  Honors `org-gtd-cli/full-mode'
-(renders each node's own body to `body_html').  In text mode, prints a
-minimal indented heading tree."
+Interleaves category headings (plain, no TODO keyword), calendar events
+(state-less headings whose body carries a plain active timestamp), and
+tasks.  FILE-NAME defaults to \"tasks.org\"; resolved relative to
+`org-directory'.  This is a read — it never creates org ids.  Honors
+`org-gtd-cli/full-mode' (emits each node's own raw org `body').  In text
+mode, prints a minimal indented heading tree."
   (let* ((target (or (and file-name
                           (not (equal file-name "nil"))
                           (not (string-empty-p file-name))

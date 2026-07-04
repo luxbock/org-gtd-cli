@@ -59,6 +59,7 @@ Common commands:
 | `set-schedule` / `set-deadline` / `set-priority` | Set timestamps and priority |
 | `set-tags` / `add-tags` / `refile` / `move` / `rename` | Organize and edit |
 | `projects` / `subtasks` / `categories` / `list-tags` | Inspect structure |
+| `outline` | Full nested outline of a file as JSON; nodes are typed (`is_category` / `is_event` / `is_project`) and calendar events carry their `timestamp`; `--full` adds each node's raw org `body` |
 
 Run `org-gtd-cli <command> -h` for per-command options, or `org-gtd-cli -h`
 for the full list.

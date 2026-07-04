@@ -6582,25 +6582,118 @@ class TestOutline:
             assert n["todo_state"] == "TODO"
             assert n["children"] == []
 
-    def test_full_body_html(self, org_dir):
-        """--full renders body_html; nodes without a body stay None."""
+    _BACKUP_BODY = (
+        "AGENT: research backup strategies and implement a simple "
+        "cron-based solution\n"
+        "- Should back up agent-notes/ and any generated artifacts\n"
+        "- Prefer incremental backups"
+    )
+
+    def test_full_raw_body(self, org_dir):
+        """--full emits the node's raw org body; no-body nodes stay None."""
         data, stderr, rc = run_cli_json("outline", "--full", org_dir=org_dir)
         assert rc == 0, stderr
         with_body = _find_node(
             data["nodes"], "Set up automated backups for agent workspace")
         assert with_body is not None
-        assert isinstance(with_body["body_html"], str)
-        assert "<p" in with_body["body_html"]
+        # Raw org text, not server-rendered HTML.
+        assert with_body["body"] == self._BACKUP_BODY
         no_body = _find_node(data["nodes"], "Bare heading no body")
         assert no_body is not None
-        assert no_body["body_html"] is None
+        assert no_body["body"] is None
 
-    def test_body_html_none_without_full(self, org_dir):
-        """Without --full, body_html is None even where a body exists."""
+    def test_body_none_without_full(self, org_dir):
+        """Without --full, body is None even where a body exists."""
         data, _, rc = run_cli_json("outline", org_dir=org_dir)
         assert rc == 0
         with_body = _find_node(
             data["nodes"], "Set up automated backups for agent workspace")
         assert with_body is not None
-        assert with_body["body_html"] is None
+        assert with_body["body"] is None
+
+    def test_no_body_html_key_anywhere(self, org_dir):
+        """`body_html` must never appear in outline output (raw body only)."""
+        data, stderr, rc = run_cli_json("outline", "--full", org_dir=org_dir)
+        assert rc == 0, stderr
+
+        def walk(nodes):
+            for node in nodes:
+                assert "body_html" not in node, node["heading"]
+                assert "body" in node
+                walk(node.get("children", []))
+
+        walk(data["nodes"])
+
+    def test_body_consistent_with_show(self, org_dir):
+        """outline --full `body` matches `show` `body` for the same node."""
+        heading = "Set up automated backups for agent workspace"
+        outline, _, rc = run_cli_json("outline", "--full", org_dir=org_dir)
+        assert rc == 0
+        show, _, rc = run_cli_json("show", heading, org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(outline["nodes"], heading)
+        assert node is not None
+        assert node["body"] == show["body"]
+        assert node["body"] == self._BACKUP_BODY
+
+    def test_new_fields_present_on_all_nodes(self, org_dir):
+        """Every outline node carries is_event and timestamp uniformly."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+
+        def walk(nodes):
+            for node in nodes:
+                assert "is_event" in node, node["heading"]
+                assert "timestamp" in node, node["heading"]
+                assert isinstance(node["is_event"], bool)
+                walk(node.get("children", []))
+
+        walk(data["nodes"])
+
+    def test_category_heading_typing(self, org_dir):
+        """A plain category heading is not an event and has no timestamp."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Computers")
+        assert node["is_category"] is True
+        assert node["is_event"] is False
+        assert node["timestamp"] is None
+
+
+class TestOutlineEvents:
+    """Calendar-event typing in `outline` against fixtures/calendar.org."""
+
+    def test_plain_event_typed(self, org_dir):
+        """A state-less heading with a body timestamp is an event, not a
+        category, and surfaces its timestamp."""
+        data, stderr, rc = run_cli_json(
+            "outline", "--file", "calendar.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        node = _find_node(data["nodes"], "Dentist appointment")
+        assert node is not None
+        assert node["is_event"] is True
+        assert node["is_category"] is False
+        assert node["todo_state"] is None
+        assert node["timestamp"] == "<2026-03-14 Sat 10:00-11:00>"
+
+    def test_done_event_surfaces_timestamp_not_event(self, org_dir):
+        """A DONE event (has a todo state) surfaces `timestamp` but is not
+        typed is_event (state-less requirement) nor a category."""
+        data, _, rc = run_cli_json(
+            "outline", "--file", "calendar.org", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Team standup")
+        assert node is not None
+        assert node["todo_state"] == "DONE"
+        assert node["is_event"] is False
+        assert node["is_category"] is False
+        assert node["timestamp"] == "<2026-03-08 Sun 16:00-17:00>"
+
+    def test_event_body_under_full(self, org_dir):
+        """Under --full the event's raw body (the timestamp) is included."""
+        data, _, rc = run_cli_json(
+            "outline", "--file", "calendar.org", "--full", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Dentist appointment")
+        assert node["body"] == "<2026-03-14 Sat 10:00-11:00>"
 
