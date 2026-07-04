@@ -1,0 +1,10 @@
+# Python bytecode / pytest caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Byte-compiled elisp
+*.elc
+
+# trash-cli local fallback trash (created when `trash` runs on this mount)
+.Trash-*/
