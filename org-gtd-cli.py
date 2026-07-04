@@ -371,6 +371,11 @@ def cmd_outline(args):
                      full_mode=getattr(args, 'full', False))
 
 
+def cmd_render_file(args):
+    expr = f'(org-gtd-cli/render-file {to_elisp(args.path)})'
+    return run_elisp(expr, json_mode=args.json)
+
+
 def cmd_projects(args):
     return run_elisp("(org-gtd-cli/projects)", json_mode=args.json)
 
@@ -806,6 +811,7 @@ Querying:
   agenda-view       Run a pre-built agenda view
   subtasks          List children of a project
   categories        Show category tree for refile targets
+  render-file       Render a view-only .org file (agent-notes) to HTML
   projects          List active projects with progress
   list-tags         List all tags in use with counts
   process-agent-tasks  (removed, use: search --tag @agent --state TODO,NEXT)
@@ -918,6 +924,14 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p = sub.add_parser("categories", help="Show category tree for refile targets")
     p.add_argument("--file", help="Target file (default: tasks.org)")
     p.set_defaults(func=cmd_categories)
+
+    p = sub.add_parser(
+        "render-file",
+        help="Render a view-only .org file (agent-notes) to body-only HTML")
+    p.add_argument("path", metavar="PATH",
+                   help="Path to a .org file, relative to ORG_DIRECTORY "
+                        "(absolute allowed only if it resolves inside it)")
+    p.set_defaults(func=cmd_render_file)
 
     p = sub.add_parser("outline", help="Full nested outline of an org file")
     p.add_argument("--file", help="Target file (default: tasks.org)")
@@ -1201,6 +1215,8 @@ Mutations:  add-task, add-subtask, add-event, add-session-id, set-done,
             move, set-schedule, set-deadline, set-tags, add-tags,
             set-body, append-body, set-property, refile, delete
 Reads:      show, agenda-view, outline, categories
+            (render-file is not batch-covered: a path-taking read with
+            no per-task item — call it standalone)
 
 Args use the same field names as --batch items. Task-addressing commands
 take `heading` (substring) OR `id` (org :ID:, matching each command's

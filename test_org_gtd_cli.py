@@ -6707,3 +6707,201 @@ class TestOutlineEvents:
         node = _find_node(data["nodes"], "Dentist appointment")
         assert node["body"] == "<2026-03-14 Sat 10:00-11:00>"
 
+
+# ===========================================================================
+# render-file command: shared org->HTML render helper + path containment
+# ===========================================================================
+
+RICH_NOTES_SRC = FIXTURES_DIR / "agent-notes" / "rich-notes.org"
+
+
+def _install_rich_notes(org_dir, rel="agent-notes/rich-notes.org"):
+    """Copy the rich agent-notes fixture into ORG_DIR at REL.
+
+    The fixture lives at fixtures/agent-notes/rich-notes.org and is NOT
+    picked up by the top-level `org_dir` glob (non-recursive), so it never
+    pollutes other tests' org-directory. Returns the destination Path.
+    """
+    dest = org_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(RICH_NOTES_SRC, dest)
+    dest.chmod(0o644)
+    return dest
+
+
+def _anchor_attrs(html):
+    """Return (index, type, raw) for every <a ...> opening tag in HTML."""
+    out = []
+    for m in re.finditer(r"<a\b[^>]*>", html):
+        tag = m.group(0)
+        idx = re.search(r'data-org-link-index="([^"]*)"', tag)
+        typ = re.search(r'data-org-link-type="([^"]*)"', tag)
+        raw = re.search(r'data-org-link-raw="([^"]*)"', tag)
+        out.append((
+            idx.group(1) if idx else None,
+            typ.group(1) if typ else None,
+            raw.group(1) if raw else None,
+        ))
+    return out
+
+
+class TestRenderFile:
+    """`render-file` and the shared org->HTML render helper (upgrade E)."""
+
+    def test_happy_envelope(self, org_dir):
+        """Envelope: version, command, org-relative file, body_html, links, hash."""
+        _install_rich_notes(org_dir)
+        data, stderr, rc = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data is not None
+        assert data["version"] == 1
+        assert data["command"] == "render-file"
+        assert data["file"] == "agent-notes/rich-notes.org"
+        assert isinstance(data["body_html"], str)
+        assert isinstance(data["links"], list)
+        assert data["content_hash"].startswith("sha256-")
+
+    def test_body_html_has_table(self, org_dir):
+        """A rich note's table renders to a semantic <table>."""
+        _install_rich_notes(org_dir)
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc == 0
+        assert "<table" in data["body_html"]
+        assert "renderer" in data["body_html"]
+
+    def test_src_block_rendered(self, org_dir):
+        """The python src block is present as a <pre class="src ...">."""
+        _install_rich_notes(org_dir)
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc == 0
+        assert 'class="src src-python"' in data["body_html"]
+
+    def test_src_highlighting_htmlize(self, org_dir):
+        """With htmlize present, src blocks carry org-* face classes (CSS)."""
+        _install_rich_notes(org_dir)
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc == 0
+        if '<span class="org-' not in data["body_html"]:
+            pytest.skip("htmlize not available in this Emacs; run the suite "
+                        "with an htmlize-enabled emacs to exercise CSS "
+                        "syntax highlighting")
+        assert 'class="org-keyword"' in data["body_html"]
+
+    def test_every_anchor_tagged(self, org_dir):
+        """Every exported <a> carries the raw org target (::*Heading preserved)."""
+        _install_rich_notes(org_dir)
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc == 0
+        anchors = _anchor_attrs(data["body_html"])
+        assert len(anchors) == 5
+        for idx, typ, raw in anchors:
+            assert idx is not None
+            assert typ is not None
+            assert raw is not None
+        raws = {raw for _, _, raw in anchors}
+        # The ::*Heading search suffix must survive verbatim.
+        assert "file:other.org::*Some Heading" in raws
+        assert "file:other.org" in raws
+        assert "id:some-id" in raws
+        assert "https://example.com" in raws
+        assert "*Local Heading" in raws
+
+    def test_links_array_matches_anchors(self, org_dir):
+        """The links[] array enumerates every link and maps to DOM anchors."""
+        _install_rich_notes(org_dir)
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc == 0
+        links = data["links"]
+        assert len(links) == 5
+        html = data["body_html"]
+        for link in links:
+            # Each entry's index maps to the anchor carrying the same index.
+            assert f'data-org-link-index="{link["index"]}"' in html
+            assert link["raw"] is not None
+            assert link["type"] is not None
+        by_raw = {link["raw"]: link for link in links}
+        assert by_raw["file:other.org::*Some Heading"]["type"] == "file"
+        assert by_raw["id:some-id"]["type"] == "id"
+        assert by_raw["https://example.com"]["type"] == "https"
+        assert by_raw["https://example.com"]["text"] == "ext"
+        assert by_raw["*Local Heading"]["type"] == "fuzzy"
+
+    def test_content_hash_stable_and_correct(self, org_dir):
+        """content_hash is stable across runs and == sha256 of source bytes."""
+        dest = _install_rich_notes(org_dir)
+        d1, _, rc1 = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        d2, _, rc2 = run_cli_json(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc1 == 0 and rc2 == 0
+        assert d1["content_hash"] == d2["content_hash"]
+        expected = "sha256-" + hashlib.sha256(dest.read_bytes()).hexdigest()
+        assert d1["content_hash"] == expected
+
+    def test_relative_subdir_resolution(self, org_dir):
+        """A plain subdir/name.org resolves against org-directory."""
+        _install_rich_notes(org_dir, rel="sub/deep/notes.org")
+        data, stderr, rc = run_cli_json(
+            "render-file", "sub/deep/notes.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["file"] == "sub/deep/notes.org"
+        assert "<table" in data["body_html"]
+
+    def test_text_mode_prints_html(self, org_dir):
+        """Non-JSON mode prints the rendered HTML to stdout."""
+        _install_rich_notes(org_dir)
+        stdout, stderr, rc = run_cli(
+            "render-file", "agent-notes/rich-notes.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "<table" in stdout
+
+    # --- containment / rejection (structured error, exit 1, no HTML) ---
+
+    def _assert_rejected(self, data, rc):
+        assert rc == 1
+        assert data is not None
+        assert "error" in data
+        assert "body_html" not in data
+
+    def test_reject_parent_traversal(self, org_dir):
+        data, _, rc = run_cli_json(
+            "render-file", "../whatever.org", org_dir=org_dir)
+        self._assert_rejected(data, rc)
+
+    def test_reject_absolute_outside(self, org_dir):
+        outside = org_dir.parent / "outside-abs.org"
+        outside.write_text("* Outside\nsecret\n")
+        data, _, rc = run_cli_json(
+            "render-file", str(outside), org_dir=org_dir)
+        self._assert_rejected(data, rc)
+
+    def test_reject_symlink_escape(self, org_dir):
+        """A symlink inside org-dir pointing outside is rejected (truename check)."""
+        target = org_dir.parent / "symlink-target.org"
+        target.write_text("* Outside via symlink\nsecret\n")
+        link = org_dir / "agent-notes" / "evil.org"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(target, link)
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/evil.org", org_dir=org_dir)
+        self._assert_rejected(data, rc)
+
+    def test_reject_non_org(self, org_dir):
+        notes = org_dir / "agent-notes" / "notes.txt"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text("not org\n")
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/notes.txt", org_dir=org_dir)
+        self._assert_rejected(data, rc)
+
+    def test_reject_missing(self, org_dir):
+        data, _, rc = run_cli_json(
+            "render-file", "agent-notes/does-not-exist.org", org_dir=org_dir)
+        self._assert_rejected(data, rc)
+

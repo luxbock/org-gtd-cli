@@ -1,0 +1,39 @@
+#+title: Rich agent notes
+
+A view-only note with the rich constructs the dashboard viewer must render:
+a table, source blocks, and links of every kind.
+
+* Local Heading
+
+Some introductory prose with /emphasis/ and =verbatim=.
+
+** A table
+
+| Component | Role                 | Status |
+|-----------+----------------------+--------|
+| renderer  | ox-html body export  | done   |
+| client    | routes off data-org- | wip    |
+
+** A python source block
+
+#+begin_src python
+def greet(name):
+    total = 1 + 2
+    return f"hello {name}: {total}"
+#+end_src
+
+** An elisp source block
+
+#+begin_src emacs-lisp
+(defun rich/demo (x)
+  (let ((y (+ x 1)))
+    (message "value is %s" y)))
+#+end_src
+
+** Links of every kind
+
+- A plain file link: [[file:other.org]]
+- A file link with a heading search: [[file:other.org::*Some Heading]]
+- An id link: [[id:some-id]]
+- An external link: [[https://example.com][ext]]
+- A local heading link: [[*Local Heading]]
