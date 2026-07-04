@@ -61,8 +61,34 @@ Common commands:
 | `projects` / `subtasks` / `categories` / `list-tags` | Inspect structure |
 
 Run `org-gtd-cli <command> -h` for per-command options, or `org-gtd-cli -h`
-for the full list. Most write commands also accept `--batch` (a JSON array
-on stdin) to run many operations in one Emacs process.
+for the full list.
+
+### Batch mode
+
+Run many operations in one Emacs process (avoiding per-call startup and
+`emacsclient` round-trips, and executing without another writer interleaving).
+Two forms, both reading a JSON array on stdin:
+
+- `org-gtd-cli --batch <command>` — homogeneous: every item runs the same
+  command. Covers all mutations (`set-state`, `set-next`, `set-cancelled`,
+  `set-priority`, `set-schedule`, `set-deadline`, `set-tags`, `add-tags`,
+  `rename`, `move`, `set-body`, `append-body`, `set-property`, `refile`,
+  `delete`, `add-task`, `add-subtask`, `add-event`, `add-session-id`,
+  `set-done`) plus `show`.
+- `org-gtd-cli batch` — heterogeneous: each item is `{"command": ..., "args":
+  {...}}`. Supports every command above **and** the read commands
+  `agenda-view`, `outline`, and `categories`, so one call can pair a mutation
+  with a recomputed view.
+
+Each item addresses its task by `heading` (substring) or by `id` (org `:ID:`,
+matching each command's `--id` flag); `id` takes precedence. A failing item
+becomes a per-item error without aborting the batch.
+
+```sh
+# A mutation plus a recomputed dashboard, atomically:
+echo '[{"command":"set-done","args":{"id":"f95d…"}},
+       {"command":"agenda-view","args":{}}]' | org-gtd-cli --json batch
+```
 
 ## Performance
 

@@ -3936,6 +3936,40 @@ NAME is the field name used in the error message."
   (or (apply #'org-gtd-cli/batch--field item keys)
       (error "Missing required field: %s" name)))
 
+(defun org-gtd-cli/batch--addr (item &rest keys)
+  "Return ITEM's heading substring for a task-addressing command.
+KEYS default to (heading).  When ITEM carries an `id' field the task is
+resolved by org :ID: (see `org-gtd-cli/batch--with-addr'), so this
+returns nil — `org-gtd-cli/find-task' ignores its substring argument
+under a bound `org-gtd-cli/forced-id'.  Signals when ITEM provides
+neither an id nor a heading key."
+  (let ((id (org-gtd-cli/batch--field item 'id))
+        (heading (apply #'org-gtd-cli/batch--field item (or keys '(heading)))))
+    (cond (id nil)
+          (heading heading)
+          (t (error "Missing required field: heading (or id)")))))
+
+(defun org-gtd-cli/batch--flag (item &rest keys)
+  "Return \"t\" when ITEM's first present flag among KEYS is JSON true.
+JSON false parses to `:false' and true to `t' (see
+`org-gtd-cli/batch--parse-items'); the individual command impls expect
+the \"t\"/nil string convention the Python layer emits.  JSON
+false/null and an absent key all yield nil."
+  (let ((v (apply #'org-gtd-cli/batch--field item keys)))
+    (and (eq v t) "t")))
+
+(defmacro org-gtd-cli/batch--with-addr (item mutation &rest body)
+  "Bind id-addressing dynamic vars from ITEM around BODY.
+When ITEM has an `id' field, `org-gtd-cli/forced-id' is bound so the
+delegated command resolves the task by org :ID: instead of substring —
+matching the individual commands' `--id' semantics.  MUTATION non-nil
+enables lazy id creation on the resolved task (a no-op when it already
+has an id, and irrelevant when addressing by substring)."
+  (declare (indent 2))
+  `(let ((org-gtd-cli/forced-id (org-gtd-cli/batch--field ,item 'id))
+         (org-gtd-cli/forced-create-id (and ,mutation t)))
+     ,@body))
+
 (defun org-gtd-cli/batch--json-error (s)
   "If S parses as a JSON object with an `error' field, return that field.
 The real commands emit errors as {\"error\": ..., \"hint\": ...} JSON in
@@ -3961,21 +3995,35 @@ cleanly into the batch response), or nil when FN printed nothing.  On
 failure (non-zero exit) signals `error' with the message FN reported."
   (let ((exit-code nil)
         (stderr-msgs '())
-        (payload ""))
-    (with-temp-buffer
-      (let ((standard-output (current-buffer))
-            (org-gtd-cli/json-mode t))
-        (cl-letf (((symbol-function 'kill-emacs)
-                   (lambda (&optional code)
-                     (setq exit-code (or code 0))
-                     (throw 'org-gtd-cli--delegate nil)))
-                  ((symbol-function 'message)
-                   (lambda (fmt &rest margs)
-                     (when fmt
-                       (push (apply #'format fmt margs) stderr-msgs)))))
-          (catch 'org-gtd-cli--delegate
-            (apply fn args))))
-      (setq payload (string-trim (buffer-string))))
+        (payload "")
+        ;; Capture into a dedicated buffer bound to `standard-output', but do
+        ;; NOT make it current: `agenda-view' runs `org-agenda' with
+        ;; window-setup `current-window, which fills the *current* buffer with
+        ;; the (propertized) agenda listing.  A `with-temp-buffer' capture
+        ;; buffer would be that current buffer, so the read's JSON ends up
+        ;; appended after raw agenda text and fails to parse.
+        (cap (generate-new-buffer " *org-gtd-cli-batch-delegate*")))
+    (unwind-protect
+        (progn
+          (let ((standard-output cap)
+                (org-gtd-cli/json-mode t))
+            (cl-letf (((symbol-function 'kill-emacs)
+                       (lambda (&optional code)
+                         (setq exit-code (or code 0))
+                         (throw 'org-gtd-cli--delegate nil)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest margs)
+                         ;; Return the formatted string like the real `message'
+                         ;; does — some callers rely on the return value, so a
+                         ;; nil-returning stub can corrupt them.
+                         (when fmt
+                           (let ((s (apply #'format fmt margs)))
+                             (push s stderr-msgs)
+                             s)))))
+              (catch 'org-gtd-cli--delegate
+                (apply fn args))))
+          (setq payload (string-trim (with-current-buffer cap (buffer-string)))))
+      (kill-buffer cap))
     (if (and exit-code (> exit-code 0))
         ;; Failure.  The error text normally arrives via `message'
         ;; ({"error": ...} JSON in json-mode); find-task's multiple-match
@@ -4013,22 +4061,139 @@ index in the batch array."
   (pcase command
     ("set-done"
      (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-done
+             (org-gtd-cli/batch--addr item)))))
+
+    ("set-state"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-state
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--required item "state" 'state)))))
+
+    ("set-cancelled"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-state
+             (org-gtd-cli/batch--addr item)
+             "CANCELLED"))))
+
+    ("set-next"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-next
+             (org-gtd-cli/batch--addr item)))))
+
+    ("set-priority"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-priority
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--field item 'priority)
+             (org-gtd-cli/batch--flag item 'clear)))))
+
+    ("rename"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/rename
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--required item "title" 'title 'new_title 'newtitle)))))
+
+    ("move"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/move
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--required item "direction" 'direction)
+             (org-gtd-cli/batch--field item 'sibling)))))
+
+    ("set-schedule"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-schedule
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--field item 'date)
+             (org-gtd-cli/batch--field item 'time)
+             (org-gtd-cli/batch--flag item 'clear)))))
+
+    ("set-deadline"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-deadline
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--field item 'date)
+             (org-gtd-cli/batch--field item 'time)
+             (org-gtd-cli/batch--flag item 'clear)))))
+
+    ("set-property"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-property
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--required item "key" 'key)
+             (org-gtd-cli/batch--field item 'value)
+             (org-gtd-cli/batch--flag item 'clear)))))
+
+    ("set-body"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/set-body
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--required item "text" 'text 'body)))))
+
+    ("append-body"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/append-body
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--required item "text" 'text 'body)))))
+
+    ("agenda-view"
+     (org-gtd-cli/batch--result
       idx (org-gtd-cli/batch--delegate
-           #'org-gtd-cli/set-done
-           (org-gtd-cli/batch--required item "heading" 'heading))))
+           #'org-gtd-cli/agenda-view
+           (org-gtd-cli/batch--field item 'key)
+           (org-gtd-cli/batch--field item 'date))))
+
+    ("outline"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/outline
+           (org-gtd-cli/batch--field item 'file))))
+
+    ("categories"
+     (org-gtd-cli/batch--result
+      idx (org-gtd-cli/batch--delegate
+           #'org-gtd-cli/categories
+           (org-gtd-cli/batch--field item 'file))))
 
     ("delete"
      (org-gtd-cli/batch--result
-      idx (org-gtd-cli/batch--delegate
-           #'org-gtd-cli/delete
-           (org-gtd-cli/batch--required item "heading" 'heading))))
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/delete
+             (org-gtd-cli/batch--addr item)))))
 
     ("refile"
      (org-gtd-cli/batch--result
-      idx (org-gtd-cli/batch--delegate
-           #'org-gtd-cli/refile
-           (org-gtd-cli/batch--required item "heading" 'heading)
-           nil shared-arg)))
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/refile
+             (org-gtd-cli/batch--addr item)
+             nil shared-arg))))
 
     ("add-subtask"
      (org-gtd-cli/batch--result
@@ -4070,23 +4235,26 @@ index in the batch array."
 
     ("add-session-id"
      (org-gtd-cli/batch--result
-      idx (org-gtd-cli/batch--delegate
-           #'org-gtd-cli/add-session-id
-           (org-gtd-cli/batch--required item "heading" 'heading)
-           (org-gtd-cli/batch--required item "session_id"
-                                        'session_id 'session-id))))
+      idx (org-gtd-cli/batch--with-addr item t
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/add-session-id
+             (org-gtd-cli/batch--addr item)
+             (org-gtd-cli/batch--required item "session_id"
+                                          'session_id 'session-id)))))
 
     ("show"
      (org-gtd-cli/batch--result
-      idx (org-gtd-cli/batch--delegate
-           #'org-gtd-cli/show
-           (org-gtd-cli/batch--required item "heading" 'heading))))
+      idx (org-gtd-cli/batch--with-addr item nil
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/show
+             (org-gtd-cli/batch--addr item)))))
 
     ("set-tags"
-     (let ((payload (org-gtd-cli/batch--delegate
-                     #'org-gtd-cli/set-tags
-                     (org-gtd-cli/batch--required item "heading" 'heading)
-                     (org-gtd-cli/batch--field item 'tags))))
+     (let ((payload (org-gtd-cli/batch--with-addr item t
+                      (org-gtd-cli/batch--delegate
+                       #'org-gtd-cli/set-tags
+                       (org-gtd-cli/batch--addr item)
+                       (org-gtd-cli/batch--field item 'tags)))))
        ;; Legacy batch schema: `tags' as a comma-joined string.
        (org-gtd-cli/batch--result
         idx payload
@@ -4095,10 +4263,11 @@ index in the batch array."
                               ","))))))
 
     ("add-tags"
-     (let ((payload (org-gtd-cli/batch--delegate
-                     #'org-gtd-cli/add-tags
-                     (org-gtd-cli/batch--required item "heading" 'heading)
-                     (org-gtd-cli/batch--required item "tags" 'tags))))
+     (let ((payload (org-gtd-cli/batch--with-addr item t
+                      (org-gtd-cli/batch--delegate
+                       #'org-gtd-cli/add-tags
+                       (org-gtd-cli/batch--addr item)
+                       (org-gtd-cli/batch--required item "tags" 'tags)))))
        ;; Legacy batch schema: `tags' as the merged comma-joined string.
        (org-gtd-cli/batch--result
         idx payload

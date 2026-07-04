@@ -5786,6 +5786,175 @@ class TestBatchMixed:
         assert data["summary"]["succeeded"] == 1
 
 
+class TestBatchExtendedCommands:
+    """Batch coverage for reads + the full mutation set, plus --id addressing."""
+
+    # --- New mutations (homogeneous --batch) ---
+
+    def test_batch_set_state(self, org_dir):
+        """--batch set-state changes TODO state per item."""
+        data, stderr, rc = run_batch(
+            "set-state",
+            # NEXT is rejected on freestanding tasks, so use DEFER for the
+            # standalone "Add aliases" item (see commit 0e1d2dd).
+            [{"heading": "Write quarterly report", "state": "WAITING"},
+             {"heading": "Add aliases to common systemctl", "state": "DEFER"}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+        assert data["results"][0]["new_state"] == "WAITING"
+        assert data["results"][1]["new_state"] == "DEFER"
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "** WAITING Write quarterly report" in tasks
+
+    def test_batch_set_state_missing_state_is_per_item_error(self, org_dir):
+        """set-state without a state field fails that item alone."""
+        data, stderr, rc = run_batch(
+            "set-state",
+            [{"heading": "Write quarterly report"}],
+            org_dir=org_dir,
+        )
+        assert data["results"][0]["success"] is False
+        assert "state" in data["results"][0]["error"]
+
+    def test_batch_set_priority_and_clear(self, org_dir):
+        """--batch set-priority sets a priority, and clear:true removes one."""
+        data, stderr, rc = run_batch(
+            "set-priority",
+            [{"heading": "Write quarterly report", "priority": "A"},
+             {"heading": "Add aliases to common systemctl", "clear": True}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "** TODO [#A] Write quarterly report" in tasks
+        assert "[#B] Add aliases" not in tasks
+
+    def test_batch_set_schedule_clear_false_still_schedules(self, org_dir):
+        """clear:false must NOT be read as a clear request (JSON false → :false).
+
+        Regression guard for `org-gtd-cli/batch--flag`: without it, JSON false
+        reaches the elisp as the truthy symbol `:false` and the item wrongly
+        clears the timestamp instead of setting it.
+        """
+        data, stderr, rc = run_batch(
+            "set-schedule",
+            [{"heading": "Write quarterly report",
+              "date": "2026-08-01", "clear": False}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["results"][0]["success"] is True
+        assert "2026-08-01" in json.dumps(data["results"][0])
+        assert "SCHEDULED: <2026-08-01" in (org_dir / "tasks.org").read_text()
+
+    def test_batch_rename(self, org_dir):
+        """--batch rename changes heading text."""
+        data, stderr, rc = run_batch(
+            "rename",
+            [{"heading": "Write quarterly report",
+              "title": "Write the annual report"}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["results"][0]["success"] is True
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "Write the annual report" in tasks
+        assert "Write quarterly report" not in tasks
+
+    def test_batch_set_body(self, org_dir):
+        """--batch set-body replaces the task body."""
+        data, stderr, rc = run_batch(
+            "set-body",
+            [{"heading": "Write quarterly report", "text": "New body line."}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["results"][0]["success"] is True
+        assert "New body line." in (org_dir / "tasks.org").read_text()
+
+    def test_batch_move(self, org_dir):
+        """--batch move reorders a task among its siblings."""
+        data, stderr, rc = run_batch(
+            "move",
+            [{"heading": "Add more test cases", "direction": "down"}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["results"][0]["success"] is True
+        assert_line_before(org_dir / "tasks.org",
+                           "Test on actual project", "Add more test cases")
+
+    # --- Reads (mixed `batch` only) ---
+
+    def test_batch_mixed_reads(self, org_dir):
+        """The heterogeneous `batch` exposes agenda-view, outline, categories."""
+        items = [
+            {"command": "agenda-view", "args": {}},
+            {"command": "outline", "args": {"file": "tasks.org"}},
+            {"command": "categories", "args": {}},
+        ]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        assert data["summary"] == {"total": 3, "succeeded": 3, "failed": 0}
+        assert "blocks" in data["results"][0]
+        assert "nodes" in data["results"][1]
+        assert isinstance(data["results"][2]["categories"], list)
+
+    def test_batch_composite_mutation_then_read(self, org_dir):
+        """The motivating case: a mutation plus a recomputed view, atomically."""
+        items = [
+            {"command": "set-done", "args": {"heading": "Write quarterly report"}},
+            {"command": "agenda-view", "args": {}},
+        ]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        assert data["results"][0]["new_state"] == "DONE"
+        assert "blocks" in data["results"][1]
+
+    def test_reads_rejected_in_homogeneous_batch(self, org_dir):
+        """agenda-view/outline/categories are mixed-mode only."""
+        for cmd in ("agenda-view", "outline", "categories"):
+            data, stderr, rc = run_batch(cmd, [{}], org_dir=org_dir)
+            assert rc == 1
+            assert f"--batch is not supported for '{cmd}'" in stderr
+
+    # --- --id addressing ---
+
+    def test_batch_show_by_id(self, org_dir):
+        """A batch item may address a task by org :ID: instead of heading."""
+        data, stderr, rc = run_batch_mixed(
+            [{"command": "show", "args": {"id": "test-id-research"}}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["results"][0]["success"] is True
+        assert data["results"][0]["heading"] == "Research"
+
+    def test_batch_mutation_by_id(self, org_dir):
+        """A mutation item resolves by id and applies to the right heading."""
+        data, stderr, rc = run_batch_mixed(
+            [{"command": "set-property",
+              "args": {"id": "test-id-research", "key": "OWNER", "value": "me"}}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        assert data["results"][0]["success"] is True
+        assert data["results"][0]["heading"] == "Research"
+        assert re.search(r":OWNER:\s+me", (org_dir / "tasks.org").read_text())
+
+    def test_batch_missing_heading_and_id_is_per_item_error(self, org_dir):
+        """An addressing command with neither heading nor id fails that item."""
+        data, stderr, rc = run_batch_mixed(
+            [{"command": "show", "args": {}}],
+            org_dir=org_dir,
+        )
+        assert data["results"][0]["success"] is False
+        assert "heading" in data["results"][0]["error"]
+
+
 class TestBatchLoudErrors:
     """--batch / batch input errors must be loud: stderr + exit 1, never
     generic help, never exit 0."""
