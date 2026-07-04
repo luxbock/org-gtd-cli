@@ -21,11 +21,20 @@ let
   elispFile = ./org-gtd-cli.el;
   pythonScript = ./org-gtd-cli.py;
 
+  # Emacs with `htmlize` on its load-path. `render-file` (and the shared
+  # `org-gtd-cli/render-org-string` helper) fontify src blocks via
+  # `org-html-htmlize-output-type 'css`, which needs htmlize to emit `org-*`
+  # face-class spans; without it the exporter degrades to a plain <pre> (no
+  # crash), but the dashboard's CSS syntax highlighting would be lost. Provision
+  # it for build, runtime, and the test suite. The wrapper still exposes `emacs`
+  # / `emacsclient` (the binary names the Python layer invokes) and a full org.
+  emacsWithHtmlize = emacs-nox.pkgs.withPackages (epkgs: [ epkgs.htmlize ]);
+
   # Byte-compiled elisp for faster Emacs startup on each invocation
   compiledElisp =
     runCommand "org-gtd-cli-elisp"
       {
-        nativeBuildInputs = [ emacs-nox ];
+        nativeBuildInputs = [ emacsWithHtmlize ];
       }
       ''
         mkdir -p $out
@@ -41,7 +50,7 @@ let
     export PATH="${
       lib.makeBinPath [
         coreutils
-        emacs-nox
+        emacsWithHtmlize
         python3
       ]
     }:$PATH"
@@ -66,7 +75,7 @@ symlinkJoin {
     runCommand "org-gtd-cli-tests"
       {
         nativeBuildInputs = [
-          emacs-nox
+          emacsWithHtmlize
           coreutils
           procps
           python3

@@ -1589,6 +1589,197 @@ minimal indented heading tree."
      (org-gtd-cli/outline-print-text (alist-get 'children node)))
    nodes))
 
+;; ══════════════════════════════════════════════════════════════════════════════
+;; Shared org→HTML render helper + path-scoped render-file
+;; ══════════════════════════════════════════════════════════════════════════════
+
+(declare-function org-html-link "ox-html" (link desc info))
+(declare-function org-export-create-backend "ox" (&rest rest))
+(declare-function org-export-string-as "ox"
+                  (string backend &optional body-only ext-plist))
+
+;; Declared special (bodyless defvar) so the byte-compiler binds them
+;; DYNAMICALLY in `org-gtd-cli/render-org-string' below.  They are defined in
+;; ox-html/ox, which are not loaded when this file is compiled; without these
+;; forward declarations a compiled `let'/`let*' would create a useless lexical
+;; local and the export would run with the global htmlize output type instead
+;; of the `css' face classes the dashboard needs.
+(defvar org-html-htmlize-output-type)
+(defvar org-export-with-broken-links)
+
+(defvar org-gtd-cli/render--links nil
+  "Dynamic accumulator of link metadata during `org-gtd-cli/render-org-string'.
+Bound freshly per render.  Each entry is a JSON-ready alist with keys
+`index' (0-based, mapping to the matching DOM anchor's
+`data-org-link-index'), `type', `raw', and `text'.")
+
+(defun org-gtd-cli/attr-escape (s)
+  "Escape S for safe interpolation inside a double-quoted HTML attribute."
+  (setq s (replace-regexp-in-string "&" "&amp;" s t t))
+  (setq s (replace-regexp-in-string "<" "&lt;" s t t))
+  (setq s (replace-regexp-in-string ">" "&gt;" s t t))
+  (setq s (replace-regexp-in-string "\"" "&quot;" s t t))
+  s)
+
+(defun org-gtd-cli/htmlize-available-p ()
+  "Return non-nil if the `htmlize' package can be loaded.
+Used to decide whether src blocks can be fontified with `css' face
+classes; when nil the exporter degrades to a plain <pre> (no crash)."
+  (and (locate-library "htmlize")
+       (require 'htmlize nil t)
+       t))
+
+(defun org-gtd-cli/html-link (link desc info)
+  "Transcode a LINK to HTML, tagging the anchor with its raw org target.
+DESC is the transcoded description, INFO the export communication
+channel.  `ox-html' mangles hrefs (file:x.org -> x.html), so the client
+must never route off `href': every emitted <a> is stamped with
+`data-org-link-index', `data-org-link-type' and `data-org-link-raw' (the
+original org target, e.g. \"file:x.org::*Heading\", with the ::search
+suffix preserved), and the same record is pushed onto
+`org-gtd-cli/render--links'.  Broken or unresolvable id:/fuzzy/search
+links (whose targets do not exist
+in this standalone export) would otherwise abort the export or be dropped
+by `ox''s broken-link handling before this transcoder finishes; catching
+any resolution error here keeps them as tagged anchors (using the raw org
+target as a placeholder href) so the client's in-app link resolution still
+works.  Resolution has no side effects on failure (e.g. an id: lookup with
+`org-id-track-globally' off errors immediately without scanning)."
+  (let* ((type (org-element-property :type link))
+         (raw (org-element-property :raw-link link))
+         (index (length org-gtd-cli/render--links))
+         (html (condition-case nil
+                   (org-html-link link desc info)
+                 (error
+                  (format "<a href=\"%s\">%s</a>"
+                          (org-gtd-cli/attr-escape (or raw ""))
+                          (or desc (org-gtd-cli/attr-escape (or raw ""))))))))
+    (push `((index . ,index)
+            (type . ,(or type :null))
+            (raw . ,(or raw :null))
+            (text . ,(if desc (substring-no-properties desc) :null)))
+          org-gtd-cli/render--links)
+    (if (and (stringp html) (string-match "<a " html))
+        (replace-match
+         (format (concat "<a data-org-link-index=\"%d\""
+                         " data-org-link-type=\"%s\""
+                         " data-org-link-raw=\"%s\" ")
+                 index
+                 (org-gtd-cli/attr-escape (or type ""))
+                 (org-gtd-cli/attr-escape (or raw "")))
+         t t html)
+      html)))
+
+(defun org-gtd-cli/render-org-string (org-string)
+  "Render ORG-STRING to body-only HTML with per-link metadata.
+Returns a plist (:html HTML-STRING :links LINKS-VECTOR):
+- HTML is a body-only `ox-html' export (no <head>/<html> wrapper, TOC and
+  section numbers off).  Src blocks are fontified with `css' face classes
+  (org-keyword, org-string, …) when `htmlize' is available, degrading to a
+  plain <pre> otherwise.
+- LINKS is a vector of JSON-ready alists (index/type/raw/text), one per
+  link in document order; each entry's `index' matches the
+  `data-org-link-index' on the corresponding <a> so a client can recover
+  every link's original org target without parsing `href' (see
+  `org-gtd-cli/html-link').
+This is the shared helper behind `render-file'; it never touches the file
+system or GTD semantics."
+  (require 'ox-html)
+  (require 'org-id)
+  (let* ((org-gtd-cli/render--links nil)
+         (org-html-htmlize-output-type
+          (if (org-gtd-cli/htmlize-available-p) 'css nil))
+         (org-export-with-broken-links t)
+         (backend (org-export-create-backend
+                   :parent 'html
+                   :transcoders '((link . org-gtd-cli/html-link))))
+         ;; This CLI disables org-id's global registry (`org-id-track-globally'
+         ;; nil, see top of file), which makes an unresolvable id: link's
+         ;; `org-id-find' raise a hard `error' ("turn on org-id-track-globally")
+         ;; that would abort the whole export.  Neutralize the registry rebuild
+         ;; so it returns nil instead: the id: link then degrades to a broken
+         ;; link, tagged as a raw anchor by `org-gtd-cli/html-link'.  No scan,
+         ;; no side effect.
+         (html (cl-letf (((symbol-function 'org-id-update-id-locations) #'ignore))
+                 (org-export-string-as
+                  (or org-string "") backend t
+                  '(:with-toc nil :section-numbers nil :with-broken-links t)))))
+    (list :html (string-trim html)
+          :links (apply #'vector (nreverse org-gtd-cli/render--links)))))
+
+(defun org-gtd-cli/render-file-reject (msg hint)
+  "Emit a structured render-file error (MSG + HINT) and exit 1.
+Mirrors the {error, hint} JSON shape used by `org-gtd-cli/find-task'."
+  (if org-gtd-cli/json-mode
+      (org-gtd-cli/output `((error . ,msg) (hint . ,hint)))
+    (org-gtd-cli/error "%s" msg)
+    (org-gtd-cli/error "Hint: %s" hint))
+  (kill-emacs 1))
+
+(defun org-gtd-cli/render-file (path)
+  "Render the org file at PATH (under `org-directory') to body-only HTML.
+PATH is resolved relative to `org-directory'; absolute paths are allowed
+only when they canonicalize inside it.  This is the first command taking a
+caller-supplied path, so it is path-scoped: after expanding and
+`file-truename'-resolving both PATH and `org-directory', it REJECTS
+\(structured error, exit 1) any PATH that
+ (a) escapes `org-directory' after symlink resolution,
+ (b) does not end in .org, or
+ (c) does not exist as a regular file.
+Whole-file rendering only (no subtree selectors).  In JSON mode emits
+{version, command, file, body_html, links, content_hash}; `content_hash'
+is \"sha256-<hex>\" over the raw source bytes (for the dashboard's
+hash-caching).  In text mode prints the HTML."
+  (let* ((org-dir-true (file-name-as-directory
+                        (file-truename
+                         (directory-file-name (expand-file-name org-directory)))))
+         (raw-path (or path ""))
+         (candidate (expand-file-name raw-path org-directory))
+         (candidate-true (file-truename candidate)))
+    ;; (b) must be a .org file (checked on the resolved name so a symlink to a
+    ;; non-org target is rejected too).
+    (unless (string-suffix-p ".org" candidate-true)
+      (org-gtd-cli/render-file-reject
+       (format "Not an org file: %s" raw-path)
+       "render-file only renders files whose name ends in .org."))
+    ;; (a) must stay inside org-directory after symlink resolution.  The
+    ;; trailing slash on ORG-DIR-TRUE makes this a proper path-component
+    ;; prefix (so a sibling like .../org-evil cannot match .../org).
+    (unless (string-prefix-p org-dir-true candidate-true)
+      (org-gtd-cli/render-file-reject
+       (format "Path escapes org-directory: %s" raw-path)
+       "render-file only reads files inside ORG_DIRECTORY."))
+    ;; (c) must exist as a regular file.
+    (unless (file-regular-p candidate-true)
+      (org-gtd-cli/render-file-reject
+       (format "File not found: %s" raw-path)
+       "Check the path (it is resolved relative to ORG_DIRECTORY)."))
+    ;; Read once, literally: hash the raw source bytes and decode the same
+    ;; bytes as UTF-8 for the exporter.  `content_hash' must be sha256 of the
+    ;; source bytes (matching a client's own hash of the file), not of Emacs's
+    ;; internal multibyte representation.
+    (let (hash org-text)
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally candidate-true)
+        (let ((bytes (buffer-string)))
+          (setq hash (concat "sha256-" (secure-hash 'sha256 bytes)))
+          (setq org-text (decode-coding-string bytes 'utf-8))))
+      (let* ((rendered (org-gtd-cli/render-org-string org-text))
+             (html (plist-get rendered :html))
+             (links (plist-get rendered :links)))
+        (if org-gtd-cli/json-mode
+            (org-gtd-cli/output
+             `((version . 1)
+               (command . "render-file")
+               (file . ,(file-relative-name candidate-true org-dir-true))
+               (body_html . ,html)
+               (links . ,links)
+               (content_hash . ,hash)))
+          (princ html)
+          (princ "\n")))))
+  (kill-emacs 0))
+
 ;; --- list-tags ---
 
 (defun org-gtd-cli/list-tags ()
