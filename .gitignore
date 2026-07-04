@@ -8,3 +8,6 @@ __pycache__/
 
 # trash-cli local fallback trash (created when `trash` runs on this mount)
 .Trash-*/
+
+# Claude Code session state (agent worktrees, local settings)
+.claude/
