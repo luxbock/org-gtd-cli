@@ -60,6 +60,9 @@ Common commands:
 | `set-tags` / `add-tags` / `refile` / `move` / `rename` | Organize and edit |
 | `projects` / `subtasks` / `categories` / `list-tags` | Inspect structure |
 
+`add-task` has no `--parent` flag — to add a child under an existing task or
+project, use `add-subtask PARENT_SUBSTR TITLE`.
+
 Run `org-gtd-cli <command> -h` for per-command options, or `org-gtd-cli -h`
 for the full list.
 

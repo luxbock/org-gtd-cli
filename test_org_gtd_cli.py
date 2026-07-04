@@ -288,6 +288,16 @@ class TestAddTask:
         assert "Improve agent workflow/Resources" in stderr
         assert "Research/Resources" in stderr
 
+    def test_parent_flag_rejected_with_add_subtask_hint(self, org_dir):
+        """add-task has no --parent; the error must point at add-subtask."""
+        stdout, stderr, rc = run_cli(
+            "add-task", "Nested task", "--parent", "Improve agent workflow",
+            org_dir=org_dir,
+        )
+        assert rc == 2, (stdout, stderr)
+        assert "add-subtask PARENT_SUBSTR TITLE" in stderr
+        assert "Nested task" not in (org_dir / "inbox.org").read_text()
+
 
 # ===========================================================================
 # 3. add-task --category: no extra blank lines

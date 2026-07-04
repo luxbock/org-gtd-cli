@@ -789,6 +789,14 @@ def cmd_fix_timestamps(_args):
 
 # --- Parser construction ---
 
+class _AddTaskParentAction(argparse.Action):
+    """add-task has no --parent; catch the common mistake and point at add-subtask."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error("add-task has no --parent; to add a child under an "
+                     "existing task, use: add-subtask PARENT_SUBSTR TITLE")
+
+
 def build_parser() -> argparse.ArgumentParser:
     epilog = """\
 Querying:
@@ -944,6 +952,8 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--file", help="Target file (relative to ORG_DIRECTORY)")
     p.add_argument("--category", help="Insert under this heading in tasks.org")
     p.add_argument("--state", help="Initial state (default: TODO)")
+    p.add_argument("--parent", nargs="?", action=_AddTaskParentAction,
+                   default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_add_task)
 
     p = sub.add_parser("add-subtask", help="Add a child task under a parent")
