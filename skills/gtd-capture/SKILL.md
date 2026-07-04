@@ -24,6 +24,8 @@ From the user's description and the current conversation context, determine:
 - **Schedule/deadline** — only if the user mentions a specific date or timeframe.
 - **State** — default is TODO. Use NEXT only if the user says they want to work on it right away.
 
+When the task lies outside the domain you are currently working in, write the title and body for a future reader who has none of this session's context. Describe the task in terms of the category/project it is filed under — drop session-specific jargon, codenames, and file paths that only make sense here, and keep only what is needed to act on the task later.
+
 ## How to infer from context
 
 - If the conversation is about a specific project or domain, use that to pick the category. Working on NixOS config? File under `Computers/NixOS`. Discussing a trip? File under `Travel`.

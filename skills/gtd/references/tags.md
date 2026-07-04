@@ -31,6 +31,10 @@ The following is useful background information about how the following tags are 
 - `family` - tasks related to my house or family members
 - `finance` - investments, property, payments, money transfers, debts
 
+### Discovering tags in use
+
+The lists above are canonical, not exhaustive. Before adding any tag that is not listed above, run `org-gtd-cli --json list-tags` — it returns every tag currently in use with its usage count (literal occurrences, no inheritance), sorted most-used first. Prefer reusing an existing tag over coining a new near-duplicate (e.g. reuse `computers`, don't invent `pcs`).
+
 Tags go at the end of the headline, colon-delimited: `* TODO Buy groceries :buy:@errand:`
 
 Tags on parent headings are inherited by children - do not repeat them on subtasks.

@@ -198,6 +198,8 @@ org-gtd-cli --json add-task "Set up monitoring" --state NEXT --category "Compute
 
 TITLE MUST be the first argument, before any flags. Without `--category`, the task goes to `inbox.org` — you MUST NOT use `--category inbox`, as "inbox" is not a category heading and will match incorrectly. With `--category`, the task is placed under that heading in `tasks.org`. Use the slash-delimited path from `categories` output to target nested headings.
 
+`add-task` has no `--parent` flag — to add a child under an existing task or project, use `add-subtask PARENT_SUBSTR TITLE` (next section).
+
 ### add-subtask — add to existing task/project
 
 ```bash
