@@ -1185,31 +1185,55 @@ Run 'org-gtd-cli <command> -h' for command details."""
 Run several commands in one Emacs process.
 
 stdin: JSON array of {"command": NAME, "args": {...}} objects.
-Supported commands: add-event, add-session-id, add-subtask, add-task,
-add-tags, delete, refile, set-done, set-tags, show.
 
-Args use the same field names as --batch items:
+Mutations:  add-task, add-subtask, add-event, add-session-id, set-done,
+            set-state, set-next, set-cancelled, set-priority, rename,
+            move, set-schedule, set-deadline, set-tags, add-tags,
+            set-body, append-body, set-property, refile, delete
+Reads:      show, agenda-view, outline, categories
+
+Args use the same field names as --batch items. Task-addressing commands
+take `heading` (substring) OR `id` (org :ID:, matching each command's
+--id flag; `id` wins when both are given):
   add-task        title (required), body, tags, schedule, deadline,
                   priority, file, category, state
   add-subtask     parent (required), title (required), body, tags,
                   schedule, deadline, priority, state
   add-event       title (required), date (required), time, tag, file,
                   end_date
-  refile          heading (required), category (required)
-  set-done        heading (required)
-  delete          heading (required)
-  show            heading (required)
-  set-tags        heading (required), tags
-  add-tags        heading (required), tags (required)
-  add-session-id  heading (required), session_id (required)
+  refile          heading|id (required), category (required)
+  set-done        heading|id (required)
+  set-state       heading|id (required), state (required)
+  set-next        heading|id (required)
+  set-cancelled   heading|id (required)
+  set-priority    heading|id (required), priority, clear
+  rename          heading|id (required), title (required)
+  move            heading|id (required), direction (required), sibling
+  set-schedule    heading|id (required), date, time, clear
+  set-deadline    heading|id (required), date, time, clear
+  set-body        heading|id (required), text (required)
+  append-body     heading|id (required), text (required)
+  set-property    heading|id (required), key (required), value, clear
+  set-tags        heading|id (required), tags
+  add-tags        heading|id (required), tags (required)
+  add-session-id  heading|id (required), session_id (required)
+  delete          heading|id (required)
+  show            heading|id (required)
+  agenda-view     key, date
+  outline         file
+  categories      file
 
 Output: JSON with one result per input item, in order, plus a summary
 (same shape as --batch <subcommand>). A failing item does not abort
 the rest. Exit 0 if at least one item succeeded, 1 otherwise.
 
+Reads (agenda-view, outline, categories) are available only here, not in
+the homogeneous `--batch <subcommand>` form, so one call can pair a
+mutation with a recomputed view.
+
 Example:
-  echo '[{"command": "add-task", "args": {"title": "Buy milk"}},
-         {"command": "set-done", "args": {"heading": "Call plumber"}}]' \\
+  echo '[{"command": "set-done", "args": {"id": "f95d…"}},
+         {"command": "agenda-view", "args": {}}]' \\
     | org-gtd-cli --json batch
 """)
     p.set_defaults(func=cmd_batch_mixed)

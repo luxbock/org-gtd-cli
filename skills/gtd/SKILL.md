@@ -346,16 +346,21 @@ Use `--dry-run` on any modifying command that supports it to preview changes.
 
 ## Batch operations
 
-Two forms execute multiple operations in one call (one Emacs process). Supported commands for both: `set-done`, `delete`, `refile`, `add-subtask`, `add-task`, `add-event`, `add-session-id`, `show`, `set-tags`, `add-tags`.
+Two forms execute multiple operations in one call (one Emacs process).
 
-**Mixed commands** — the `batch` subcommand reads a JSON array of `{"command", "args"}` objects from stdin. Args use the same field names as single-command batch items: `heading` to match an existing task, `title` for new tasks/events; `add-subtask` items take `parent`, `refile` items take `category`:
+- **Mutations** (both forms): `add-task`, `add-subtask`, `add-event`, `add-session-id`, `set-done`, `set-state`, `set-next`, `set-cancelled`, `set-priority`, `rename`, `move`, `set-schedule`, `set-deadline`, `set-tags`, `add-tags`, `set-body`, `append-body`, `set-property`, `refile`, `delete`.
+- **Reads**: `show` (both forms), plus `agenda-view`, `outline`, `categories` (mixed `batch` only — so one call can pair a mutation with a recomputed view).
+
+Task-addressing items take `heading` (substring) **or** `id` (org `:ID:`, matching each command's `--id` flag; `id` wins when both are given). New-item commands (`add-task`/`add-event`) take `title`; `add-subtask` takes `parent` + `title`.
+
+**Mixed commands** — the `batch` subcommand reads a JSON array of `{"command", "args"}` objects from stdin:
 
 ```bash
 echo '[
-  {"command":"set-done","args":{"heading":"task 1"}},
+  {"command":"set-done","args":{"id":"f95d…"}},
   {"command":"add-task","args":{"title":"New task","tags":"work","schedule":"2026-06-15"}},
-  {"command":"refile","args":{"heading":"task 3","category":"Work"}},
-  {"command":"add-subtask","args":{"parent":"task 3","title":"First step","state":"NEXT"}}
+  {"command":"set-priority","args":{"heading":"task 3","priority":"A"}},
+  {"command":"agenda-view","args":{}}
 ]' | org-gtd-cli --json batch
 ```
 
@@ -363,6 +368,7 @@ echo '[
 
 ```bash
 echo '["task 1","task 2"]' | org-gtd-cli --json --batch set-done
+echo '[{"heading":"task 1","state":"WAITING"},{"id":"f95d…","state":"DEFER"}]' | org-gtd-cli --json --batch set-state
 echo '[{"title":"Step 1","state":"NEXT"},{"title":"Step 2"}]' | org-gtd-cli --json --batch add-subtask "parent task"
 echo '["item 1","item 2"]' | org-gtd-cli --json --batch refile --category "Work"
 ```
