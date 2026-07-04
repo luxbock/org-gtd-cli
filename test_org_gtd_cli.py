@@ -5965,6 +5965,174 @@ class TestBatchExtendedCommands:
         assert "heading" in data["results"][0]["error"]
 
 
+def _outline_bodies(result):
+    """Flatten every node body in an `outline` batch result."""
+    bodies = []
+
+    def walk(nodes):
+        for n in nodes:
+            if n.get("body"):
+                bodies.append(n["body"])
+            walk(n.get("children", []))
+
+    walk(result["nodes"])
+    return bodies
+
+
+class TestBatchCoverageGaps:
+    """Close the five gaps between batch mode and the single-command interface:
+    outline `full`, `remove-tags`, refile `to`, add-subtask `parent_id`, and the
+    per-item `hint` field that single commands return on errors."""
+
+    # --- Gap 1: outline honors a per-item `full` flag ---
+
+    def test_batch_outline_full_emits_bodies(self, org_dir):
+        """`outline` with full=true carries each node's raw org body."""
+        items = [{"command": "outline", "args": {"file": "tasks.org", "full": True}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        bodies = _outline_bodies(data["results"][0])
+        assert bodies, "expected at least one node body with full=true"
+        assert any("research backup strategies" in b for b in bodies)
+
+    def test_batch_outline_without_full_omits_bodies(self, org_dir):
+        """`outline` without full leaves bodies null (the pre-existing default)."""
+        items = [{"command": "outline", "args": {"file": "tasks.org"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        assert _outline_bodies(data["results"][0]) == []
+
+    # --- Gap 2: remove-tags is a batch command ---
+
+    def test_batch_remove_tags_mixed(self, org_dir):
+        """`remove-tags` drops the named tag from a task in the mixed batch."""
+        items = [{"command": "remove-tags",
+                  "args": {"heading": "Set up automated backups for agent workspace",
+                           "tags": "@agent"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert "@agent" not in r["new_tags"]
+        tasks = (org_dir / "tasks.org").read_text()
+        assert "Set up automated backups for agent workspace :@agent:" not in tasks
+
+    def test_batch_remove_tags_by_id(self, org_dir):
+        """`remove-tags` addresses its task by :ID: like the other mutations."""
+        items = [{"command": "remove-tags",
+                  "args": {"id": "test-id-work", "tags": "work"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["heading"] == "Work"
+        assert "work" not in r["new_tags"]
+
+    def test_batch_remove_tags_homogeneous(self, org_dir):
+        """`--batch remove-tags` works and carries the legacy `tags` field."""
+        data, stderr, rc = run_batch(
+            "remove-tags",
+            [{"heading": "Set up automated backups for agent workspace",
+              "tags": "@agent"}],
+            org_dir=org_dir,
+        )
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert "@agent" not in r["new_tags"]
+        assert "tags" in r  # legacy comma-joined field, as set-tags/add-tags
+
+    def test_remove_tags_single_command(self, org_dir):
+        """`remove-tags` is also a first-class single command (mirrors add-tags)."""
+        data, stderr, rc = run_cli_json(
+            "remove-tags", "Set up automated backups for agent workspace",
+            "--tags", "@agent", org_dir=org_dir)
+        assert rc == 0
+        assert "@agent" not in data["new_tags"]
+
+    # --- Gap 3: refile accepts a --to heading target ---
+
+    def test_batch_refile_to_mixed(self, org_dir):
+        """A refile item may target an exact heading via `to`."""
+        items = [{"command": "refile",
+                  "args": {"heading": "Buy groceries", "to": "Shopping"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["target_heading"] == "Shopping"
+        assert "Buy groceries" not in (org_dir / "inbox.org").read_text()
+        assert_line_before(org_dir / "tasks.org", "* Shopping", "Buy groceries")
+
+    def test_batch_refile_to_homogeneous_shared(self, org_dir):
+        """`--batch refile --to` applies one exact target across all items."""
+        data, stderr, rc = run_batch(
+            "refile", [{"heading": "Buy groceries"}],
+            "--to", "Shopping", org_dir=org_dir)
+        assert rc == 0
+        assert data["results"][0]["success"] is True
+        assert data["results"][0]["target_heading"] == "Shopping"
+
+    def test_batch_refile_requires_category_or_to(self, org_dir):
+        """A mixed refile item with neither category nor to fails loudly."""
+        items = [{"command": "refile", "args": {"heading": "Buy groceries"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert data["results"][0]["success"] is False
+        assert "category" in data["results"][0]["error"]
+
+    # --- Gap 4: add-subtask can address the parent by :ID: ---
+
+    def test_batch_add_subtask_parent_id_mixed(self, org_dir):
+        """add-subtask resolves its parent by :ID: when given parent_id."""
+        items = [{"command": "add-subtask",
+                  "args": {"parent_id": "test-id-research",
+                           "title": "Subtask by parent id"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0
+        r = data["results"][0]
+        assert r["success"] is True
+        assert r["parent"] == "Research"
+        assert r["heading"] == "Subtask by parent id"
+        assert "Subtask by parent id" in (org_dir / "tasks.org").read_text()
+
+    def test_batch_add_subtask_parent_id_homogeneous(self, org_dir):
+        """`--batch add-subtask --id` shares one :ID: parent across items."""
+        data, stderr, rc = run_batch(
+            "add-subtask",
+            [{"title": "Shared-id sub A"}, {"title": "Shared-id sub B"}],
+            "--id", "test-id-research", org_dir=org_dir)
+        assert rc == 0
+        assert data["summary"]["succeeded"] == 2
+        assert all(r["parent"] == "Research" for r in data["results"])
+
+    def test_batch_add_subtask_requires_parent_or_id(self, org_dir):
+        """A mixed add-subtask with neither parent nor parent_id fails loudly."""
+        items = [{"command": "add-subtask", "args": {"title": "Orphan"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert data["results"][0]["success"] is False
+        assert "parent" in data["results"][0]["error"]
+
+    # --- Gap 5: per-item error results keep the CLI's `hint` field ---
+
+    def test_batch_error_carries_hint(self, org_dir):
+        """A failed item surfaces the single command's {error, hint} hint."""
+        items = [{"command": "refile",
+                  "args": {"heading": "Buy groceries", "to": "No Such Heading XYZ"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        r = data["results"][0]
+        assert r["success"] is False
+        assert "not found" in r["error"]
+        assert r["hint"] == "Use 'categories' to see available targets."
+
+    def test_batch_success_has_no_hint(self, org_dir):
+        """A successful item must not sprout a spurious hint field."""
+        items = [{"command": "set-done",
+                  "args": {"heading": "Write quarterly report"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert data["results"][0]["success"] is True
+        assert "hint" not in data["results"][0]
+
+
 class TestBatchLoudErrors:
     """--batch / batch input errors must be loud: stderr + exit 1, never
     generic help, never exit 0."""
