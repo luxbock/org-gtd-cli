@@ -3980,6 +3980,8 @@ In JSON mode, emits structured blocks via `org-gtd-cli/agenda-view-json'."
 ;; Batch mode
 ;; ══════════════════════════════════════════════════════════════════════════════
 
+(define-error 'org-gtd-cli/batch-item-error "Batch item failed" 'error)
+
 (defun org-gtd-cli/batch--parse-items (json-str)
   "Parse JSON-STR as the batch input array, or error out loudly.
 Returns a list of items.  Invalid JSON or a non-array input emits an
@@ -4028,6 +4030,16 @@ error result alists.  Returns (RESULT . SUCCESS-P)."
               ;; that batch-one delegates (the delegate shim intercepts
               ;; kill-emacs), but keep as a success fallback.
               (cons `((index . ,idx) (success . t)) t))))
+        ;; A delegated command that failed with a {error, hint} payload —
+        ;; carry the hint through so batch results keep the per-item hint
+        ;; single commands return (see `org-gtd-cli/batch--delegate').
+        (org-gtd-cli/batch-item-error
+         (let ((msg (nth 1 err))
+               (hint (nth 2 err)))
+           (cons `((index . ,idx) (success . :false)
+                   (error . ,msg)
+                   ,@(when hint `((hint . ,hint))))
+                 nil)))
         (error
          (cons `((index . ,idx) (success . :false)
                  (error . ,(error-message-string err)))
@@ -4100,11 +4112,26 @@ Outputs a JSON batch response with per-item results."
                         (let ((shared-arg
                                (pcase command
                                  ("add-subtask"
-                                  (org-gtd-cli/batch--required
-                                   item-args "parent" 'parent))
+                                  ;; parent heading OR parent_id (:ID:) — the
+                                  ;; id, when present, is read per item in
+                                  ;; `org-gtd-cli/batch-one'.
+                                  (let ((parent (org-gtd-cli/batch--field
+                                                 item-args 'parent))
+                                        (pid (org-gtd-cli/batch--field
+                                              item-args 'parent_id 'parent-id)))
+                                    (unless (or parent pid)
+                                      (error "Missing required field: parent (or parent_id)"))
+                                    parent))
                                  ("refile"
-                                  (org-gtd-cli/batch--required
-                                   item-args "category" 'category))
+                                  ;; --category (shared) OR a per-item --to
+                                  ;; target, read in `org-gtd-cli/batch-one'.
+                                  (let ((cat (org-gtd-cli/batch--field
+                                              item-args 'category))
+                                        (to (org-gtd-cli/batch--field
+                                             item-args 'to)))
+                                    (unless (or cat to)
+                                      (error "Missing required field: category (or to)"))
+                                    cat))
                                  (_ nil))))
                           (org-gtd-cli/batch-one command item-args
                                                  shared-arg idx)))))))
@@ -4167,17 +4194,25 @@ has an id, and irrelevant when addressing by substring)."
          (org-gtd-cli/forced-create-id (and ,mutation t)))
      ,@body))
 
-(defun org-gtd-cli/batch--json-error (s)
-  "If S parses as a JSON object with an `error' field, return that field.
+(defun org-gtd-cli/batch--json-error-obj (s)
+  "If S parses as a JSON object with an `error' field, return (ERROR . HINT).
 The real commands emit errors as {\"error\": ..., \"hint\": ...} JSON in
-json-mode; this recovers the plain text for batch per-item results."
+json-mode; this recovers the error text and its accompanying hint (nil when
+absent) for batch per-item results.  Returns nil when S is not such an object."
   (condition-case nil
       (let* ((obj (json-parse-string (string-trim s)
                                      :object-type 'alist
                                      :array-type 'array))
              (err (and (consp obj) (alist-get 'error obj))))
-        (and (stringp err) err))
+        (when (stringp err)
+          (let ((hint (alist-get 'hint obj)))
+            (cons err (and (stringp hint) hint)))))
     (error nil)))
+
+(defun org-gtd-cli/batch--json-error (s)
+  "If S parses as a JSON object with an `error' field, return that field.
+See `org-gtd-cli/batch--json-error-obj' for the hint-bearing variant."
+  (car (org-gtd-cli/batch--json-error-obj s)))
 
 (defun org-gtd-cli/batch--delegate (fn &rest args)
   "Call the real command implementation FN with ARGS, capturing its output.
@@ -4222,19 +4257,27 @@ failure (non-zero exit) signals `error' with the message FN reported."
           (setq payload (string-trim (with-current-buffer cap (buffer-string)))))
       (kill-buffer cap))
     (if (and exit-code (> exit-code 0))
-        ;; Failure.  The error text normally arrives via `message'
-        ;; ({"error": ...} JSON in json-mode); find-task's multiple-match
-        ;; listing goes to stdout instead, so fall back to the payload.
-        (let ((texts (delq nil
-                           (mapcar (lambda (m)
-                                     (or (org-gtd-cli/batch--json-error m) m))
-                                   (nreverse stderr-msgs)))))
+        ;; Failure.  In json-mode the error object ({"error": ..., "hint": ...})
+        ;; is written to stdout, so it lands in PAYLOAD; opaque diagnostics may
+        ;; also arrive via `message' (STDERR-MSGS).  Recover both the error text
+        ;; and its `hint' so the per-item result keeps the hint single commands
+        ;; return (signalled via `org-gtd-cli/batch-item-error').
+        (let* ((msgs (nreverse stderr-msgs))
+               (texts (delq nil
+                            (mapcar (lambda (m)
+                                      (or (org-gtd-cli/batch--json-error m) m))
+                                    msgs)))
+               (hint nil))
+          (dolist (m msgs)
+            (let ((obj (org-gtd-cli/batch--json-error-obj m)))
+              (when (and obj (cdr obj) (null hint))
+                (setq hint (cdr obj)))))
           (when (and (null texts) (not (string-empty-p payload)))
-            (setq texts (list (or (org-gtd-cli/batch--json-error payload)
-                                  payload))))
-          (error "%s" (if texts
-                          (mapconcat #'identity texts "; ")
-                        "Command failed")))
+            (let ((obj (org-gtd-cli/batch--json-error-obj payload)))
+              (setq texts (list (or (car obj) payload)))
+              (when (and obj (cdr obj)) (setq hint (cdr obj)))))
+          (let ((msg (if texts (mapconcat #'identity texts "; ") "Command failed")))
+            (signal 'org-gtd-cli/batch-item-error (list msg hint))))
       (unless (string-empty-p payload)
         (json-parse-string payload :object-type 'alist :array-type 'array)))))
 
@@ -4367,9 +4410,12 @@ index in the batch array."
 
     ("outline"
      (org-gtd-cli/batch--result
-      idx (org-gtd-cli/batch--delegate
-           #'org-gtd-cli/outline
-           (org-gtd-cli/batch--field item 'file))))
+      idx (let ((org-gtd-cli/full-mode (or org-gtd-cli/full-mode
+                                           (and (org-gtd-cli/batch--flag item 'full)
+                                                t))))
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/outline
+             (org-gtd-cli/batch--field item 'file)))))
 
     ("categories"
      (org-gtd-cli/batch--result
@@ -4390,20 +4436,28 @@ index in the batch array."
             (org-gtd-cli/batch--delegate
              #'org-gtd-cli/refile
              (org-gtd-cli/batch--addr item)
-             nil shared-arg))))
+             ;; --to target (exact heading) takes precedence over the shared
+             ;; --category, matching the single `refile' command.
+             (org-gtd-cli/batch--field item 'to)
+             shared-arg))))
 
     ("add-subtask"
+     ;; The parent is addressed by SHARED-ARG (heading substring) or, when the
+     ;; item carries `parent_id', by org :ID: — `add-subtask' resolves its
+     ;; parent through `find-task', which honors a bound `forced-id'.
      (org-gtd-cli/batch--result
-      idx (org-gtd-cli/batch--delegate
-           #'org-gtd-cli/add-subtask
-           shared-arg
-           (org-gtd-cli/batch--required item "title" 'title)
-           (org-gtd-cli/batch--field item 'body)
-           (org-gtd-cli/batch--field item 'tags)
-           (org-gtd-cli/batch--field item 'schedule)
-           (org-gtd-cli/batch--field item 'deadline)
-           (org-gtd-cli/batch--field item 'priority)
-           (org-gtd-cli/batch--field item 'state))))
+      idx (let ((org-gtd-cli/forced-id
+                 (org-gtd-cli/batch--field item 'parent_id 'parent-id)))
+            (org-gtd-cli/batch--delegate
+             #'org-gtd-cli/add-subtask
+             shared-arg
+             (org-gtd-cli/batch--required item "title" 'title)
+             (org-gtd-cli/batch--field item 'body)
+             (org-gtd-cli/batch--field item 'tags)
+             (org-gtd-cli/batch--field item 'schedule)
+             (org-gtd-cli/batch--field item 'deadline)
+             (org-gtd-cli/batch--field item 'priority)
+             (org-gtd-cli/batch--field item 'state)))))
 
     ("add-task"
      (org-gtd-cli/batch--result
@@ -4466,6 +4520,19 @@ index in the batch array."
                        (org-gtd-cli/batch--addr item)
                        (org-gtd-cli/batch--required item "tags" 'tags)))))
        ;; Legacy batch schema: `tags' as the merged comma-joined string.
+       (org-gtd-cli/batch--result
+        idx payload
+        `((tags . ,(mapconcat #'identity
+                              (append (alist-get 'new_tags payload) nil)
+                              ","))))))
+
+    ("remove-tags"
+     (let ((payload (org-gtd-cli/batch--with-addr item t
+                      (org-gtd-cli/batch--delegate
+                       #'org-gtd-cli/remove-tags
+                       (org-gtd-cli/batch--addr item)
+                       (org-gtd-cli/batch--required item "tags" 'tags)))))
+       ;; Legacy batch schema: `tags' as the resulting comma-joined string.
        (org-gtd-cli/batch--result
         idx payload
         `((tags . ,(mapconcat #'identity

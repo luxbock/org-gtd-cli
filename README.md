@@ -57,7 +57,7 @@ Common commands:
 | `add-task` / `add-subtask` / `add-event` | Capture into inbox / under a parent / calendar |
 | `set-state` / `set-next` / `set-done` / `set-cancelled` | Move a task through the state machine |
 | `set-schedule` / `set-deadline` / `set-priority` | Set timestamps and priority |
-| `set-tags` / `add-tags` / `refile` / `move` / `rename` | Organize and edit |
+| `set-tags` / `add-tags` / `remove-tags` / `refile` / `move` / `rename` | Organize and edit |
 | `projects` / `subtasks` / `categories` / `list-tags` | Inspect structure |
 | `outline` | Full nested outline of a file as JSON; nodes are typed (`is_category` / `is_event` / `is_project`) and calendar events carry their `timestamp`; `--full` adds each node's raw org `body` |
 | `render-file` | Render a view-only `.org` doc to body-only HTML (see below) |
@@ -125,8 +125,8 @@ Two forms, both reading a JSON array on stdin:
 - `org-gtd-cli --batch <command>` — homogeneous: every item runs the same
   command. Covers all mutations (`set-state`, `set-next`, `set-cancelled`,
   `set-priority`, `set-schedule`, `set-deadline`, `set-tags`, `add-tags`,
-  `rename`, `move`, `set-body`, `append-body`, `set-property`, `refile`,
-  `delete`, `add-task`, `add-subtask`, `add-event`, `add-session-id`,
+  `remove-tags`, `rename`, `move`, `set-body`, `append-body`, `set-property`,
+  `refile`, `delete`, `add-task`, `add-subtask`, `add-event`, `add-session-id`,
   `set-done`) plus `show`.
 - `org-gtd-cli batch` — heterogeneous: each item is `{"command": ..., "args":
   {...}}`. Supports every command above **and** the read commands
@@ -135,8 +135,15 @@ Two forms, both reading a JSON array on stdin:
 
 Each item addresses its task by `heading` (substring) or by `id` (org `:ID:`,
 matching each command's `--id` flag); `id` takes precedence. A failing item
-becomes a per-item error without aborting the batch. (`render-file` is *not*
-batch-covered — it takes a caller-supplied path, not a per-task item.)
+becomes a per-item error, carrying the same `hint` field single commands
+return, without aborting the batch. (`render-file` is *not* batch-covered — it
+takes a caller-supplied path, not a per-task item.)
+
+A few items take fields beyond `heading`/`id`, mirroring the single commands:
+`outline` accepts `full` (emit each node's raw org `body`); `refile` accepts a
+`to` exact-heading target as an alternative to `category`; and `add-subtask`
+accepts `parent_id` (address the parent by `:ID:`) as an alternative to
+`parent`.
 
 ```sh
 # A mutation plus a recomputed dashboard, atomically:

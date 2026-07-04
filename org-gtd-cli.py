@@ -735,6 +735,19 @@ def cmd_add_tags(args):
     return run_elisp(expr, json_mode=args.json)
 
 
+def cmd_remove_tags(args):
+    if not validate_target(args):
+        return 1
+    if args.tags is None:
+        print("Error: --tags is required", file=sys.stderr)
+        return 1
+    expr = (f'(org-gtd-cli/remove-tags {to_elisp(args.substr)} '
+            f'{to_elisp(args.tags)} '
+            f'{to_elisp(args.index)} {to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
+    return run_elisp(expr, json_mode=args.json)
+
+
 def cmd_set_property(args):
     if not args.key:
         print("Error: --key NAME is required", file=sys.stderr)
@@ -1138,6 +1151,17 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_add_tags)
 
+    p = sub.add_parser("remove-tags", help="Remove specific tags (no-op if absent)")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring (optional with --batch)")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
+    p.add_argument(
+        "--tags", help="Tags to remove (comma-separated, optional with --batch)"
+    )
+    p.add_argument("--index", help="Disambiguate with 1-based index")
+    p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
+    p.set_defaults(func=cmd_remove_tags)
+
     p = sub.add_parser("set-property",
                        help="Set or clear a generic org property on a task")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
@@ -1213,7 +1237,7 @@ stdin: JSON array of {"command": NAME, "args": {...}} objects.
 Mutations:  add-task, add-subtask, add-event, add-session-id, set-done,
             set-state, set-next, set-cancelled, set-priority, rename,
             move, set-schedule, set-deadline, set-tags, add-tags,
-            set-body, append-body, set-property, refile, delete
+            remove-tags, set-body, append-body, set-property, refile, delete
 Reads:      show, agenda-view, outline, categories
             (render-file is not batch-covered: a path-taking read with
             no per-task item — call it standalone)
@@ -1223,11 +1247,11 @@ take `heading` (substring) OR `id` (org :ID:, matching each command's
 --id flag; `id` wins when both are given):
   add-task        title (required), body, tags, schedule, deadline,
                   priority, file, category, state
-  add-subtask     parent (required), title (required), body, tags,
-                  schedule, deadline, priority, state
+  add-subtask     parent OR parent_id (required), title (required), body,
+                  tags, schedule, deadline, priority, state
   add-event       title (required), date (required), time, tag, file,
                   end_date
-  refile          heading|id (required), category (required)
+  refile          heading|id (required), category OR to (required)
   set-done        heading|id (required)
   set-state       heading|id (required), state (required)
   set-next        heading|id (required)
@@ -1242,11 +1266,12 @@ take `heading` (substring) OR `id` (org :ID:, matching each command's
   set-property    heading|id (required), key (required), value, clear
   set-tags        heading|id (required), tags
   add-tags        heading|id (required), tags (required)
+  remove-tags     heading|id (required), tags (required)
   add-session-id  heading|id (required), session_id (required)
   delete          heading|id (required)
   show            heading|id (required)
   agenda-view     key, date
-  outline         file
+  outline         file, full
   categories      file
 
 Output: JSON with one result per input item, in order, plus a summary
@@ -1305,7 +1330,7 @@ Example:
 # only through the heterogeneous `batch` subcommand.
 BATCH_COMMANDS = {
     "add-event", "add-session-id", "add-subtask", "add-task", "delete",
-    "refile", "set-done", "show", "set-tags", "add-tags",
+    "refile", "set-done", "show", "set-tags", "add-tags", "remove-tags",
     "set-state", "set-next", "set-cancelled", "set-priority", "rename",
     "move", "set-schedule", "set-deadline", "set-property",
     "set-body", "append-body",
@@ -1368,20 +1393,44 @@ def cmd_batch(args):
                 f"item {i}: expected a string or object, got {type(item).__name__}",
                 args.json)
 
+    def _has(it, *keys):
+        return isinstance(it, dict) and any(it.get(k) for k in keys)
+
     # Shared args for commands that need them
     shared_arg = None
     if command == "add-subtask":
         shared_arg = getattr(args, 'parent', None)
-        if not shared_arg:
+        parent_id = getattr(args, 'task_id', None)
+        # A shared --id addresses the parent by :ID: for every item; thread it
+        # in as a per-item fallback so it reaches org-gtd-cli/batch-one (an
+        # item's own parent_id still wins).
+        if parent_id:
+            for it in items:
+                if isinstance(it, dict) and not _has(it, "parent_id", "parent-id"):
+                    it["parent_id"] = parent_id
+        if not shared_arg and not parent_id and not all(
+                _has(it, "parent_id", "parent-id") for it in items):
             print(
-                "Error: --batch add-subtask requires parent SUBSTR positional",
+                "Error: --batch add-subtask requires a parent SUBSTR "
+                "positional, --id, or a parent_id on every item",
                 file=sys.stderr,
             )
             return 1
     elif command == "refile":
         shared_arg = getattr(args, 'category', None)
-        if not shared_arg:
-            print("Error: --batch refile requires --category", file=sys.stderr)
+        to_target = getattr(args, 'to', None)
+        # A shared --to target applies to every item (per-item `to` wins).
+        if to_target:
+            for it in items:
+                if isinstance(it, dict) and not _has(it, "to"):
+                    it["to"] = to_target
+        if not shared_arg and not to_target and not all(
+                _has(it, "to") for it in items):
+            print(
+                "Error: --batch refile requires --category, --to, or a "
+                "`to` target on every item",
+                file=sys.stderr,
+            )
             return 1
 
     expr = (f'(org-gtd-cli/batch {to_elisp(command)} '
