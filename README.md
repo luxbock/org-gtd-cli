@@ -180,6 +180,34 @@ nix shell --impure --expr \
   python3 -m pytest test_org_gtd_cli.py -q -n 4
 ```
 
+### Testing an uncommitted working copy
+
+When validating a change you have **not** yet committed, two things will
+silently test the *wrong* code if you let them:
+
+- **`nix flake check` builds committed sources only.** The flake sees
+  git-tracked, committed files, so it goes green while ignoring your working-tree
+  edits to `org-gtd-cli.py` / `org-gtd-cli.el` / `+gtd-core.el`. To exercise
+  uncommitted changes, run `pytest` directly (as above): the suite points
+  `ORG_GTD_CORE_FILE` / `ORG_GTD_ELISP_FILE` at the checkout's own `.el` files.
+
+- **Disable the daemon, or you test stale elisp.** With `ORG_GTD_CLI_DAEMON=1`
+  (it may already be exported in your shell), the CLI reuses a long-lived Emacs
+  daemon that loaded its elisp at *daemon startup* — it ignores the
+  `ORG_GTD_ELISP_FILE` the test harness sets, so your edits never load and a bug
+  can appear fixed (or fail to reproduce) for a reason unrelated to your code.
+  Run the suite with `ORG_GTD_CLI_DAEMON=0` in the same shell (the direct-run
+  command above does this); the same staleness applies to ad-hoc manual CLI
+  calls while iterating.
+
+For elisp changes, byte-compile in dependency order to catch warnings the plain
+source-load path misses (the `.elc` outputs are git-ignored):
+
+```sh
+emacs --batch -l org -f batch-byte-compile +gtd-core.el
+emacs --batch -l ./+gtd-core.elc -f batch-byte-compile org-gtd-cli.el
+```
+
 ## License
 
 MIT
