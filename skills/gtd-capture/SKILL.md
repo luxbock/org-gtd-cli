@@ -57,7 +57,7 @@ Before creating a new task, you SHOULD check whether it belongs to an existing p
 
 Rules:
 - Body text MUST NOT contain `* ` (asterisk-space) at line start — this corrupts the org file
-- Body text MUST use org syntax, not markdown
+- Body text MUST use org syntax, not markdown. In particular, command names and inline code use `=verbatim=`, longer single-line copy-paste commands use a literal-example line beginning `: `, and multi-line code uses `#+begin_src <lang>` / `#+end_src`.
 - `--category` MUST use slash-delimited paths from `categories` output
 - You MUST NOT use `--category inbox` — omit `--category` to file to inbox
 - For longer body text, `set-body` and `append-body` read from stdin when no TEXT argument is provided — pipe text in instead of passing it as a shell argument:

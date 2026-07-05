@@ -207,7 +207,7 @@ Note the task's effort tier (`properties.AGENT_EFFORT`, default `standard`). It'
 Follow the `AGENT:` instructions in the task body. If none exist, ask the user what kind of help is needed before proceeding.
 
 - For research output longer than a paragraph, create a note with `add-note --link-task`.
-- Body text MUST follow the constraints in the `gtd` skill (no `* ` at line start, keep it short, use org syntax).
+- Body text MUST follow the constraints in the `gtd` skill (no `* ` at line start, keep it short, use org syntax). In org content, command names and inline code use `=verbatim=`, longer single-line copy-paste commands use a literal-example line beginning `: `, and multi-line code uses `#+begin_src <lang>` / `#+end_src`.
 
 ### Step 4: Complete
 
