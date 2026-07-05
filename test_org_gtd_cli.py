@@ -157,6 +157,31 @@ def get_line(filepath, lineno):
     return None
 
 
+def logbook_for_heading(filepath, heading):
+    """Return the LOGBOOK drawer text for the first matching heading."""
+    lines = filepath.read_text().splitlines()
+    for i, line in enumerate(lines):
+        match = re.match(r"^(\*+) .*" + re.escape(heading) + r"(?:\s|$)", line)
+        if not match:
+            continue
+        level = len(match.group(1))
+        subtree = []
+        for child in lines[i + 1:]:
+            child_heading = re.match(r"^(\*+) ", child)
+            if child_heading and len(child_heading.group(1)) <= level:
+                break
+            subtree.append(child)
+        for j, child in enumerate(subtree):
+            if child.strip() == ":LOGBOOK:":
+                drawer = [child]
+                for drawer_line in subtree[j + 1:]:
+                    drawer.append(drawer_line)
+                    if drawer_line.strip() == ":END:":
+                        return "\n".join(drawer)
+        return ""
+    return ""
+
+
 # ===========================================================================
 # 1. org-timestamp
 # ===========================================================================
@@ -1022,6 +1047,41 @@ class TestSetState:
         assert rc == 0
         assert "NEXT -> WAITING (tasks.org)" in stdout
         assert "WAITING Book a rental car" in (org_dir / "tasks.org").read_text()
+
+    def test_waiting_reason_adds_logbook_state_note(self, org_dir):
+        reason = "Vendor has not confirmed the car class"
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "WAITING", "--reason", reason,
+            org_dir=org_dir)
+        assert rc == 0
+        drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
+        assert drawer.startswith(":LOGBOOK:")
+        assert 'State "WAITING"' in drawer
+        assert 'from "NEXT"' in drawer
+        assert re.search(r"\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2}\]", drawer)
+        assert "\\\\" in drawer
+        assert reason in drawer
+
+    def test_defer_reason_adds_logbook_state_note(self, org_dir):
+        reason = "Review again after travel dates are final"
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "DEFER", "--reason", reason,
+            org_dir=org_dir)
+        assert rc == 0
+        drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
+        assert drawer.startswith(":LOGBOOK:")
+        assert 'State "DEFER"' in drawer
+        assert 'from "NEXT"' in drawer
+        assert re.search(r"\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2}\]", drawer)
+        assert "\\\\" in drawer
+        assert reason in drawer
+
+    def test_without_reason_does_not_add_reason_note(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
+        assert "\\\\" not in drawer
 
     def test_waiting_adds_tag(self, org_dir):
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)

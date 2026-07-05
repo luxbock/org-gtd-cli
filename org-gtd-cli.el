@@ -2628,7 +2628,56 @@ freestanding category-level task or a top-level task — is rejected."
   (unless (gtd/is-subproject-p)
     (org-gtd-cli/reject-next heading)))
 
-(defun org-gtd-cli/set-state (substring new-state &optional index dry-run)
+(defun org-gtd-cli/state-note-entry (new-state old-state reason)
+  "Return an Org state-change note entry for NEW-STATE, OLD-STATE, and REASON."
+  (let ((note (replace-regexp-in-string
+               "\n" "\n  " (string-trim (or reason "")))))
+    (format "- State %-12S from %-12S %s \\\\\n  %s"
+            new-state (or old-state "") (format-time-string "[%Y-%m-%d %a %H:%M]")
+            note)))
+
+(defun org-gtd-cli/add-state-reason-note (new-state old-state reason)
+  "Add REASON to the current task's state-change LOGBOOK entry.
+If Org already logged the state change, convert that entry into a note.
+Otherwise create a standard state-change note in the LOGBOOK drawer."
+  (let* ((subtree-end (save-excursion (org-end-of-subtree t) (point)))
+         (meta-end (save-excursion (org-end-of-meta-data t) (point)))
+         (note (replace-regexp-in-string
+                "\n" "\n  " (string-trim (or reason ""))))
+         (entry (org-gtd-cli/state-note-entry new-state old-state reason))
+         (converted nil))
+    (save-excursion
+      (goto-char (line-beginning-position))
+      (when (re-search-forward "^[ \t]*:LOGBOOK:" meta-end t)
+        (let ((drawer-end (save-excursion
+                            (re-search-forward "^[ \t]*:END:" subtree-end t))))
+          (when drawer-end
+            (forward-line 1)
+            (when (re-search-forward
+                   (format "^[ \t]*- State[ \t]+%S[ \t]+from[ \t]+%S[ \t]+\\[[^]\n]+\\]"
+                           new-state (or old-state ""))
+                   drawer-end t)
+              (end-of-line)
+              (unless (save-excursion
+                        (beginning-of-line)
+                        (looking-at-p ".*\\\\\\\\[ \t]*$"))
+                (insert " \\\\"))
+              (insert "\n  " note)
+              (setq converted t))))))
+    (unless converted
+      (save-excursion
+        (goto-char (line-beginning-position))
+        (if (re-search-forward "^[ \t]*:LOGBOOK:" meta-end t)
+            (progn
+              (forward-line 1)
+              (insert entry "\n"))
+          (goto-char (line-beginning-position))
+          (org-end-of-meta-data)
+          (when (> (point) subtree-end)
+            (goto-char subtree-end))
+          (insert ":LOGBOOK:\n" entry "\n:END:\n"))))))
+
+(defun org-gtd-cli/set-state (substring new-state &optional index dry-run reason)
   "Change a task's TODO state."
   ;; Validate state before doing anything
   (let ((all-states (apply #'append
@@ -2678,6 +2727,8 @@ freestanding category-level task or a top-level task — is rejected."
                               heading old-state new-state rel-file)))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
+           (when (and reason (not (string-empty-p reason)))
+             (org-gtd-cli/add-state-reason-note new-state old-state reason))
            (org-gtd-cli/reorder-siblings-by-state)
            (save-buffer)
            (if org-gtd-cli/json-mode
