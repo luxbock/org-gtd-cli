@@ -4595,6 +4595,40 @@ class TestJsonMutations:
         assert "parent" in data
         assert isinstance(data["side_effects"], list)
 
+    def test_add_subtask_json_assigns_id_and_returns_task(self, org_dir):
+        title = "Fresh JSON subtask with ID"
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", title, "--state", "TODO",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+
+        disk_id = _id_under(org_dir / "tasks.org", title)
+        assert disk_id is not None
+
+        show, stderr, rc = run_cli_json("show", title, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert show["id"] == disk_id
+        assert show["properties"]["ID"] == disk_id
+
+        subtasks, stderr, rc = run_cli_json(
+            "subtasks", "Write quarterly report", "--full", org_dir=org_dir)
+        assert rc == 0, stderr
+        child = next(st for st in subtasks["subtasks"] if st["heading"] == title)
+        assert child["id"] == disk_id
+
+        assert "task" in data
+        task = data["task"]
+        for field in [
+            "heading", "state", "priority", "tags", "id", "file",
+            "scheduled", "deadline", "parent", "is_project", "properties",
+            "body", "sessions", "subtasks", "progress",
+        ]:
+            assert field in task, f"Missing task field: {field}"
+        assert task["heading"] == title
+        assert task["id"] == disk_id
+        assert task["properties"]["ID"] == disk_id
+
     def test_add_event_json(self, org_dir):
         data, _, rc = run_cli_json(
             "add-event", "Doctor visit", "--date", "2026-04-15",

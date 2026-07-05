@@ -2000,27 +2000,32 @@ any state (including DONE) and plain category/note headings."
          ;; Go to end of subtree
          (org-end-of-subtree t)
          (unless (bolp) (insert "\n"))
-         (insert (org-gtd-cli/build-entry
-                  child-level todo-state title
-                  priority tags-csv schedule deadline body)
-                 "\n")
+         (let ((child-pos (point)))
+           (insert (org-gtd-cli/build-entry
+                    child-level todo-state title
+                    priority tags-csv schedule deadline body)
+                   "\n")
+           (save-excursion
+             (goto-char child-pos)
+             (org-id-get-create))
          ;; Remove orphaned blank lines at insertion point
-         (while (and (not (eobp)) (looking-at-p "\n"))
-           (delete-char 1))
-         (save-buffer)
-         (if org-gtd-cli/json-mode
-             (org-gtd-cli/output
-              `((version . 1) (command . "add-subtask")
-                (heading . ,title) (state . ,todo-state)
-                (file . ,rel-file) (parent . ,parent-heading)
-                (side_effects . ,(if parent-was-next
-                                     (vector `((action . "state-change")
-                                               (heading . ,parent-heading)
-                                               (old_state . "NEXT")
-                                               (new_state . "TODO")))
-                                   []))))
-           (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
-                          title parent-heading rel-file)))))))
+           (while (and (not (eobp)) (looking-at-p "\n"))
+             (delete-char 1))
+           (save-buffer)
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/mutation-output
+                `((version . 1) (command . "add-subtask")
+                  (heading . ,title) (state . ,todo-state)
+                  (file . ,rel-file) (parent . ,parent-heading)
+                  (side_effects . ,(if parent-was-next
+                                       (vector `((action . "state-change")
+                                                 (heading . ,parent-heading)
+                                                 (old_state . "NEXT")
+                                                 (new_state . "TODO")))
+                                     [])))
+                (cons (current-buffer) child-pos))
+             (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
+                            title parent-heading rel-file))))))))
   (kill-emacs 0))
 
 ;; --- add-event ---
