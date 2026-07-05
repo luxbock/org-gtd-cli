@@ -582,9 +582,12 @@ def cmd_set_priority(args):
 
 
 def cmd_set_cancelled(args):
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
             f'"CANCELLED" {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -1065,7 +1068,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_set_priority)
 
     p = sub.add_parser("set-cancelled", help="Mark task CANCELLED")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_cancelled)

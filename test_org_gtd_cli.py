@@ -1039,6 +1039,33 @@ class TestSetState:
 
 
 # ===========================================================================
+# 14b. set-cancelled
+# ===========================================================================
+
+class TestSetCancelled:
+    def test_cancel_by_id(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "--id", "test-id-capture-fix", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "*** CANCELLED Fix org-capture workspace issue" in (
+            org_dir / "tasks.org").read_text()
+
+    def test_cancel_by_substring(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "Book a rental car", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "NEXT -> CANCELLED (tasks.org)" in stdout
+        assert "**** CANCELLED Book a rental car" in (
+            org_dir / "tasks.org").read_text()
+
+    def test_ambiguous_substring_exits_nonzero_with_hint(self, org_dir):
+        stdout, stderr, rc = run_cli("set-cancelled", "Buy", org_dir=org_dir)
+        assert rc != 0
+        assert "Multiple matches" in stderr
+        assert "Use --index N to select one." in stderr
+
+
+# ===========================================================================
 # 15. set-priority
 # ===========================================================================
 
