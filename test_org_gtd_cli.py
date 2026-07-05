@@ -199,10 +199,42 @@ class TestAddTask:
         assert rc == 0
         assert "SCHEDULED: <2026-03-20 Fri>" in (org_dir / "inbox.org").read_text()
 
+    def test_with_timed_schedule(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Dentist", "--schedule", "2026-07-10",
+            "--time", "14:00", org_dir=org_dir)
+        assert rc == 0
+        assert "SCHEDULED: <2026-07-10 Fri 14:00>" in (org_dir / "inbox.org").read_text()
+
     def test_with_deadline(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Deadline task", "--deadline", "2026-03-25", org_dir=org_dir)
         assert rc == 0
         assert "DEADLINE: <2026-03-25 Wed>" in (org_dir / "inbox.org").read_text()
+
+    def test_with_timed_deadline(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Taxes", "--deadline", "2026-07-10",
+            "--time", "09:00", org_dir=org_dir)
+        assert rc == 0
+        assert "DEADLINE: <2026-07-10 Fri 09:00>" in (org_dir / "inbox.org").read_text()
+
+    def test_time_requires_schedule_or_deadline(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "X", "--time", "14:00", org_dir=org_dir)
+        assert rc != 0
+        assert "--time requires --schedule or --deadline" in stderr
+        assert "TODO X" not in (org_dir / "inbox.org").read_text()
+
+    def test_time_with_schedule_and_deadline_is_ambiguous(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "X", "--schedule", "2026-07-10",
+            "--deadline", "2026-07-11", "--time", "14:00",
+            org_dir=org_dir)
+        assert rc != 0
+        assert "ambiguous" in stderr
+        assert "set-schedule" in stderr
+        assert "set-deadline" in stderr
+        assert "TODO X" not in (org_dir / "inbox.org").read_text()
 
     def test_with_body(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Body task", "--body", "This is the body text", org_dir=org_dir)

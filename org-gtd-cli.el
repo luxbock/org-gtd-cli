@@ -733,7 +733,8 @@ If ACTIVE is non-nil, use angle brackets; otherwise square brackets."
     (string-to-number index-str)))
 
 (defun org-gtd-cli/build-entry (level state title &optional priority tags-csv
-                                       schedule deadline body)
+                                       schedule deadline body
+                                       schedule-time deadline-time)
   "Build an org entry string.
 LEVEL is the heading depth (number of stars).
 Returns the entry text (without trailing newline at very end)."
@@ -750,10 +751,12 @@ Returns the entry text (without trailing newline at very end)."
       (push heading parts))
     ;; SCHEDULED/DEADLINE
     (when (and schedule (not (string-empty-p schedule)))
-      (push (concat "SCHEDULED: " (org-gtd-cli/make-timestamp schedule nil t))
+      (push (concat "SCHEDULED: "
+                    (org-gtd-cli/make-timestamp schedule schedule-time t))
             parts))
     (when (and deadline (not (string-empty-p deadline)))
-      (push (concat "DEADLINE: " (org-gtd-cli/make-timestamp deadline nil t))
+      (push (concat "DEADLINE: "
+                    (org-gtd-cli/make-timestamp deadline deadline-time t))
             parts))
     ;; Body
     (when (and body (not (string-empty-p body)))
@@ -1829,7 +1832,7 @@ any state (including DONE) and plain category/note headings."
 ;; --- add-task ---
 
 (defun org-gtd-cli/add-task (title &optional body tags-csv schedule deadline
-                                    priority file category state)
+                                    priority file category state time-str)
   "Add a TODO task."
   (let* ((target-file
           (cond
@@ -1858,9 +1861,19 @@ any state (including DONE) and plain category/note headings."
          (deadline (when (and deadline (not (string-empty-p deadline))
                               (not (equal deadline "nil")))
                      deadline))
+         (time-str (when (and time-str (not (string-empty-p time-str))
+                              (not (equal time-str "nil")))
+                     time-str))
          (priority (when (and priority (not (string-empty-p priority))
                               (not (equal priority "nil")))
                      priority)))
+    (when (and time-str (not schedule) (not deadline))
+      (org-gtd-cli/error "Error: --time requires --schedule or --deadline")
+      (kill-emacs 1))
+    (when (and time-str schedule deadline)
+      (org-gtd-cli/error
+       "Error: --time with both --schedule and --deadline is ambiguous; set the second timestamp's time via set-schedule or set-deadline.")
+      (kill-emacs 1))
     (when body (setq body (org-gtd-cli/fill-text body)))
     (org-gtd-cli/validate-body-text body)
     ;; `add-task' always files a freestanding task (inbox, a file, or under a
@@ -1928,7 +1941,9 @@ any state (including DONE) and plain category/note headings."
                    (unless (bolp) (insert "\n"))
                    (insert (org-gtd-cli/build-entry
                             target-level todo-state title
-                            priority tags-csv schedule deadline body)
+                            priority tags-csv schedule deadline body
+                            (when schedule time-str)
+                            (when deadline time-str))
                            "\n")
                    ;; Remove orphaned blank lines at insertion point
                    (while (and (not (eobp)) (looking-at-p "\n"))
@@ -1938,7 +1953,9 @@ any state (including DONE) and plain category/note headings."
            (unless (bolp) (insert "\n"))
            (insert "\n" (org-gtd-cli/build-entry
                          1 todo-state title
-                         priority tags-csv schedule deadline body))
+                         priority tags-csv schedule deadline body
+                         (when schedule time-str)
+                         (when deadline time-str)))
            (insert "\n")))
         (save-buffer))
       (if org-gtd-cli/json-mode
@@ -4486,7 +4503,8 @@ index in the batch array."
            (org-gtd-cli/batch--field item 'priority)
            (org-gtd-cli/batch--field item 'file)
            (org-gtd-cli/batch--field item 'category)
-           (org-gtd-cli/batch--field item 'state))))
+           (org-gtd-cli/batch--field item 'state)
+           (org-gtd-cli/batch--field item 'time))))
 
     ("add-event"
      (org-gtd-cli/batch--result
