@@ -3113,6 +3113,48 @@ class TestFillText:
 # ===========================================================================
 
 class TestDelete:
+    def test_refuses_childless_plain_heading_by_id(self, org_dir):
+        tasks = org_dir / "tasks.org"
+        with tasks.open("a") as f:
+            f.write(
+                "\n* Reference\n"
+                ":PROPERTIES:\n"
+                ":ID:       plain-ref-delete-test\n"
+                ":END:\n"
+                "Some notes. No TODO keyword, no children.\n"
+            )
+
+        stdout, stderr, rc = run_cli(
+            "delete", "--id", "plain-ref-delete-test", org_dir=org_dir)
+
+        assert rc == 1
+        assert "not a task" in stderr
+        assert "plain/category heading" in stderr
+        text = tasks.read_text()
+        assert "* Reference" in text
+        assert ":ID:       plain-ref-delete-test" in text
+
+    def test_refuses_plain_heading_by_heading(self, org_dir):
+        tasks = org_dir / "tasks.org"
+        with tasks.open("a") as f:
+            f.write("\n* Reference Library\nNotes only.\n")
+
+        stdout, stderr, rc = run_cli(
+            "delete", "Reference Library", org_dir=org_dir)
+
+        assert rc == 1
+        assert "category heading, not a task" in stderr
+        assert "* Reference Library" in tasks.read_text()
+
+    def test_normal_task_delete_by_id(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "delete", "--id", "test-id-capture-fix", org_dir=org_dir)
+
+        assert rc == 0, stderr
+        assert 'Deleted: "Fix org-capture workspace issue"' in stdout
+        assert "Fix org-capture workspace issue" not in (
+            org_dir / "tasks.org").read_text()
+
     def test_happy_path(self, org_dir):
         stdout, stderr, rc = run_cli("delete", "Buy a small UPS for the server", org_dir=org_dir)
         assert rc == 0
@@ -4591,7 +4633,9 @@ class TestJsonMutations:
         data, _, rc = run_cli_json("delete", "Delete me test", org_dir=org_dir)
         assert rc == 0
         assert data["command"] == "delete"
+        assert data["id"]
         assert data["heading"] == "Delete me test"
+        assert data["side_effects"] == []
 
     def test_delete_dry_run_json(self, org_dir):
         data, _, rc = run_cli_json(
@@ -7099,4 +7143,3 @@ class TestRenderFile:
         data, _, rc = run_cli_json(
             "render-file", "agent-notes/does-not-exist.org", org_dir=org_dir)
         self._assert_rejected(data, rc)
-

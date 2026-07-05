@@ -3814,11 +3814,19 @@ Refuses to delete projects (tasks with subtasks)."
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((task-heading (org-get-heading t t t t))
+              (task-state (org-get-todo-state))
+              (task-id (org-entry-get nil "ID"))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
               (level (org-current-level))
               (child-level (1+ level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point)))
               (has-children nil))
+         (unless task-state
+           (org-gtd-cli/error
+            (concat "Cannot delete: \"%s\" is not a task (no TODO keyword) "
+                    "- refusing to delete a plain/category heading (%s)")
+            task-heading rel-file)
+           (kill-emacs 1))
          ;; Check for child headings (project detection)
          (save-excursion
            (forward-line 1)
@@ -3843,7 +3851,9 @@ Refuses to delete projects (tasks with subtasks)."
            (if org-gtd-cli/json-mode
                (org-gtd-cli/output
                 `((version . 1) (command . "delete")
-                  (heading . ,task-heading) (file . ,rel-file)))
+                  (id . ,task-id)
+                  (heading . ,task-heading) (file . ,rel-file)
+                  (side_effects . [])))
              (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file)))))))
     (kill-emacs 0)))
 
