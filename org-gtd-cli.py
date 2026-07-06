@@ -7,6 +7,7 @@ This script parses arguments and calls Emacs in batch mode.
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -21,6 +22,41 @@ ELISP_FILE = os.environ.get("ORG_GTD_ELISP_FILE", "")
 ORG_DIR = os.environ.get("ORG_DIRECTORY", os.path.expanduser("~/org/"))
 EMACS_BIN = "emacs"
 EMACSCLIENT_BIN = "emacsclient"
+
+
+def _canonical_path(path: str) -> str:
+    """Return a stable absolute path for daemon identity inputs."""
+    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _file_identity(path: str) -> dict[str, object]:
+    """Return path and content metadata that should select a fresh daemon."""
+    real_path = _canonical_path(path)
+    identity: dict[str, object] = {"path": real_path}
+    try:
+        st = os.stat(real_path)
+        identity.update({
+            "exists": True,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+        })
+        with open(real_path, "rb") as f:
+            identity["sha256"] = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        identity["exists"] = False
+    return identity
+
+
+def _daemon_identity_hash() -> str:
+    """Hash daemon state inputs into a short, filesystem-safe directory name."""
+    identity = {
+        "org_directory": _canonical_path(ORG_DIR),
+        "core_file": _file_identity(CORE_FILE),
+        "elisp_file": _file_identity(ELISP_FILE),
+    }
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
 
 # Daemon mode: opt-in via ORG_GTD_CLI_DAEMON=1
 DAEMON_ENABLED = os.environ.get("ORG_GTD_CLI_DAEMON") == "1"
@@ -37,8 +73,10 @@ _DAEMON_BASE = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR") or _TMPDIR,
     f"org-gtd-cli-{os.getuid()}",
 )
-# Socket dir needs 700 permissions (Emacs server security requirement)
-_SOCKET_DIR = _DAEMON_BASE
+_DAEMON_IDENTITY = _daemon_identity_hash()
+# Socket dir needs 700 permissions (Emacs server security requirement). Scope
+# it by daemon identity so org dirs and loaded code versions cannot alias.
+_SOCKET_DIR = os.path.join(_DAEMON_BASE, _DAEMON_IDENTITY)
 SOCKET_PATH = os.path.join(_SOCKET_DIR, "server")
 
 
@@ -186,21 +224,31 @@ def _socket_is_ours() -> bool:
         return False
 
 
+def _ensure_owned_private_dir(path: str) -> bool:
+    """Create PATH as 0700, or report a foreign-owned existing directory."""
+    try:
+        st = os.stat(path)
+        if st.st_uid != os.getuid():
+            print(f"Error: daemon dir {path} is owned by another user; "
+                  "refusing to reuse a foreign daemon", file=sys.stderr)
+            return False
+        os.chmod(path, 0o700)
+        return True
+    except FileNotFoundError:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        os.chmod(path, 0o700)
+        return True
+
+
 def _ensure_daemon() -> None:
     """Start the Emacs daemon if it's not already running."""
     if _socket_is_ours():
         return
-    # If our per-uid dir somehow exists but is owned by another user, refuse
-    # rather than silently fall through to a daemon we cannot drive.
-    try:
-        if os.stat(_SOCKET_DIR).st_uid != os.getuid():
-            print(f"Error: daemon dir {_SOCKET_DIR} is owned by another user; "
-                  "refusing to reuse a foreign daemon", file=sys.stderr)
-            return
-    except FileNotFoundError:
-        pass
-    os.makedirs(_SOCKET_DIR, mode=0o700, exist_ok=True)
-    user_emacs_dir = os.path.join(_DAEMON_BASE, "emacs.d")
+    if not _ensure_owned_private_dir(_DAEMON_BASE):
+        return
+    if not _ensure_owned_private_dir(_SOCKET_DIR):
+        return
+    user_emacs_dir = os.path.join(_SOCKET_DIR, "emacs.d")
     os.makedirs(user_emacs_dir, exist_ok=True)
     cmd = [
         EMACS_BIN, "--daemon", "-q",

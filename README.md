@@ -191,14 +191,14 @@ silently test the *wrong* code if you let them:
   uncommitted changes, run `pytest` directly (as above): the suite points
   `ORG_GTD_CORE_FILE` / `ORG_GTD_ELISP_FILE` at the checkout's own `.el` files.
 
-- **Disable the daemon, or you test stale elisp.** With `ORG_GTD_CLI_DAEMON=1`
-  (it may already be exported in your shell), the CLI reuses a long-lived Emacs
-  daemon that loaded its elisp at *daemon startup* — it ignores the
-  `ORG_GTD_ELISP_FILE` the test harness sets, so your edits never load and a bug
-  can appear fixed (or fail to reproduce) for a reason unrelated to your code.
-  Run the suite with `ORG_GTD_CLI_DAEMON=0` in the same shell (the direct-run
-  command above does this); the same staleness applies to ad-hoc manual CLI
-  calls while iterating.
+- **Prefer `ORG_GTD_CLI_DAEMON=0` for direct test runs.** Daemon mode now scopes
+  sockets by resolved `ORG_DIRECTORY` and loaded core/elisp file identity, so
+  editing or pointing at different `.el` files selects a fresh daemon instead of
+  silently reusing stale elisp. Disabling the daemon is still the simplest test
+  posture: it avoids long-lived background Emacs state while you iterate and
+  matches the direct-run command above. If you intentionally test daemon mode,
+  ensure the relevant identity inputs (org directory plus core/elisp paths and
+  contents) are the ones you mean to exercise.
 
 For elisp changes, byte-compile in dependency order to catch warnings the plain
 source-load path misses (the `.elc` outputs are git-ignored):
