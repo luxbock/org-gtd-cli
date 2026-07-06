@@ -50,7 +50,7 @@ The GTD skill family (look up these SKILLs via your harness's skill loader):
 
 The CLI itself is `org-gtd-cli` — a Python wrapper around batch/daemon Emacs that operates on `~/org/*.org`. Full reference: `notes/reference/org-gtd-cli.md` in this repo.
 
-For org-mode markup itself — link syntax, timestamps, drawers, properties, etc. — the **source of truth is the official org manual**: <https://orgmode.org/manual/>. If a SKILL claim about org syntax conflicts with the manual, the manual wins.
+For org-mode markup itself — link syntax, timestamps, drawers, properties, etc. — the **source of truth is the official org manual**. If a SKILL claim about org syntax conflicts with the manual, the manual wins.
 
 ## Step 1 — locate the session
 
