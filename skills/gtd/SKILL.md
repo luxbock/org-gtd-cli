@@ -23,15 +23,21 @@ Body text MUST use org-mode syntax, not markdown. See the syntax table below.
 
 Task bodies and notes MUST use org-mode syntax, not markdown.
 
+Formatting conventions for code and commands in org content:
+- Command names and inline code MUST use org verbatim markup: `=org-gtd-cli=`, `=--json=`, `=append-body=`.
+- Any single-line copy-paste command longer than a few words SHOULD use org literal-example syntax: put it on its own line beginning with `: `.
+- Multi-line code, or code where syntax highlighting helps, MUST use an org source block: `#+begin_src <lang>` ... `#+end_src`.
+
 | What         | Markdown (wrong)       | Org (correct)                          |
 |--------------|------------------------|----------------------------------------|
 | File link    | `[text](path)`         | `[[file:path/to/file.org][text]]`      |
 | URL link     | `[text](https://...)`  | `[[https://...][text]]`                |
-| Inline code  | `` `code` ``           | `=code=` or `~verbatim~`               |
+| Inline code  | `` `code` ``           | `=code=`                               |
 | Bold         | `**bold**`             | `*bold*`                               |
 | Italic       | `*italic*`             | `/italic/`                             |
+| Copy command | `` `cmd --flag value` `` | `: cmd --flag value`                 |
 | Code block   | ` ``` `                | `#+begin_src lang ... #+end_src`       |
-| Example      | ` ``` `                | `#+begin_example ... #+end_example`    |
+| Example      | ` ``` `                | `: single-line literal example`        |
 
 ## Resolving org links in task bodies
 

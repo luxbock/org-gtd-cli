@@ -59,7 +59,7 @@ org-gtd-cli --json append-body "task heading" "Found 3 options: ..."
 org-gtd-cli --json add-note --title "Research Title" --link-task "task heading" --sections "Options,Recommendation"
 ```
 
-Body text constraints apply: keep it short (a sentence or two). If the enrichment needs structure or more than a short paragraph, use `add-note --link-task` instead.
+Body text constraints apply: keep it short (a sentence or two) and use org syntax, not markdown. Command names and inline code use `=verbatim=`, longer single-line copy-paste commands use a literal-example line beginning `: `, and multi-line code uses `#+begin_src <lang>` / `#+end_src`. If the enrichment needs structure or more than a short paragraph, use `add-note --link-task` instead.
 
 You MAY also improve the task title to be more specific and actionable:
 
