@@ -157,6 +157,31 @@ def get_line(filepath, lineno):
     return None
 
 
+def logbook_for_heading(filepath, heading):
+    """Return the LOGBOOK drawer text for the first matching heading."""
+    lines = filepath.read_text().splitlines()
+    for i, line in enumerate(lines):
+        match = re.match(r"^(\*+) .*" + re.escape(heading) + r"(?:\s|$)", line)
+        if not match:
+            continue
+        level = len(match.group(1))
+        subtree = []
+        for child in lines[i + 1:]:
+            child_heading = re.match(r"^(\*+) ", child)
+            if child_heading and len(child_heading.group(1)) <= level:
+                break
+            subtree.append(child)
+        for j, child in enumerate(subtree):
+            if child.strip() == ":LOGBOOK:":
+                drawer = [child]
+                for drawer_line in subtree[j + 1:]:
+                    drawer.append(drawer_line)
+                    if drawer_line.strip() == ":END:":
+                        return "\n".join(drawer)
+        return ""
+    return ""
+
+
 # ===========================================================================
 # 1. org-timestamp
 # ===========================================================================
@@ -199,10 +224,42 @@ class TestAddTask:
         assert rc == 0
         assert "SCHEDULED: <2026-03-20 Fri>" in (org_dir / "inbox.org").read_text()
 
+    def test_with_timed_schedule(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Dentist", "--schedule", "2026-07-10",
+            "--time", "14:00", org_dir=org_dir)
+        assert rc == 0
+        assert "SCHEDULED: <2026-07-10 Fri 14:00>" in (org_dir / "inbox.org").read_text()
+
     def test_with_deadline(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Deadline task", "--deadline", "2026-03-25", org_dir=org_dir)
         assert rc == 0
         assert "DEADLINE: <2026-03-25 Wed>" in (org_dir / "inbox.org").read_text()
+
+    def test_with_timed_deadline(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "Taxes", "--deadline", "2026-07-10",
+            "--time", "09:00", org_dir=org_dir)
+        assert rc == 0
+        assert "DEADLINE: <2026-07-10 Fri 09:00>" in (org_dir / "inbox.org").read_text()
+
+    def test_time_requires_schedule_or_deadline(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "X", "--time", "14:00", org_dir=org_dir)
+        assert rc != 0
+        assert "--time requires --schedule or --deadline" in stderr
+        assert "TODO X" not in (org_dir / "inbox.org").read_text()
+
+    def test_time_with_schedule_and_deadline_is_ambiguous(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "add-task", "X", "--schedule", "2026-07-10",
+            "--deadline", "2026-07-11", "--time", "14:00",
+            org_dir=org_dir)
+        assert rc != 0
+        assert "ambiguous" in stderr
+        assert "set-schedule" in stderr
+        assert "set-deadline" in stderr
+        assert "TODO X" not in (org_dir / "inbox.org").read_text()
 
     def test_with_body(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Body task", "--body", "This is the body text", org_dir=org_dir)
@@ -991,6 +1048,41 @@ class TestSetState:
         assert "NEXT -> WAITING (tasks.org)" in stdout
         assert "WAITING Book a rental car" in (org_dir / "tasks.org").read_text()
 
+    def test_waiting_reason_adds_logbook_state_note(self, org_dir):
+        reason = "Vendor has not confirmed the car class"
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "WAITING", "--reason", reason,
+            org_dir=org_dir)
+        assert rc == 0
+        drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
+        assert drawer.startswith(":LOGBOOK:")
+        assert 'State "WAITING"' in drawer
+        assert 'from "NEXT"' in drawer
+        assert re.search(r"\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2}\]", drawer)
+        assert "\\\\" in drawer
+        assert reason in drawer
+
+    def test_defer_reason_adds_logbook_state_note(self, org_dir):
+        reason = "Review again after travel dates are final"
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "DEFER", "--reason", reason,
+            org_dir=org_dir)
+        assert rc == 0
+        drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
+        assert drawer.startswith(":LOGBOOK:")
+        assert 'State "DEFER"' in drawer
+        assert 'from "NEXT"' in drawer
+        assert re.search(r"\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2}\]", drawer)
+        assert "\\\\" in drawer
+        assert reason in drawer
+
+    def test_without_reason_does_not_add_reason_note(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
+        assert "\\\\" not in drawer
+
     def test_waiting_adds_tag(self, org_dir):
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         assert rc == 0
@@ -1036,6 +1128,33 @@ class TestSetState:
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "TODO", org_dir=org_dir)
         assert rc == 0
         assert "TODO Book a rental car" in (org_dir / "tasks.org").read_text()
+
+
+# ===========================================================================
+# 14b. set-cancelled
+# ===========================================================================
+
+class TestSetCancelled:
+    def test_cancel_by_id(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "--id", "test-id-capture-fix", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "*** CANCELLED Fix org-capture workspace issue" in (
+            org_dir / "tasks.org").read_text()
+
+    def test_cancel_by_substring(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "Book a rental car", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "NEXT -> CANCELLED (tasks.org)" in stdout
+        assert "**** CANCELLED Book a rental car" in (
+            org_dir / "tasks.org").read_text()
+
+    def test_ambiguous_substring_exits_nonzero_with_hint(self, org_dir):
+        stdout, stderr, rc = run_cli("set-cancelled", "Buy", org_dir=org_dir)
+        assert rc != 0
+        assert "Multiple matches" in stderr
+        assert "Use --index N to select one." in stderr
 
 
 # ===========================================================================
@@ -3086,6 +3205,48 @@ class TestFillText:
 # ===========================================================================
 
 class TestDelete:
+    def test_refuses_childless_plain_heading_by_id(self, org_dir):
+        tasks = org_dir / "tasks.org"
+        with tasks.open("a") as f:
+            f.write(
+                "\n* Reference\n"
+                ":PROPERTIES:\n"
+                ":ID:       plain-ref-delete-test\n"
+                ":END:\n"
+                "Some notes. No TODO keyword, no children.\n"
+            )
+
+        stdout, stderr, rc = run_cli(
+            "delete", "--id", "plain-ref-delete-test", org_dir=org_dir)
+
+        assert rc == 1
+        assert "not a task" in stderr
+        assert "plain/category heading" in stderr
+        text = tasks.read_text()
+        assert "* Reference" in text
+        assert ":ID:       plain-ref-delete-test" in text
+
+    def test_refuses_plain_heading_by_heading(self, org_dir):
+        tasks = org_dir / "tasks.org"
+        with tasks.open("a") as f:
+            f.write("\n* Reference Library\nNotes only.\n")
+
+        stdout, stderr, rc = run_cli(
+            "delete", "Reference Library", org_dir=org_dir)
+
+        assert rc == 1
+        assert "category heading, not a task" in stderr
+        assert "* Reference Library" in tasks.read_text()
+
+    def test_normal_task_delete_by_id(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "delete", "--id", "test-id-capture-fix", org_dir=org_dir)
+
+        assert rc == 0, stderr
+        assert 'Deleted: "Fix org-capture workspace issue"' in stdout
+        assert "Fix org-capture workspace issue" not in (
+            org_dir / "tasks.org").read_text()
+
     def test_happy_path(self, org_dir):
         stdout, stderr, rc = run_cli("delete", "Buy a small UPS for the server", org_dir=org_dir)
         assert rc == 0
@@ -4526,6 +4687,40 @@ class TestJsonMutations:
         assert "parent" in data
         assert isinstance(data["side_effects"], list)
 
+    def test_add_subtask_json_assigns_id_and_returns_task(self, org_dir):
+        title = "Fresh JSON subtask with ID"
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", title, "--state", "TODO",
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+
+        disk_id = _id_under(org_dir / "tasks.org", title)
+        assert disk_id is not None
+
+        show, stderr, rc = run_cli_json("show", title, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert show["id"] == disk_id
+        assert show["properties"]["ID"] == disk_id
+
+        subtasks, stderr, rc = run_cli_json(
+            "subtasks", "Write quarterly report", "--full", org_dir=org_dir)
+        assert rc == 0, stderr
+        child = next(st for st in subtasks["subtasks"] if st["heading"] == title)
+        assert child["id"] == disk_id
+
+        assert "task" in data
+        task = data["task"]
+        for field in [
+            "heading", "state", "priority", "tags", "id", "file",
+            "scheduled", "deadline", "parent", "is_project", "properties",
+            "body", "sessions", "subtasks", "progress",
+        ]:
+            assert field in task, f"Missing task field: {field}"
+        assert task["heading"] == title
+        assert task["id"] == disk_id
+        assert task["properties"]["ID"] == disk_id
+
     def test_add_event_json(self, org_dir):
         data, _, rc = run_cli_json(
             "add-event", "Doctor visit", "--date", "2026-04-15",
@@ -4564,7 +4759,9 @@ class TestJsonMutations:
         data, _, rc = run_cli_json("delete", "Delete me test", org_dir=org_dir)
         assert rc == 0
         assert data["command"] == "delete"
+        assert data["id"]
         assert data["heading"] == "Delete me test"
+        assert data["side_effects"] == []
 
     def test_delete_dry_run_json(self, org_dir):
         data, _, rc = run_cli_json(
@@ -7072,4 +7269,3 @@ class TestRenderFile:
         data, _, rc = run_cli_json(
             "render-file", "agent-notes/does-not-exist.org", org_dir=org_dir)
         self._assert_rejected(data, rc)
-

@@ -396,6 +396,14 @@ def cmd_add_task(args):
     if not title:
         print("Error: TITLE is required", file=sys.stderr)
         return 1
+    if args.time and not (args.schedule or args.deadline):
+        print("Error: --time requires --schedule or --deadline", file=sys.stderr)
+        return 1
+    if args.time and args.schedule and args.deadline:
+        print("Error: --time with both --schedule and --deadline is ambiguous; "
+              "set the second timestamp's time via set-schedule or set-deadline.",
+              file=sys.stderr)
+        return 1
     raw_body = resolve_body_text(args.body, args.body_file)
     if args.body == "-" and raw_body is None:
         return 1  # resolve_body_text already printed error
@@ -404,7 +412,7 @@ def cmd_add_task(args):
             f'{to_elisp(args.tags)} {to_elisp(args.schedule)} '
             f'{to_elisp(args.deadline)} {to_elisp(args.priority)} '
             f'{to_elisp(args.file)} {to_elisp(args.category)} '
-            f'{to_elisp(args.state)})')
+            f'{to_elisp(args.state)} {to_elisp(args.time)})')
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -558,7 +566,8 @@ def cmd_set_state(args):
         return 1
     expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
             f'{to_elisp(args.state)} {to_elisp(args.index)} '
-            f'{to_elisp("t" if args.dry_run else None)})')
+            f'{to_elisp("t" if args.dry_run else None)} '
+            f'{to_elisp(args.reason)})')
     expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
@@ -582,9 +591,12 @@ def cmd_set_priority(args):
 
 
 def cmd_set_cancelled(args):
+    if not validate_target(args):
+        return 1
     expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
             f'"CANCELLED" {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
+    expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
 
@@ -975,6 +987,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--tags", help="Comma-separated tags")
     p.add_argument("--schedule", help="SCHEDULED date")
     p.add_argument("--deadline", help="DEADLINE date")
+    p.add_argument("--time", help="Time for scheduled/deadline date (HH:MM)")
     p.add_argument("--priority", help="Priority: A, B, or C")
     p.add_argument("--file", help="Target file (relative to ORG_DIRECTORY)")
     p.add_argument("--category", help="Insert under this heading in tasks.org")
@@ -1044,6 +1057,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
+    p.add_argument("--reason", help="Record a LOGBOOK state-change note")
     p.set_defaults(func=cmd_set_state)
 
     p = sub.add_parser("set-next", help="Promote task/child to NEXT")
@@ -1065,7 +1079,9 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.set_defaults(func=cmd_set_priority)
 
     p = sub.add_parser("set-cancelled", help="Mark task CANCELLED")
-    p.add_argument("substr", metavar="SUBSTR", help="Heading substring")
+    p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
+                   help="Heading substring")
+    p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
     p.set_defaults(func=cmd_set_cancelled)
@@ -1245,7 +1261,7 @@ Reads:      show, agenda-view, outline, categories
 Args use the same field names as --batch items. Task-addressing commands
 take `heading` (substring) OR `id` (org :ID:, matching each command's
 --id flag; `id` wins when both are given):
-  add-task        title (required), body, tags, schedule, deadline,
+  add-task        title (required), body, tags, schedule, deadline, time,
                   priority, file, category, state
   add-subtask     parent OR parent_id (required), title (required), body,
                   tags, schedule, deadline, priority, state

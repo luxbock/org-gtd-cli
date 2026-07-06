@@ -733,7 +733,8 @@ If ACTIVE is non-nil, use angle brackets; otherwise square brackets."
     (string-to-number index-str)))
 
 (defun org-gtd-cli/build-entry (level state title &optional priority tags-csv
-                                       schedule deadline body)
+                                       schedule deadline body
+                                       schedule-time deadline-time)
   "Build an org entry string.
 LEVEL is the heading depth (number of stars).
 Returns the entry text (without trailing newline at very end)."
@@ -750,10 +751,12 @@ Returns the entry text (without trailing newline at very end)."
       (push heading parts))
     ;; SCHEDULED/DEADLINE
     (when (and schedule (not (string-empty-p schedule)))
-      (push (concat "SCHEDULED: " (org-gtd-cli/make-timestamp schedule nil t))
+      (push (concat "SCHEDULED: "
+                    (org-gtd-cli/make-timestamp schedule schedule-time t))
             parts))
     (when (and deadline (not (string-empty-p deadline)))
-      (push (concat "DEADLINE: " (org-gtd-cli/make-timestamp deadline nil t))
+      (push (concat "DEADLINE: "
+                    (org-gtd-cli/make-timestamp deadline deadline-time t))
             parts))
     ;; Body
     (when (and body (not (string-empty-p body)))
@@ -1829,7 +1832,7 @@ any state (including DONE) and plain category/note headings."
 ;; --- add-task ---
 
 (defun org-gtd-cli/add-task (title &optional body tags-csv schedule deadline
-                                    priority file category state)
+                                    priority file category state time-str)
   "Add a TODO task."
   (let* ((target-file
           (cond
@@ -1858,9 +1861,19 @@ any state (including DONE) and plain category/note headings."
          (deadline (when (and deadline (not (string-empty-p deadline))
                               (not (equal deadline "nil")))
                      deadline))
+         (time-str (when (and time-str (not (string-empty-p time-str))
+                              (not (equal time-str "nil")))
+                     time-str))
          (priority (when (and priority (not (string-empty-p priority))
                               (not (equal priority "nil")))
                      priority)))
+    (when (and time-str (not schedule) (not deadline))
+      (org-gtd-cli/error "Error: --time requires --schedule or --deadline")
+      (kill-emacs 1))
+    (when (and time-str schedule deadline)
+      (org-gtd-cli/error
+       "Error: --time with both --schedule and --deadline is ambiguous; set the second timestamp's time via set-schedule or set-deadline.")
+      (kill-emacs 1))
     (when body (setq body (org-gtd-cli/fill-text body)))
     (org-gtd-cli/validate-body-text body)
     ;; `add-task' always files a freestanding task (inbox, a file, or under a
@@ -1928,7 +1941,9 @@ any state (including DONE) and plain category/note headings."
                    (unless (bolp) (insert "\n"))
                    (insert (org-gtd-cli/build-entry
                             target-level todo-state title
-                            priority tags-csv schedule deadline body)
+                            priority tags-csv schedule deadline body
+                            (when schedule time-str)
+                            (when deadline time-str))
                            "\n")
                    ;; Remove orphaned blank lines at insertion point
                    (while (and (not (eobp)) (looking-at-p "\n"))
@@ -1938,7 +1953,9 @@ any state (including DONE) and plain category/note headings."
            (unless (bolp) (insert "\n"))
            (insert "\n" (org-gtd-cli/build-entry
                          1 todo-state title
-                         priority tags-csv schedule deadline body))
+                         priority tags-csv schedule deadline body
+                         (when schedule time-str)
+                         (when deadline time-str)))
            (insert "\n")))
         (save-buffer))
       (if org-gtd-cli/json-mode
@@ -2000,27 +2017,32 @@ any state (including DONE) and plain category/note headings."
          ;; Go to end of subtree
          (org-end-of-subtree t)
          (unless (bolp) (insert "\n"))
-         (insert (org-gtd-cli/build-entry
-                  child-level todo-state title
-                  priority tags-csv schedule deadline body)
-                 "\n")
+         (let ((child-pos (point)))
+           (insert (org-gtd-cli/build-entry
+                    child-level todo-state title
+                    priority tags-csv schedule deadline body)
+                   "\n")
+           (save-excursion
+             (goto-char child-pos)
+             (org-id-get-create))
          ;; Remove orphaned blank lines at insertion point
-         (while (and (not (eobp)) (looking-at-p "\n"))
-           (delete-char 1))
-         (save-buffer)
-         (if org-gtd-cli/json-mode
-             (org-gtd-cli/output
-              `((version . 1) (command . "add-subtask")
-                (heading . ,title) (state . ,todo-state)
-                (file . ,rel-file) (parent . ,parent-heading)
-                (side_effects . ,(if parent-was-next
-                                     (vector `((action . "state-change")
-                                               (heading . ,parent-heading)
-                                               (old_state . "NEXT")
-                                               (new_state . "TODO")))
-                                   []))))
-           (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
-                          title parent-heading rel-file)))))))
+           (while (and (not (eobp)) (looking-at-p "\n"))
+             (delete-char 1))
+           (save-buffer)
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/mutation-output
+                `((version . 1) (command . "add-subtask")
+                  (heading . ,title) (state . ,todo-state)
+                  (file . ,rel-file) (parent . ,parent-heading)
+                  (side_effects . ,(if parent-was-next
+                                       (vector `((action . "state-change")
+                                                 (heading . ,parent-heading)
+                                                 (old_state . "NEXT")
+                                                 (new_state . "TODO")))
+                                     [])))
+                (cons (current-buffer) child-pos))
+             (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
+                            title parent-heading rel-file))))))))
   (kill-emacs 0))
 
 ;; --- add-event ---
@@ -2606,7 +2628,56 @@ freestanding category-level task or a top-level task — is rejected."
   (unless (gtd/is-subproject-p)
     (org-gtd-cli/reject-next heading)))
 
-(defun org-gtd-cli/set-state (substring new-state &optional index dry-run)
+(defun org-gtd-cli/state-note-entry (new-state old-state reason)
+  "Return an Org state-change note entry for NEW-STATE, OLD-STATE, and REASON."
+  (let ((note (replace-regexp-in-string
+               "\n" "\n  " (string-trim (or reason "")))))
+    (format "- State %-12S from %-12S %s \\\\\n  %s"
+            new-state (or old-state "") (format-time-string "[%Y-%m-%d %a %H:%M]")
+            note)))
+
+(defun org-gtd-cli/add-state-reason-note (new-state old-state reason)
+  "Add REASON to the current task's state-change LOGBOOK entry.
+If Org already logged the state change, convert that entry into a note.
+Otherwise create a standard state-change note in the LOGBOOK drawer."
+  (let* ((subtree-end (save-excursion (org-end-of-subtree t) (point)))
+         (meta-end (save-excursion (org-end-of-meta-data t) (point)))
+         (note (replace-regexp-in-string
+                "\n" "\n  " (string-trim (or reason ""))))
+         (entry (org-gtd-cli/state-note-entry new-state old-state reason))
+         (converted nil))
+    (save-excursion
+      (goto-char (line-beginning-position))
+      (when (re-search-forward "^[ \t]*:LOGBOOK:" meta-end t)
+        (let ((drawer-end (save-excursion
+                            (re-search-forward "^[ \t]*:END:" subtree-end t))))
+          (when drawer-end
+            (forward-line 1)
+            (when (re-search-forward
+                   (format "^[ \t]*- State[ \t]+%S[ \t]+from[ \t]+%S[ \t]+\\[[^]\n]+\\]"
+                           new-state (or old-state ""))
+                   drawer-end t)
+              (end-of-line)
+              (unless (save-excursion
+                        (beginning-of-line)
+                        (looking-at-p ".*\\\\\\\\[ \t]*$"))
+                (insert " \\\\"))
+              (insert "\n  " note)
+              (setq converted t))))))
+    (unless converted
+      (save-excursion
+        (goto-char (line-beginning-position))
+        (if (re-search-forward "^[ \t]*:LOGBOOK:" meta-end t)
+            (progn
+              (forward-line 1)
+              (insert entry "\n"))
+          (goto-char (line-beginning-position))
+          (org-end-of-meta-data)
+          (when (> (point) subtree-end)
+            (goto-char subtree-end))
+          (insert ":LOGBOOK:\n" entry "\n:END:\n"))))))
+
+(defun org-gtd-cli/set-state (substring new-state &optional index dry-run reason)
   "Change a task's TODO state."
   ;; Validate state before doing anything
   (let ((all-states (apply #'append
@@ -2656,6 +2727,8 @@ freestanding category-level task or a top-level task — is rejected."
                               heading old-state new-state rel-file)))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
+           (when (and reason (not (string-empty-p reason)))
+             (org-gtd-cli/add-state-reason-note new-state old-state reason))
            (org-gtd-cli/reorder-siblings-by-state)
            (save-buffer)
            (if org-gtd-cli/json-mode
@@ -3814,11 +3887,19 @@ Refuses to delete projects (tasks with subtasks)."
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((task-heading (org-get-heading t t t t))
+              (task-state (org-get-todo-state))
+              (task-id (org-entry-get nil "ID"))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
               (level (org-current-level))
               (child-level (1+ level))
               (subtree-end (save-excursion (org-end-of-subtree t) (point)))
               (has-children nil))
+         (unless task-state
+           (org-gtd-cli/error
+            (concat "Cannot delete: \"%s\" is not a task (no TODO keyword) "
+                    "- refusing to delete a plain/category heading (%s)")
+            task-heading rel-file)
+           (kill-emacs 1))
          ;; Check for child headings (project detection)
          (save-excursion
            (forward-line 1)
@@ -3843,7 +3924,9 @@ Refuses to delete projects (tasks with subtasks)."
            (if org-gtd-cli/json-mode
                (org-gtd-cli/output
                 `((version . 1) (command . "delete")
-                  (heading . ,task-heading) (file . ,rel-file)))
+                  (id . ,task-id)
+                  (heading . ,task-heading) (file . ,rel-file)
+                  (side_effects . [])))
              (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file)))))))
     (kill-emacs 0)))
 
@@ -4471,7 +4554,8 @@ index in the batch array."
            (org-gtd-cli/batch--field item 'priority)
            (org-gtd-cli/batch--field item 'file)
            (org-gtd-cli/batch--field item 'category)
-           (org-gtd-cli/batch--field item 'state))))
+           (org-gtd-cli/batch--field item 'state)
+           (org-gtd-cli/batch--field item 'time))))
 
     ("add-event"
      (org-gtd-cli/batch--result
