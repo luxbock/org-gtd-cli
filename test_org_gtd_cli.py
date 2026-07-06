@@ -69,6 +69,26 @@ def run_cli(*args, org_dir, env_overrides=None):
     return result.stdout, result.stderr, result.returncode
 
 
+def daemon_socket_paths(daemon_tmp):
+    """Return daemon sockets rooted in the isolated test TMPDIR."""
+    base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+    return sorted(base.glob("*/server"))
+
+
+def kill_test_daemons(daemon_tmp):
+    """Kill any scoped org-gtd-cli daemon started under daemon_tmp."""
+    for socket in daemon_socket_paths(daemon_tmp):
+        try:
+            subprocess.run(
+                ["emacsclient", "--socket-name", str(socket),
+                 "--eval", "(kill-emacs)"],
+                capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    subprocess.run(["pkill", "-f", daemon_tmp], capture_output=True)
+    shutil.rmtree(daemon_tmp, ignore_errors=True)
+
+
 def reset_fixtures(org_dir):
     """Re-copy fixture files into org_dir (equivalent to reset_fixtures in bash)."""
     # Remove everything except agent-notes dir
@@ -4879,12 +4899,7 @@ class TestDaemonSaveChatter:
 
     @staticmethod
     def _kill_daemon(daemon_tmp):
-        socket = os.path.join(daemon_tmp, f"org-gtd-cli-{os.getuid()}", "server")
-        if os.path.exists(socket):
-            subprocess.run(
-                ["emacsclient", "--socket-name", socket, "--eval", "(kill-emacs)"],
-                capture_output=True, timeout=10)
-        shutil.rmtree(daemon_tmp, ignore_errors=True)
+        kill_test_daemons(daemon_tmp)
 
     def test_daemon_json_mutation_no_save_chatter(self, org_dir):
         """A --json mutation run against a fresh daemon emits ONLY JSON, with
@@ -4946,8 +4961,8 @@ class TestDaemonRobustness:
     2. Output race: the Python wrapper used fixed stdout/stderr/exit paths in
        $TMPDIR, so two concurrent invocations clobbered each other's results.
 
-    The daemon socket lives at $TMPDIR/org-gtd-cli-$UID/server (with
-    XDG_RUNTIME_DIR unset), and unix socket paths have a ~107-char limit —
+    The daemon sockets live below $TMPDIR/org-gtd-cli-$UID/<identity>/server
+    (with XDG_RUNTIME_DIR unset), and unix socket paths have a ~107-char limit.
     pytest's tmp_path is too deep, so these tests build a short-lived daemon
     TMPDIR directly under the session tmpdir (e.g. /tmp/claude) instead.
     """
@@ -4958,19 +4973,16 @@ class TestDaemonRobustness:
 
     @staticmethod
     def _kill_daemon(daemon_tmp):
-        socket = os.path.join(daemon_tmp, f"org-gtd-cli-{os.getuid()}", "server")
-        if os.path.exists(socket):
-            try:
-                subprocess.run(
-                    ["emacsclient", "--socket-name", socket,
-                     "--eval", "(kill-emacs)"],
-                    capture_output=True, timeout=10)
-            except subprocess.TimeoutExpired:
-                pass
-        # Fallback for a wedged daemon (e.g. stuck on an interactive prompt):
-        # its command line contains the unique TMPDIR path.
-        subprocess.run(["pkill", "-f", daemon_tmp], capture_output=True)
-        shutil.rmtree(daemon_tmp, ignore_errors=True)
+        kill_test_daemons(daemon_tmp)
+
+    @staticmethod
+    def _copy_org_dir(dest):
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in FIXTURES_DIR.glob("*.org"):
+            target = dest / f.name
+            shutil.copy(f, target)
+            target.chmod(0o644)
+        (dest / "agent-notes").mkdir(exist_ok=True)
 
     def test_daemon_mutation_survives_external_file_change(self, org_dir):
         """A mutation must not hang when the .org file's mtime changes behind
@@ -5021,6 +5033,78 @@ class TestDaemonRobustness:
             data = json.loads(stdout)
             assert data["command"] == "set-body"
             assert data["task"]["body"] == "second body"
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_reuses_socket_for_same_identity(self, org_dir):
+        """Two calls with the same org dir and loaded code reuse one daemon."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            first_sockets = daemon_socket_paths(daemon_tmp)
+            assert len(first_sockets) == 1
+
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            assert daemon_socket_paths(daemon_tmp) == first_sockets
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_org_directory_identity_gets_separate_socket(self, org_dir):
+        """Distinct resolved ORG_DIRECTORY values must not share a daemon."""
+        daemon_tmp = self._make_daemon_tmp()
+        other_org_dir = Path(tempfile.mkdtemp(prefix="ogc-org-", dir=daemon_tmp))
+        self._copy_org_dir(other_org_dir)
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            assert len(daemon_socket_paths(daemon_tmp)) == 1
+
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=other_org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            assert len(daemon_socket_paths(daemon_tmp)) == 2
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_loaded_code_identity_gets_separate_socket(self, org_dir):
+        """Distinct loaded core/elisp paths must not share a daemon."""
+        daemon_tmp = self._make_daemon_tmp()
+        alt_core = Path(daemon_tmp) / "alt-gtd-core.el"
+        alt_elisp = Path(daemon_tmp) / "alt-org-gtd-cli.el"
+        shutil.copy(CORE_FILE, alt_core)
+        shutil.copy(ELISP_FILE, alt_elisp)
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        alt_env = {
+            **env,
+            "ORG_GTD_CORE_FILE": str(alt_core),
+            "ORG_GTD_ELISP_FILE": str(alt_elisp),
+        }
+        try:
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            assert len(daemon_socket_paths(daemon_tmp)) == 1
+
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=alt_env)
+            assert rc == 0, f"stderr: {stderr}"
+            assert len(daemon_socket_paths(daemon_tmp)) == 2
         finally:
             self._kill_daemon(daemon_tmp)
 
