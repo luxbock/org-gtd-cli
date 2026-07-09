@@ -2028,6 +2028,14 @@ any state (including DONE) and plain category/note headings."
          ;; Remove orphaned blank lines at insertion point
            (while (and (not (eobp)) (looking-at-p "\n"))
              (delete-char 1))
+           ;; Reorder siblings by state when the created state sorts above
+           ;; plain TODO (NEXT or any done keyword). WAITING/DEFER/TODO
+           ;; must preserve position (WAITING invariant, see 3f0802b).
+           (when (or (string= todo-state "NEXT")
+                     (member todo-state org-done-keywords))
+             (save-excursion
+               (goto-char child-pos)
+               (org-gtd-cli/reorder-siblings-by-state)))
            (save-buffer)
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
@@ -2040,7 +2048,7 @@ any state (including DONE) and plain category/note headings."
                                                  (old_state . "NEXT")
                                                  (new_state . "TODO")))
                                      [])))
-                (cons (current-buffer) child-pos))
+                title)
              (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
                             title parent-heading rel-file))))))))
   (kill-emacs 0))
@@ -2917,10 +2925,23 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                         (target_file . ,rel-target) (dry_run . t)))
                    (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
                                   heading rel-target target-name rel-file)))
-               ;; Perform the refile
-               (let ((rfloc (list (org-get-heading t t t t)
-                                  target-file nil target-pos)))
-                 (org-refile nil nil rfloc))
+               ;; Perform the refile. Use a marker for target-pos so it
+               ;; tracks correctly when source and target share a buffer
+               ;; (deletion of the source subtree can shift positions).
+               (let* ((target-marker (with-current-buffer target-buf
+                                       (save-excursion
+                                         (goto-char target-pos)
+                                         (point-marker))))
+                      (rfloc (list (org-get-heading t t t t)
+                                   target-file nil target-marker)))
+                 (org-refile nil nil rfloc)
+                 ;; Restore GTD invariants at the destination: demote a moved
+                 ;; NEXT that becomes freestanding or a duplicate NEXT sibling,
+                 ;; demote a NEXT parent that has just become a project, then
+                 ;; reorder destination siblings by state.
+                 (org-gtd-cli/refile-repair-invariants
+                  target-buf (marker-position target-marker) heading)
+                 (set-marker target-marker nil))
                (save-buffer)
                (with-current-buffer target-buf (save-buffer))
                (if org-gtd-cli/json-mode
@@ -2933,6 +2954,60 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                  (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
                                 heading rel-target target-name rel-file)))))))))
     (kill-emacs 0)))
+
+(defun org-gtd-cli/refile-repair-invariants (target-buf target-pos moved-heading)
+  "Restore GTD invariants after refiling MOVED-HEADING under TARGET-POS in TARGET-BUF.
+Demotes the moved subtree to TODO when it is a NEXT that would be freestanding
+or a duplicate NEXT sibling in its new home; demotes a NEXT parent that has just
+become a project because a child was refiled under it; and reorders destination
+siblings by state (DONE > NEXT > TODO > WAITING > DEFER)."
+  (with-current-buffer target-buf
+    (org-with-wide-buffer
+     (goto-char target-pos)
+     (let* ((parent-level (org-current-level))
+            (child-level (1+ parent-level))
+            (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+            (moved-pos nil))
+       ;; Locate the moved subtree among the target's direct children.
+       (save-excursion
+         (forward-line 1)
+         (while (and (not moved-pos) (< (point) subtree-end)
+                     (re-search-forward org-heading-regexp subtree-end t))
+           (when (and (= (org-current-level) child-level)
+                      (string= (org-get-heading t t t t) moved-heading))
+             (setq moved-pos (line-beginning-position)))))
+       (when moved-pos
+         (goto-char moved-pos)
+         (let ((moved-state (org-get-todo-state)))
+           ;; Demote moved NEXT when it becomes freestanding, or when a
+           ;; sibling NEXT already occupies the destination project.
+           (when (string= moved-state "NEXT")
+             (let ((freestanding (not (gtd/is-subproject-p)))
+                   (has-other-next nil))
+               (save-excursion
+                 (goto-char target-pos)
+                 (let ((sib-end (save-excursion (org-end-of-subtree t) (point))))
+                   (save-excursion
+                     (forward-line 1)
+                     (while (and (not has-other-next) (< (point) sib-end)
+                                 (re-search-forward org-heading-regexp sib-end t))
+                       (when (and (= (org-current-level) child-level)
+                                  (not (= (line-beginning-position) moved-pos))
+                                  (equal (org-get-todo-state) "NEXT"))
+                         (setq has-other-next t))))))
+               (when (or freestanding has-other-next)
+                 (let ((org-inhibit-logging nil))
+                   (org-todo "TODO")))))
+           ;; Reorder destination siblings using the standard rank.
+           (org-gtd-cli/reorder-siblings-by-state)))
+       ;; Demote target parent from NEXT to TODO when it just gained a
+       ;; TODO-keyword child (a NEXT that becomes a project must be TODO).
+       (save-excursion
+         (goto-char target-pos)
+         (when (and (equal (org-get-todo-state) "NEXT")
+                    (org-gtd-cli/has-todo-children-p))
+           (let ((org-inhibit-logging nil))
+             (org-todo "TODO"))))))))
 
 ;; --- set-next ---
 

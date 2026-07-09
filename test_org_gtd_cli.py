@@ -2900,6 +2900,294 @@ class TestSiblingReordering:
 
 
 # ===========================================================================
+# 39b. add-subtask: state-aware sibling reorder (Issue #20)
+# ===========================================================================
+
+class TestAddSubtaskStateReorder:
+    def _write_reorder_org(self, org_dir, content):
+        (org_dir / "reorder.org").write_text(content)
+
+    def test_add_next_reorders_above_todo(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project N1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N1", "Gate",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "NEXT Gate", "TODO Alpha")
+        assert_line_before(f, "NEXT Gate", "TODO Beta")
+
+    def test_add_next_reorders_between_done_and_todo(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project N2
+** DONE Old work
+** TODO Alpha
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N2", "Gate",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "DONE Old work", "NEXT Gate")
+        assert_line_before(f, "NEXT Gate", "TODO Alpha")
+
+    def test_add_done_reorders_above_next(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project D1
+** NEXT Active
+** TODO Alpha
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project D1", "Archive item",
+            "--state", "DONE", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "DONE Archive item", "NEXT Active")
+        assert_line_before(f, "NEXT Active", "TODO Alpha")
+
+    def test_add_cancelled_reorders_above_todo(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project C1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project C1", "Aborted item",
+            "--state", "CANCELLED", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "CANCELLED Aborted item", "TODO Alpha")
+
+    def test_add_waiting_preserves_end_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project W1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project W1", "Hold item",
+            "--state", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        # WAITING must appear after existing TODO siblings — reorder MUST
+        # NOT bubble it above them (the WAITING position invariant, see
+        # 3f0802b).
+        assert_line_before(f, "TODO Alpha", "WAITING Hold item")
+        assert_line_before(f, "TODO Beta", "WAITING Hold item")
+
+    def test_add_defer_preserves_end_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project F1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project F1", "Defer item",
+            "--state", "DEFER", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "TODO Alpha", "DEFER Defer item")
+        assert_line_before(f, "TODO Beta", "DEFER Defer item")
+
+    def test_add_todo_preserves_end_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project T1
+** DONE Old work
+** NEXT Active
+** TODO Alpha
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project T1", "New todo", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        # Default state is TODO. It should be inserted at end, not
+        # bubbled up.
+        assert_line_before(f, "TODO Alpha", "TODO New todo")
+
+    def test_add_next_to_empty_parent(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project N3
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N3", "First child",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert "NEXT First child" in f.read_text()
+
+    def test_add_next_with_single_child(self, org_dir):
+        # Existing single child, add NEXT — should move to top of siblings.
+        self._write_reorder_org(org_dir, """\
+* TODO Project N4
+** TODO Only child
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N4", "Gate",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "NEXT Gate", "TODO Only child")
+
+
+# ===========================================================================
+# 19b. refile: GTD structural invariants at destination (Issue #21)
+# ===========================================================================
+
+class TestRefileInvariants:
+    def _write(self, org_dir, name, content):
+        (org_dir / name).write_text(content)
+
+    def test_moved_next_to_category_demotes_to_todo(self, org_dir):
+        # NEXT refiled under a plain (non-TODO) category heading has no
+        # TODO ancestor, so it becomes freestanding and must demote.
+        self._write(org_dir, "refile.org", """\
+* Category
+** TODO Parent project
+*** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Category", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "TODO Move me" in text
+        assert "NEXT Move me" not in text
+
+    def test_moved_next_into_project_with_existing_next_demotes(self, org_dir):
+        # Two NEXT direct siblings under one project is invalid; the
+        # newly moved one gets demoted.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Existing active
+** TODO Alpha
+* TODO Project B
+** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        # Existing NEXT preserved
+        assert "NEXT Existing active" in text
+        # Moved NEXT demoted
+        assert "TODO Move me" in text
+        assert "NEXT Move me" not in text
+
+    def test_moved_next_into_project_without_next_keeps_state(self, org_dir):
+        # No sibling NEXT — moved NEXT stays NEXT, and reordering places
+        # it above existing TODO siblings.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** TODO Alpha
+** TODO Beta
+* TODO Project B
+** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "refile.org"
+        text = f.read_text()
+        assert "NEXT Move me" in text
+        # Should be sorted above plain TODO siblings.
+        assert_line_before(f, "NEXT Move me", "TODO Alpha")
+
+    def test_next_parent_becomes_project_demotes(self, org_dir):
+        # Refiling a TODO under a NEXT leaf turns that leaf into a
+        # project — a NEXT project is invalid, so it demotes to TODO.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Was leaf
+* TODO Project B
+** TODO Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Was leaf", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "TODO Was leaf" in text
+        assert "NEXT Was leaf" not in text
+        assert "TODO Move me" in text
+
+    def test_destination_siblings_reordered_after_refile(self, org_dir):
+        # Moved DONE should sort above NEXT/TODO siblings after refile.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Active
+** TODO Alpha
+* Category
+** DONE Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "refile.org"
+        text = f.read_text()
+        assert "DONE Move me" in text
+        assert_line_before(f, "DONE Move me", "NEXT Active")
+        assert_line_before(f, "NEXT Active", "TODO Alpha")
+
+    def test_category_refile_applies_invariants(self, org_dir):
+        # The --category path (find-category-matches, tasks.org only)
+        # must apply the same invariants as --to. Source: a NEXT under a
+        # project in tasks.org; target: a plain category heading in
+        # tasks.org. The moved NEXT becomes freestanding under a plain
+        # category and must demote to TODO.
+        tasks = org_dir / "tasks.org"
+        tasks.write_text("""\
+#+TITLE: Tasks
+
+* TODO Source project
+** NEXT Move me
+* Category basket
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--category", "Category basket",
+            org_dir=org_dir)
+        assert rc == 0
+        text = tasks.read_text()
+        assert "TODO Move me" in text
+        assert "NEXT Move me" not in text
+
+    def test_dry_run_still_previews_no_invariants(self, org_dir):
+        # Dry-run must not mutate anything. The source NEXT and target
+        # NEXT parent both stay unchanged.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Was leaf
+* TODO Project B
+** TODO Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Was leaf",
+            "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "Would refile" in stdout
+        assert "NEXT Was leaf" in text
+        # Move me stays under Project B
+        assert "** TODO Move me" in text
+
+    def test_refile_empty_parent_no_reorder_needed(self, org_dir):
+        # Refile a single task under a currently-empty parent — no
+        # crash, no reorder needed.
+        self._write(org_dir, "refile.org", """\
+* Category
+** Empty Basket
+* Source
+** TODO Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Empty Basket", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "*** TODO Move me" in text
+
+
+# ===========================================================================
 # 40. agenda-view
 # ===========================================================================
 
