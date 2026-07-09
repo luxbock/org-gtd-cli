@@ -24,11 +24,30 @@
         "aarch64-linux"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      perSystem =
+        pkgs:
+        let
+          orgGtdCli = pkgs.callPackage ./default.nix { };
+        in
+        {
+          packages = {
+            org-gtd-cli = orgGtdCli;
+            default = orgGtdCli;
+          };
+
+          checks = {
+            org-gtd-cli-tests = orgGtdCli.passthru.tests;
+            default = orgGtdCli.passthru.tests;
+          };
+
+          devShells.default = pkgs.mkShell {
+            packages = orgGtdCli.passthru.testInputs;
+          };
+        };
     in
     {
-      packages = forAllSystems (pkgs: rec {
-        org-gtd-cli = pkgs.callPackage ./default.nix { };
-        default = org-gtd-cli;
-      });
+      packages = forAllSystems (pkgs: (perSystem pkgs).packages);
+      checks = forAllSystems (pkgs: (perSystem pkgs).checks);
+      devShells = forAllSystems (pkgs: (perSystem pkgs).devShells);
     };
 }

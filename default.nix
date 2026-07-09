@@ -59,6 +59,15 @@ let
     exec ${python3}/bin/python3 ${pythonScript} "$@"
   '';
 
+  testInputs = [
+    emacsWithHtmlize
+    coreutils
+    procps
+    python3
+    python3Packages.pytest
+    python3Packages.pytest-xdist
+  ];
+
 in
 symlinkJoin {
   name = "org-gtd-cli";
@@ -71,25 +80,22 @@ symlinkJoin {
     mainProgram = "org-gtd-cli";
   };
 
-  passthru.tests =
-    runCommand "org-gtd-cli-tests"
-      {
-        nativeBuildInputs = [
-          emacsWithHtmlize
-          coreutils
-          procps
-          python3
-          python3Packages.pytest
-          python3Packages.pytest-xdist
-        ];
-      }
-      ''
-        cp ${pythonScript} org-gtd-cli.py
-        cp ${./test_org_gtd_cli.py} test_org_gtd_cli.py
-        cp ${coreFile} +gtd-core.el
-        cp ${elispFile} org-gtd-cli.el
-        cp -r ${./fixtures} fixtures
-        python3 -m pytest test_org_gtd_cli.py -q -n 4
-        touch $out
-      '';
+  passthru = {
+    inherit testInputs;
+
+    tests =
+      runCommand "org-gtd-cli-tests"
+        {
+          nativeBuildInputs = testInputs;
+        }
+        ''
+          cp ${pythonScript} org-gtd-cli.py
+          cp ${./test_org_gtd_cli.py} test_org_gtd_cli.py
+          cp ${coreFile} +gtd-core.el
+          cp ${elispFile} org-gtd-cli.el
+          cp -r ${./fixtures} fixtures
+          python3 -m pytest test_org_gtd_cli.py -q -n 4
+          touch $out
+        '';
+  };
 }
