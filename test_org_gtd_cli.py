@@ -2849,6 +2849,32 @@ class TestSiblingReordering:
         f = org_dir / "reorder.org"
         assert_line_before(f, "WAITING Beta", "DEFER Alpha")
 
+    def test_todo_to_waiting_preserves_sibling_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* Project G
+** TODO Alpha
+** TODO Gate
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli("set-state", "Gate", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "TODO Alpha", "WAITING Gate")
+        assert_line_before(f, "WAITING Gate", "TODO Beta")
+
+    def test_next_to_waiting_preserves_sibling_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project H
+** TODO Alpha
+** NEXT Gate
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli("set-state", "Gate", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "TODO Alpha", "WAITING Gate")
+        assert_line_before(f, "WAITING Gate", "TODO Beta")
+
     def test_non_task_siblings_skip_reorder(self, org_dir):
         self._write_reorder_org(org_dir, """\
 * Computers
