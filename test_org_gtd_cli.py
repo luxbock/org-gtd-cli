@@ -457,17 +457,16 @@ class TestFindTaskCategoryHint:
         assert err["hint"] == "Try a shorter substring, or use 'search' for partial matches."
         assert "add-task --category" not in err["hint"]
 
-    def test_show_category_substring_gets_hint_too(self, org_dir):
-        # find-task is shared, so `show` gets the category-aware hint as well
-        stdout, stderr, rc = run_cli("--json", "show", "Holiday Trip", org_dir=org_dir)
+    def test_add_subtask_category_ambiguous_hint(self, org_dir):
+        # add-subtask still surfaces the category-aware no-match hint, and
+        # ambiguous categories ("Tools" matches both Computers/Tools and
+        # Research/Tools) still explain to the user how to disambiguate.
+        stdout, stderr, rc = run_cli(
+            "--json", "add-subtask", "Tools", "New child", org_dir=org_dir)
         assert rc == 1
         err = self._json_error(stdout)
-        assert 'No task found matching "Holiday Trip"' in err["error"]
-        assert "category heading, not a task" in err["hint"]
-        assert 'add-task --category "Travel/Holiday Trip"' in err["hint"]
-        # The add-task --category guidance is now in the stdout JSON object.
-        assert "add-task --category" in stdout
-        assert stderr.find('No task found matching') == -1
+        assert 'No task found matching "Tools"' in err["error"]
+        assert "category headings, not tasks" in err["hint"]
 
 
 # ===========================================================================
@@ -811,6 +810,189 @@ class TestCategories:
         stdout, stderr, rc = run_cli("categories", "--file", "nonexistent.org", org_dir=org_dir)
         assert rc == 1
         assert "File not found" in stderr
+
+
+# ===========================================================================
+# 10b. show / subtasks: plain category heading as first-class lookup target (#23)
+# ===========================================================================
+
+class TestShowSubtasksCategoryLookup:
+    """Plain (no-TODO) category headings resolve as first-class lookup targets
+    for `show` and `subtasks`.  Exact leaf-name match (case-insensitive; slash
+    paths disambiguate) wins over substring task matching, so an organizational
+    container like ``review-bot`` — or any of the fixture's plain headings
+    (``Pet Ants``, ``Holiday Trip``, ``Computers/Agents``) — is directly
+    addressable.  On category resolution the envelope carries
+    ``kind: "category"`` and mirrors the ``subtasks`` shape (metadata + direct
+    children + progress).  Task envelopes gain ``kind: "task"``."""
+
+    # --- show: single-match plain category -------------------------------
+
+    def test_show_plain_category_returns_category_envelope_json(self, org_dir):
+        # "Pet Ants" is a plain heading (** Pet Ants) with one TODO child in
+        # the fixture. `show` used to fail with "No task found" because
+        # find-task only matched TODO-bearing headings; category lookup makes
+        # it resolvable in one call.
+        data, _, rc = run_cli_json("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "show"
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+        assert data["path"] == "Family/Pet Ants"
+        assert data["parent"] == "Family"
+        assert data["file"] == "tasks.org"
+        # Subtasks list mirrors the `subtasks` command shape.
+        assert isinstance(data["subtasks"], list)
+        assert len(data["subtasks"]) == 1
+        child = data["subtasks"][0]
+        assert child["heading"] == "Buy a formicarium"
+        assert child["state"] == "TODO"
+        assert child["is_project"] is True
+        # Progress counts children carrying a TODO keyword.
+        assert data["progress"] == {"done": 0, "total": 1}
+
+    def test_show_plain_category_text_output(self, org_dir):
+        stdout, _, rc = run_cli("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert "(tasks.org)" in stdout
+        assert "Category: Pet Ants" in stdout
+        assert "TODO Buy a formicarium" in stdout
+        assert "0/1 done" in stdout
+
+    def test_show_deep_category_holiday_trip(self, org_dir):
+        # "Holiday Trip" is a plain heading (** Holiday Trip) with a nested
+        # TODO project under it — the direct child is itself a project.
+        data, _, rc = run_cli_json("show", "Holiday Trip", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["heading"] == "Holiday Trip"
+        assert data["path"] == "Travel/Holiday Trip"
+        # One TODO direct child ("Holiday pre-trip tasks"), which is itself a
+        # project (has TODO children).
+        headings = [c["heading"] for c in data["subtasks"]]
+        assert "Holiday pre-trip tasks" in headings
+        assert data["subtasks"][0]["is_project"] is True
+
+    def test_show_plain_category_kind_is_category(self, org_dir):
+        # The `kind` field is the canonical way to distinguish envelope shape:
+        # `category` vs `task`.
+        cat, _, rc = run_cli_json("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert cat["kind"] == "category"
+        # Category envelope has no `body`/`sessions` (those are task-only).
+        assert "body" not in cat
+        assert "sessions" not in cat
+
+    def test_show_task_envelope_carries_kind_task(self, org_dir):
+        # The task envelope gained a `kind` field so consumers of `show --json`
+        # can uniformly branch on shape.
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "task"
+
+    # --- ambiguity: exact category match wins over substring task --------
+
+    def test_exact_category_match_beats_substring_task(self, org_dir):
+        # Add a TODO task whose heading contains "Pet Ants" as a substring.
+        # Before this change `show "Pet Ants"` would either fail or match the
+        # substring task; after, the exact plain-heading match wins.
+        _, _, rc = run_cli("add-task", "Track Pet Ants growth weekly",
+                           org_dir=org_dir)
+        assert rc == 0
+        data, _, rc = run_cli_json("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+        # And the substring task is still reachable by its own substring.
+        task, _, rc = run_cli_json("show", "Track Pet Ants growth",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert task["kind"] == "task"
+        assert task["heading"] == "Track Pet Ants growth weekly"
+
+    def test_ambiguous_category_returns_deterministic_error(self, org_dir):
+        # Two plain headings share the leaf name "Tools" (Computers/Tools and
+        # Research/Tools).  `show Tools` reports both with a structured error
+        # so the caller can pick a path.
+        data, _, rc = run_cli_json("show", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert 'Multiple category matches for "Tools"' in data["error"]
+        paths = [m["path"] for m in data["matches"]]
+        assert "Computers/Tools" in paths
+        assert "Research/Tools" in paths
+        assert "Parent/Category" in data["hint"]
+
+    def test_category_path_disambiguates(self, org_dir):
+        # Slash path selects one of the ambiguous leaves.
+        data, _, rc = run_cli_json("show", "Computers/Tools", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["path"] == "Computers/Tools"
+        assert data["parent"] == "Computers"
+        headings = {c["heading"] for c in data["subtasks"]}
+        assert "Fix the =find= command in org-gtd-cli" in headings
+
+    def test_category_lookup_case_insensitive(self, org_dir):
+        data, _, rc = run_cli_json("show", "pet ants", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+
+    def test_no_exact_category_falls_through_to_task(self, org_dir):
+        # "groceries" is not a category — resolution falls through to the
+        # normal find-task path and finds the "Buy groceries" TODO task.
+        data, _, rc = run_cli_json("show", "groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "task"
+        assert data["heading"] == "Buy groceries"
+
+    # --- subtasks: plain category heading -------------------------------
+
+    def test_subtasks_full_on_plain_category(self, org_dir):
+        # `subtasks --full <category>` on a plain heading lists the direct
+        # children (with body text under --full) and returns the category
+        # envelope.
+        data, _, rc = run_cli_json("subtasks", "Pet Ants", "--full",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "subtasks"
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+        assert data["path"] == "Family/Pet Ants"
+        assert data["parent"] == "Family"
+        assert len(data["subtasks"]) == 1
+        child = data["subtasks"][0]
+        assert child["heading"] == "Buy a formicarium"
+        # --full requests body text on each child.
+        assert "body" in child
+        assert isinstance(child["body"], str)
+        assert "Messor Barbarus" in child["body"]
+
+    def test_subtasks_plain_category_text_output(self, org_dir):
+        stdout, _, rc = run_cli("subtasks", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert "Category: Pet Ants (tasks.org)" in stdout
+        assert "TODO Buy a formicarium" in stdout
+        assert "0/1 done" in stdout
+
+    def test_subtasks_ambiguous_category_error(self, org_dir):
+        data, _, rc = run_cli_json("subtasks", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert 'Multiple category matches for "Tools"' in data["error"]
+
+    def test_subtasks_nested_project_still_works(self, org_dir):
+        # Regression: `subtasks` on a TODO project (existing behavior) is
+        # unchanged — kind is not set to "category" and the JSON matches the
+        # historical shape (with `state` on the parent).
+        data, _, rc = run_cli_json("subtasks", "Prepare onboarding guide",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "subtasks"
+        # Kind is absent for the TODO-parent path (existing envelope shape).
+        assert data.get("kind") != "category"
+        assert data["state"] == "TODO"
 
 
 # ===========================================================================
@@ -7023,9 +7205,12 @@ class TestJsonErrorsOnStdout:
 
     def test_category_collision_hint_on_stdout(self, org_dir):
         """A --json substring that matches only a category heading yields the
-        add-task --category guidance in the stdout JSON object."""
+        add-task --category guidance in the stdout JSON object.  We probe
+        this through `add-subtask` (which requires a TODO parent) because
+        `show` now resolves plain category headings as first-class targets
+        instead of erroring."""
         stdout, stderr, rc = run_cli(
-            "--json", "show", "Pet Ants", org_dir=org_dir)
+            "--json", "add-subtask", "Pet Ants", "New child", org_dir=org_dir)
         assert rc == 1
         data = json.loads(stdout)
         assert "category heading, not a task" in data["hint"]
