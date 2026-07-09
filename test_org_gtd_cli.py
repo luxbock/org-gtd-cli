@@ -1166,7 +1166,7 @@ class TestSetCancelled:
         stdout, stderr, rc = run_cli(
             "set-cancelled", "Book a rental car", org_dir=org_dir)
         assert rc == 0, stderr
-        assert "NEXT -> CANCELLED (tasks.org)" in stdout
+        assert "Cancelled: Book a rental car (tasks.org)" in stdout
         assert "**** CANCELLED Book a rental car" in (
             org_dir / "tasks.org").read_text()
 
@@ -1175,6 +1175,35 @@ class TestSetCancelled:
         assert rc != 0
         assert "Multiple matches" in stderr
         assert "Use --index N to select one." in stderr
+
+    def test_set_cancelled_auto_progress(self, org_dir):
+        """Cancelling a NEXT subtask promotes the next TODO sibling to NEXT."""
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "Add more test cases", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Auto-progressed" in stdout
+        text = (org_dir / "tasks.org").read_text()
+        assert "CANCELLED Add more test cases" in text
+        assert "NEXT Test on actual project" in text
+
+    def test_set_state_cancelled_no_auto_progress(self, org_dir):
+        """set-state CANCELLED is a low-level escape hatch: no sibling promotion."""
+        stdout, stderr, rc = run_cli(
+            "set-state", "Add more test cases", "CANCELLED", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = (org_dir / "tasks.org").read_text()
+        assert "CANCELLED Add more test cases" in text
+        assert "NEXT Test on actual project" not in text
+        assert "TODO Test on actual project" in text
+
+    def test_set_cancelled_dry_run_auto_progress_preview(self, org_dir):
+        """set-cancelled --dry-run previews promotion without modifying files."""
+        before = (org_dir / "tasks.org").read_text()
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "Add more test cases", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Would auto-progress" in stdout
+        assert (org_dir / "tasks.org").read_text() == before
 
 
 # ===========================================================================
@@ -4890,10 +4919,10 @@ class TestJsonMutations:
         assert data["dry_run"] is True
 
     def test_set_cancelled_json(self, org_dir):
-        """set-cancelled delegates to set-state, should produce JSON."""
+        """set-cancelled is a high-level command with its own command name."""
         data, _, rc = run_cli_json("set-cancelled", "Buy groceries", org_dir=org_dir)
         assert rc == 0
-        assert data["command"] == "set-state"
+        assert data["command"] == "set-cancelled"
         assert data["new_state"] == "CANCELLED"
 
     def test_set_priority_json(self, org_dir):

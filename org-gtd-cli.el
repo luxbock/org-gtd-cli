@@ -2385,21 +2385,22 @@ Returns a list of message strings in printing order."
                             (setq promoted t))))))))))))))
     msgs))
 
-(defun org-gtd-cli/auto-progress-preview (rel-file)
-  "Preview auto-progress from point (task simulated as DONE).
+(defun org-gtd-cli/auto-progress-preview (rel-file &optional sim-state)
+  "Preview auto-progress from point (task simulated as SIM-STATE, default DONE).
 Returns a list of message strings in printing order."
-  (let ((msgs '()))
+  (let ((msgs '())
+        (sim (or sim-state "DONE")))
     (when (gtd/is-project-subtree-p)
       (let ((saved-pos (point))
             (has-active nil)
             (all-done t))
-        ;; Scan ALL siblings, treating saved-pos as DONE
+        ;; Scan ALL siblings, treating saved-pos as sim
         (save-excursion
           (org-up-heading-safe)
           (when (org-goto-first-child)
             (catch 'scanned
               (while t
-                (let ((s (if (= (point) saved-pos) "DONE" (org-get-todo-state))))
+                (let ((s (if (= (point) saved-pos) sim (org-get-todo-state))))
                   ;; NEXT or WAITING both count as "active" (see the real
                   ;; `org-gtd-cli/auto-progress' guard) — keep the preview honest.
                   (when (member s '("NEXT" "WAITING")) (setq has-active t))
@@ -2546,6 +2547,59 @@ Returns a list of message strings in printing order."
                  (princ (format "Done: %s (%s)\n" heading rel-file))
                  (dolist (msg auto-msgs)
                    (princ msg))))))))))
+  (kill-emacs 0))
+
+;; --- cancelled ---
+
+(defun org-gtd-cli/set-cancelled (substring &optional index dry-run)
+  "Mark a task as CANCELLED with auto-progress (mirrors set-done)."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (buf-pos (org-gtd-cli/find-task substring idx)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (old-state (org-get-todo-state)))
+         (if is-dry-run
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1)
+                    (command . "set-cancelled")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (old_state . ,old-state)
+                    (new_state . "CANCELLED")
+                    (dry_run . t)
+                    (side_effects . ,(org-gtd-cli/parse-side-effects-preview
+                                      (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
+                                      rel-file))))
+               (princ (format "Would cancel: %s (%s)\n" heading rel-file))
+               (dolist (msg (org-gtd-cli/auto-progress-preview rel-file "CANCELLED"))
+                 (princ msg)))
+           ;; Real path
+           (let ((org-inhibit-logging nil))
+             (org-todo "CANCELLED"))
+           (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
+             (save-excursion
+               (goto-char (cdr buf-pos))
+               (org-gtd-cli/reorder-siblings-by-state))
+             (save-buffer)
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/mutation-output
+                  `((version . 1)
+                    (command . "set-cancelled")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (old_state . ,old-state)
+                    (new_state . "CANCELLED")
+                    (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
+                  heading)
+               (princ (format "Cancelled: %s (%s)\n" heading rel-file))
+               (dolist (msg auto-msgs)
+                 (princ msg)))))))))
   (kill-emacs 0))
 
 (defun org-gtd-cli/parse-side-effects (msgs)
@@ -4478,9 +4532,8 @@ index in the batch array."
      (org-gtd-cli/batch--result
       idx (org-gtd-cli/batch--with-addr item t
             (org-gtd-cli/batch--delegate
-             #'org-gtd-cli/set-state
-             (org-gtd-cli/batch--addr item)
-             "CANCELLED"))))
+             #'org-gtd-cli/set-cancelled
+             (org-gtd-cli/batch--addr item)))))
 
     ("set-next"
      (org-gtd-cli/batch--result
