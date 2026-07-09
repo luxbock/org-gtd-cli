@@ -2729,7 +2729,9 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
              (org-todo new-state))
            (when (and reason (not (string-empty-p reason)))
              (org-gtd-cli/add-state-reason-note new-state old-state reason))
-           (org-gtd-cli/reorder-siblings-by-state)
+           (unless (and (equal new-state "WAITING")
+                        (member old-state '("TODO" "NEXT")))
+             (org-gtd-cli/reorder-siblings-by-state))
            (save-buffer)
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
