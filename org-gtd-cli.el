@@ -2814,42 +2814,81 @@ Returns a list of message strings in printing order."
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
               (old-state (org-get-todo-state)))
          (if is-dry-run
-             (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
-                  `((version . 1)
-                    (command . "set-cancelled")
-                    (heading . ,heading)
-                    (file . ,rel-file)
-                    (old_state . ,old-state)
-                    (new_state . "CANCELLED")
-                    (dry_run . t)
-                    (side_effects . ,(org-gtd-cli/parse-side-effects-preview
-                                      (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
-                                      rel-file))))
-               (princ (format "Would cancel: %s (%s)\n" heading rel-file))
-               (dolist (msg (org-gtd-cli/auto-progress-preview rel-file "CANCELLED"))
-                 (princ msg)))
+             (if (org-entry-blocked-p)
+                 (let ((blocker (and (boundp 'org-block-entry-blocking)
+                                     (stringp org-block-entry-blocking)
+                                     org-block-entry-blocking)))
+                   (if org-gtd-cli/json-mode
+                       (org-gtd-cli/output
+                        `((error . ,(format "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask" heading))
+                          (hint . ,(if blocker
+                                       (format "Complete or cancel \"%s\" first, then retry." blocker)
+                                     "Complete or cancel its open subtasks first, then retry."))
+                          (dry_run . t)
+                          (exit_code . 1)))
+                     (if blocker
+                         (org-gtd-cli/error
+                          "Would be blocked: cannot mark \"%s\" CANCELLED — blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
+                          heading blocker)
+                       (org-gtd-cli/error
+                        "Would be blocked: cannot mark \"%s\" CANCELLED — blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
+                        heading)))
+                   (kill-emacs 1))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-cancelled")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_state . ,old-state)
+                      (new_state . "CANCELLED")
+                      (dry_run . t)
+                      (side_effects . ,(org-gtd-cli/parse-side-effects-preview
+                                        (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
+                                        rel-file))))
+                 (princ (format "Would cancel: %s (%s)\n" heading rel-file))
+                 (dolist (msg (org-gtd-cli/auto-progress-preview rel-file "CANCELLED"))
+                   (princ msg))))
            ;; Real path
            (let ((org-inhibit-logging nil))
              (org-todo "CANCELLED"))
-           (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
-             (save-excursion
-               (goto-char (cdr buf-pos))
-               (org-gtd-cli/reorder-siblings-by-state))
-             (save-buffer)
-             (if org-gtd-cli/json-mode
-                 (org-gtd-cli/mutation-output
-                  `((version . 1)
-                    (command . "set-cancelled")
-                    (heading . ,heading)
-                    (file . ,rel-file)
-                    (old_state . ,old-state)
-                    (new_state . "CANCELLED")
-                    (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
-                  heading)
-               (princ (format "Cancelled: %s (%s)\n" heading rel-file))
-               (dolist (msg auto-msgs)
-                 (princ msg)))))))))
+           (if (not (equal (org-get-todo-state) "CANCELLED"))
+               (let ((blocker (and (boundp 'org-block-entry-blocking)
+                                   (stringp org-block-entry-blocking)
+                                   org-block-entry-blocking)))
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/output
+                      `((error . ,(format "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask" heading))
+                        (hint . ,(if blocker
+                                     (format "Complete or cancel \"%s\" first, then retry." blocker)
+                                   "Complete or cancel its open subtasks first, then retry."))
+                        (exit_code . 1)))
+                   (if blocker
+                       (org-gtd-cli/error
+                        "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
+                        heading blocker)
+                     (org-gtd-cli/error
+                      "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
+                      heading)))
+                 (kill-emacs 1))
+             (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
+               (save-excursion
+                 (goto-char (cdr buf-pos))
+                 (org-gtd-cli/reorder-siblings-by-state))
+               (save-buffer)
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/mutation-output
+                    `((version . 1)
+                      (command . "set-cancelled")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_state . ,old-state)
+                      (new_state . "CANCELLED")
+                      (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
+                    heading)
+                 (princ (format "Cancelled: %s (%s)\n" heading rel-file))
+                 (dolist (msg auto-msgs)
+                   (princ msg))))))))))
   (kill-emacs 0))
 
 (defun org-gtd-cli/parse-side-effects (msgs)
@@ -3272,10 +3311,13 @@ siblings by state (DONE > NEXT > TODO > WAITING > DEFER)."
             (child-level (1+ parent-level))
             (subtree-end (save-excursion (org-end-of-subtree t) (point)))
             (moved-pos nil))
-       ;; Locate the moved subtree among the target's direct children.
+       ;; Locate the moved subtree among the target's direct children.  Org
+       ;; appends the refiled subtree, so when duplicate headings exist the
+       ;; just-moved child is the last direct child with this heading, not the
+       ;; first one already present in the destination.
        (save-excursion
          (forward-line 1)
-         (while (and (not moved-pos) (< (point) subtree-end)
+         (while (and (< (point) subtree-end)
                      (re-search-forward org-heading-regexp subtree-end t))
            (when (and (= (org-current-level) child-level)
                       (string= (org-get-heading t t t t) moved-heading))

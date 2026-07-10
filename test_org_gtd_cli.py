@@ -1387,6 +1387,34 @@ class TestSetCancelled:
         assert "Would auto-progress" in stdout
         assert (org_dir / "tasks.org").read_text() == before
 
+    def test_blocked_parent_does_not_cancel_or_auto_progress(self, org_dir):
+        """Blocked project cancellation must fail without side effects."""
+        data, stderr, rc = run_cli_json(
+            "set-cancelled", "Prepare onboarding guide", org_dir=org_dir)
+        assert rc != 0
+        assert data is not None
+        assert "blocked by an incomplete subtask" in data["error"]
+        assert "Prepare onboarding guide" in data["error"]
+        text = (org_dir / "tasks.org").read_text()
+        assert "** TODO Prepare onboarding guide" in text
+        assert "** CANCELLED Prepare onboarding guide" not in text
+        assert "NEXT Draft outline" not in text
+        assert "NEXT Write first chapter" not in text
+        assert "*** TODO Draft outline" in text
+        assert "*** TODO Write first chapter" in text
+
+    def test_blocked_parent_dry_run_reports_blocked(self, org_dir):
+        """Dry-run cancellation of a blocked project must report failure."""
+        before = (org_dir / "tasks.org").read_text()
+        data, stderr, rc = run_cli_json(
+            "set-cancelled", "Prepare onboarding guide", "--dry-run",
+            org_dir=org_dir)
+        assert rc != 0
+        assert data is not None
+        assert "blocked by an incomplete subtask" in data["error"]
+        assert data.get("dry_run") is True
+        assert (org_dir / "tasks.org").read_text() == before
+
 
 # ===========================================================================
 # 15. set-priority
@@ -3286,6 +3314,27 @@ class TestRefileInvariants:
         # Moved NEXT demoted
         assert "TODO Move me" in text
         assert "NEXT Move me" not in text
+
+    def test_duplicate_heading_refile_demotes_moved_task_not_existing(self, org_dir):
+        # Duplicate headings are disambiguated by --index. The refile repair
+        # must operate on the just-moved duplicate, not the first same-named
+        # child already present in the destination.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Move me
+** TODO Alpha
+* TODO Project B
+** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", "--index", "2",
+            org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "** NEXT Move me" in text
+        assert "** TODO Move me" in text
+        assert "* TODO Project B\n** NEXT Move me" not in text
+        assert_line_before(org_dir / "refile.org", "NEXT Move me", "TODO Move me")
 
     def test_moved_next_into_project_without_next_keeps_state(self, org_dir):
         # No sibling NEXT — moved NEXT stays NEXT, and reordering places
