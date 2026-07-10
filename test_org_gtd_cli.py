@@ -5314,6 +5314,20 @@ class TestJsonMutations:
         assert task["id"] == disk_id
         assert task["properties"]["ID"] == disk_id
 
+    def test_add_subtask_json_duplicate_title_returns_new_task(self, org_dir):
+        title = "Buy groceries"
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", title,
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        assert "task" in data
+        task = data["task"]
+        assert task["heading"] == title
+        assert task["parent"] == "Write quarterly report"
+        assert task["id"] is not None
+        assert _id_under(org_dir / "tasks.org", title) == task["id"]
+
     def test_add_event_json(self, org_dir):
         data, _, rc = run_cli_json(
             "add-event", "Doctor visit", "--date", "2026-04-15",

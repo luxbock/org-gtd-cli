@@ -2268,14 +2268,15 @@ any state (including DONE) and plain category/note headings."
          ;; Go to end of subtree
          (org-end-of-subtree t)
          (unless (bolp) (insert "\n"))
-         (let ((child-pos (point)))
+         (let ((child-pos (point))
+               (child-id nil))
            (insert (org-gtd-cli/build-entry
                     child-level todo-state title
                     priority tags-csv schedule deadline body)
                    "\n")
            (save-excursion
              (goto-char child-pos)
-             (org-id-get-create))
+             (setq child-id (org-id-get-create)))
          ;; Remove orphaned blank lines at insertion point
            (while (and (not (eobp)) (looking-at-p "\n"))
              (delete-char 1))
@@ -2299,7 +2300,7 @@ any state (including DONE) and plain category/note headings."
                                                  (old_state . "NEXT")
                                                  (new_state . "TODO")))
                                      [])))
-                title)
+                (org-gtd-cli/find-task-by-id child-id))
              (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
                             title parent-heading rel-file))))))))
   (kill-emacs 0))
