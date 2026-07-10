@@ -187,24 +187,17 @@ Each invocation starts Emacs. For latency-sensitive use, set
 ```sh
 nix flake check          # runs the pytest suite
 # or directly:
-python3 -m pytest test_org_gtd_cli.py -q -n 4
+nix develop --command env ORG_GTD_CLI_DAEMON=0 \
+  python3 -m pytest test_org_gtd_cli.py -q -n 4
 ```
 
 The `render-file` src-highlighting test asserts `htmlize`'s `org-*` CSS face
 classes, so it needs an Emacs with `htmlize` on its load-path (the Nix package
-and `passthru.tests` provision this automatically). Running the suite against a
-plain `emacs` (no htmlize) is fine — that one assertion self-skips. To run
-directly with htmlize present:
-
-```sh
-nix shell --impure --expr \
-  'with import <nixpkgs> {}; [
-     (python3.withPackages (ps: [ps.pytest ps.pytest-xdist]))
-     (emacs-nox.pkgs.withPackages (e: [e.htmlize]))
-   ]' \
-  --command env ORG_GTD_CLI_DAEMON=0 \
-  python3 -m pytest test_org_gtd_cli.py -q -n 4
-```
+and `passthru.tests` provision this automatically). The default dev shell uses
+the same test inputs, including Python, pytest, pytest-xdist, procps, and Emacs
+with `htmlize`, so direct test runs do not need an ad-hoc `nix shell`.
+Running the suite against a plain `emacs` (no htmlize) is fine — that one
+assertion self-skips.
 
 ### Testing an uncommitted working copy
 
@@ -214,8 +207,9 @@ silently test the *wrong* code if you let them:
 - **`nix flake check` builds committed sources only.** The flake sees
   git-tracked, committed files, so it goes green while ignoring your working-tree
   edits to `org-gtd-cli.py` / `org-gtd-cli.el` / `+gtd-core.el`. To exercise
-  uncommitted changes, run `pytest` directly (as above): the suite points
-  `ORG_GTD_CORE_FILE` / `ORG_GTD_ELISP_FILE` at the checkout's own `.el` files.
+  uncommitted changes, run `pytest` through `nix develop` (as above): the suite
+  points `ORG_GTD_CORE_FILE` / `ORG_GTD_ELISP_FILE` at the checkout's own `.el`
+  files.
 
 - **Prefer `ORG_GTD_CLI_DAEMON=0` for direct test runs.** Daemon mode now scopes
   sockets by resolved `ORG_DIRECTORY` and loaded core/elisp file identity, so
