@@ -983,15 +983,14 @@ class TestShowSubtasksCategoryLookup:
         assert 'Multiple category matches for "Tools"' in data["error"]
 
     def test_subtasks_nested_project_still_works(self, org_dir):
-        # Regression: `subtasks` on a TODO project (existing behavior) is
-        # unchanged — kind is not set to "category" and the JSON matches the
-        # historical shape (with `state` on the parent).
+        # Regression: `subtasks` on a TODO project (existing behavior) keeps
+        # the historical task-parent envelope, now explicitly tagged as a task
+        # so callers can branch uniformly against category subtasks.
         data, _, rc = run_cli_json("subtasks", "Prepare onboarding guide",
                                    org_dir=org_dir)
         assert rc == 0
         assert data["command"] == "subtasks"
-        # Kind is absent for the TODO-parent path (existing envelope shape).
-        assert data.get("kind") != "category"
+        assert data["kind"] == "task"
         assert data["state"] == "TODO"
 
 

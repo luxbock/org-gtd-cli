@@ -1577,6 +1577,7 @@ ID is the parent heading's own org :ID: (or nil)."
     (org-gtd-cli/output
      `((version . 1)
        (command . "subtasks")
+       (kind . "task")
        (heading . ,heading)
        (state . ,(or state :null))
        (id . ,(or id :null))
