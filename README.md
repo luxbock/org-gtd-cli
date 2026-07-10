@@ -68,6 +68,32 @@ project, use `add-subtask PARENT_SUBSTR TITLE`.
 Run `org-gtd-cli <command> -h` for per-command options, or `org-gtd-cli -h`
 for the full list.
 
+### Category headings are first-class in `show` and `subtasks`
+
+Plain (no-TODO) organizational headings — the ones `categories` lists — are
+directly addressable by `show` and `subtasks`. If the argument exactly matches
+one such leaf name (case-insensitive; `Parent/Leaf` disambiguates between
+namesakes like `Computers/Tools` and `Research/Tools`), the command returns
+the category's metadata and its direct children. Otherwise resolution falls
+through to the normal substring lookup over TODO-keyword entries, so existing
+task addressing and ambiguity handling are unchanged.
+
+Under `--json` the two shapes are distinguished by a `kind` field:
+
+- `kind: "task"` — the existing task envelope for TODO/NEXT/WAITING/DEFER/DONE/
+  CANCELLED entries (`show`: full body + sessions + subtasks; `subtasks`: the
+  parent's state + direct children).
+- `kind: "category"` — a subtasks-shaped envelope: `heading`, `path`,
+  `parent`, `file`, `id`, `tags`, `progress` (`{done, total}` over children
+  carrying a TODO keyword — `null` when no children have one), and `subtasks`
+  (direct children, each with `heading`/`state`/`priority`/`tags`/`id`/
+  `scheduled`/`deadline`/`is_project`). `subtasks --full <category>` also
+  emits each child's `body`.
+
+Multiple category leaves sharing a name (e.g. `Tools` under both `Computers`
+and `Research`) yield a deterministic multi-match error listing the paths;
+retry with `Parent/Leaf` to select one.
+
 ### render-file — server-side org→HTML for view-only docs
 
 ```sh

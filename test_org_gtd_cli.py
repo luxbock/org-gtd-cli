@@ -457,17 +457,16 @@ class TestFindTaskCategoryHint:
         assert err["hint"] == "Try a shorter substring, or use 'search' for partial matches."
         assert "add-task --category" not in err["hint"]
 
-    def test_show_category_substring_gets_hint_too(self, org_dir):
-        # find-task is shared, so `show` gets the category-aware hint as well
-        stdout, stderr, rc = run_cli("--json", "show", "Holiday Trip", org_dir=org_dir)
+    def test_add_subtask_category_ambiguous_hint(self, org_dir):
+        # add-subtask still surfaces the category-aware no-match hint, and
+        # ambiguous categories ("Tools" matches both Computers/Tools and
+        # Research/Tools) still explain to the user how to disambiguate.
+        stdout, stderr, rc = run_cli(
+            "--json", "add-subtask", "Tools", "New child", org_dir=org_dir)
         assert rc == 1
         err = self._json_error(stdout)
-        assert 'No task found matching "Holiday Trip"' in err["error"]
-        assert "category heading, not a task" in err["hint"]
-        assert 'add-task --category "Travel/Holiday Trip"' in err["hint"]
-        # The add-task --category guidance is now in the stdout JSON object.
-        assert "add-task --category" in stdout
-        assert stderr.find('No task found matching') == -1
+        assert 'No task found matching "Tools"' in err["error"]
+        assert "category headings, not tasks" in err["hint"]
 
 
 # ===========================================================================
@@ -811,6 +810,188 @@ class TestCategories:
         stdout, stderr, rc = run_cli("categories", "--file", "nonexistent.org", org_dir=org_dir)
         assert rc == 1
         assert "File not found" in stderr
+
+
+# ===========================================================================
+# 10b. show / subtasks: plain category heading as first-class lookup target (#23)
+# ===========================================================================
+
+class TestShowSubtasksCategoryLookup:
+    """Plain (no-TODO) category headings resolve as first-class lookup targets
+    for `show` and `subtasks`.  Exact leaf-name match (case-insensitive; slash
+    paths disambiguate) wins over substring task matching, so an organizational
+    container like ``review-bot`` — or any of the fixture's plain headings
+    (``Pet Ants``, ``Holiday Trip``, ``Computers/Agents``) — is directly
+    addressable.  On category resolution the envelope carries
+    ``kind: "category"`` and mirrors the ``subtasks`` shape (metadata + direct
+    children + progress).  Task envelopes gain ``kind: "task"``."""
+
+    # --- show: single-match plain category -------------------------------
+
+    def test_show_plain_category_returns_category_envelope_json(self, org_dir):
+        # "Pet Ants" is a plain heading (** Pet Ants) with one TODO child in
+        # the fixture. `show` used to fail with "No task found" because
+        # find-task only matched TODO-bearing headings; category lookup makes
+        # it resolvable in one call.
+        data, _, rc = run_cli_json("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "show"
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+        assert data["path"] == "Family/Pet Ants"
+        assert data["parent"] == "Family"
+        assert data["file"] == "tasks.org"
+        # Subtasks list mirrors the `subtasks` command shape.
+        assert isinstance(data["subtasks"], list)
+        assert len(data["subtasks"]) == 1
+        child = data["subtasks"][0]
+        assert child["heading"] == "Buy a formicarium"
+        assert child["state"] == "TODO"
+        assert child["is_project"] is True
+        # Progress counts children carrying a TODO keyword.
+        assert data["progress"] == {"done": 0, "total": 1}
+
+    def test_show_plain_category_text_output(self, org_dir):
+        stdout, _, rc = run_cli("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert "(tasks.org)" in stdout
+        assert "Category: Pet Ants" in stdout
+        assert "TODO Buy a formicarium" in stdout
+        assert "0/1 done" in stdout
+
+    def test_show_deep_category_holiday_trip(self, org_dir):
+        # "Holiday Trip" is a plain heading (** Holiday Trip) with a nested
+        # TODO project under it — the direct child is itself a project.
+        data, _, rc = run_cli_json("show", "Holiday Trip", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["heading"] == "Holiday Trip"
+        assert data["path"] == "Travel/Holiday Trip"
+        # One TODO direct child ("Holiday pre-trip tasks"), which is itself a
+        # project (has TODO children).
+        headings = [c["heading"] for c in data["subtasks"]]
+        assert "Holiday pre-trip tasks" in headings
+        assert data["subtasks"][0]["is_project"] is True
+
+    def test_show_plain_category_kind_is_category(self, org_dir):
+        # The `kind` field is the canonical way to distinguish envelope shape:
+        # `category` vs `task`.
+        cat, _, rc = run_cli_json("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert cat["kind"] == "category"
+        # Category envelope has no `body`/`sessions` (those are task-only).
+        assert "body" not in cat
+        assert "sessions" not in cat
+
+    def test_show_task_envelope_carries_kind_task(self, org_dir):
+        # The task envelope gained a `kind` field so consumers of `show --json`
+        # can uniformly branch on shape.
+        data, _, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "task"
+
+    # --- ambiguity: exact category match wins over substring task --------
+
+    def test_exact_category_match_beats_substring_task(self, org_dir):
+        # Add a TODO task whose heading contains "Pet Ants" as a substring.
+        # Before this change `show "Pet Ants"` would either fail or match the
+        # substring task; after, the exact plain-heading match wins.
+        _, _, rc = run_cli("add-task", "Track Pet Ants growth weekly",
+                           org_dir=org_dir)
+        assert rc == 0
+        data, _, rc = run_cli_json("show", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+        # And the substring task is still reachable by its own substring.
+        task, _, rc = run_cli_json("show", "Track Pet Ants growth",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert task["kind"] == "task"
+        assert task["heading"] == "Track Pet Ants growth weekly"
+
+    def test_ambiguous_category_returns_deterministic_error(self, org_dir):
+        # Two plain headings share the leaf name "Tools" (Computers/Tools and
+        # Research/Tools).  `show Tools` reports both with a structured error
+        # so the caller can pick a path.
+        data, _, rc = run_cli_json("show", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert 'Multiple category matches for "Tools"' in data["error"]
+        paths = [m["path"] for m in data["matches"]]
+        assert "Computers/Tools" in paths
+        assert "Research/Tools" in paths
+        assert "Parent/Category" in data["hint"]
+
+    def test_category_path_disambiguates(self, org_dir):
+        # Slash path selects one of the ambiguous leaves.
+        data, _, rc = run_cli_json("show", "Computers/Tools", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["path"] == "Computers/Tools"
+        assert data["parent"] == "Computers"
+        headings = {c["heading"] for c in data["subtasks"]}
+        assert "Fix the =find= command in org-gtd-cli" in headings
+
+    def test_category_lookup_case_insensitive(self, org_dir):
+        data, _, rc = run_cli_json("show", "pet ants", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+
+    def test_no_exact_category_falls_through_to_task(self, org_dir):
+        # "groceries" is not a category — resolution falls through to the
+        # normal find-task path and finds the "Buy groceries" TODO task.
+        data, _, rc = run_cli_json("show", "groceries", org_dir=org_dir)
+        assert rc == 0
+        assert data["kind"] == "task"
+        assert data["heading"] == "Buy groceries"
+
+    # --- subtasks: plain category heading -------------------------------
+
+    def test_subtasks_full_on_plain_category(self, org_dir):
+        # `subtasks --full <category>` on a plain heading lists the direct
+        # children (with body text under --full) and returns the category
+        # envelope.
+        data, _, rc = run_cli_json("subtasks", "Pet Ants", "--full",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert data["version"] == 1
+        assert data["command"] == "subtasks"
+        assert data["kind"] == "category"
+        assert data["heading"] == "Pet Ants"
+        assert data["path"] == "Family/Pet Ants"
+        assert data["parent"] == "Family"
+        assert len(data["subtasks"]) == 1
+        child = data["subtasks"][0]
+        assert child["heading"] == "Buy a formicarium"
+        # --full requests body text on each child.
+        assert "body" in child
+        assert isinstance(child["body"], str)
+        assert "Messor Barbarus" in child["body"]
+
+    def test_subtasks_plain_category_text_output(self, org_dir):
+        stdout, _, rc = run_cli("subtasks", "Pet Ants", org_dir=org_dir)
+        assert rc == 0
+        assert "Category: Pet Ants (tasks.org)" in stdout
+        assert "TODO Buy a formicarium" in stdout
+        assert "0/1 done" in stdout
+
+    def test_subtasks_ambiguous_category_error(self, org_dir):
+        data, _, rc = run_cli_json("subtasks", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert 'Multiple category matches for "Tools"' in data["error"]
+
+    def test_subtasks_nested_project_still_works(self, org_dir):
+        # Regression: `subtasks` on a TODO project (existing behavior) keeps
+        # the historical task-parent envelope, now explicitly tagged as a task
+        # so callers can branch uniformly against category subtasks.
+        data, _, rc = run_cli_json("subtasks", "Prepare onboarding guide",
+                                   org_dir=org_dir)
+        assert rc == 0
+        assert data["command"] == "subtasks"
+        assert data["kind"] == "task"
+        assert data["state"] == "TODO"
 
 
 # ===========================================================================
@@ -1166,7 +1347,7 @@ class TestSetCancelled:
         stdout, stderr, rc = run_cli(
             "set-cancelled", "Book a rental car", org_dir=org_dir)
         assert rc == 0, stderr
-        assert "NEXT -> CANCELLED (tasks.org)" in stdout
+        assert "Cancelled: Book a rental car (tasks.org)" in stdout
         assert "**** CANCELLED Book a rental car" in (
             org_dir / "tasks.org").read_text()
 
@@ -1175,6 +1356,63 @@ class TestSetCancelled:
         assert rc != 0
         assert "Multiple matches" in stderr
         assert "Use --index N to select one." in stderr
+
+    def test_set_cancelled_auto_progress(self, org_dir):
+        """Cancelling a NEXT subtask promotes the next TODO sibling to NEXT."""
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "Add more test cases", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Auto-progressed" in stdout
+        text = (org_dir / "tasks.org").read_text()
+        assert "CANCELLED Add more test cases" in text
+        assert "NEXT Test on actual project" in text
+
+    def test_set_state_cancelled_no_auto_progress(self, org_dir):
+        """set-state CANCELLED is a low-level escape hatch: no sibling promotion."""
+        stdout, stderr, rc = run_cli(
+            "set-state", "Add more test cases", "CANCELLED", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = (org_dir / "tasks.org").read_text()
+        assert "CANCELLED Add more test cases" in text
+        assert "NEXT Test on actual project" not in text
+        assert "TODO Test on actual project" in text
+
+    def test_set_cancelled_dry_run_auto_progress_preview(self, org_dir):
+        """set-cancelled --dry-run previews promotion without modifying files."""
+        before = (org_dir / "tasks.org").read_text()
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "Add more test cases", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Would auto-progress" in stdout
+        assert (org_dir / "tasks.org").read_text() == before
+
+    def test_blocked_parent_does_not_cancel_or_auto_progress(self, org_dir):
+        """Blocked project cancellation must fail without side effects."""
+        data, stderr, rc = run_cli_json(
+            "set-cancelled", "Prepare onboarding guide", org_dir=org_dir)
+        assert rc != 0
+        assert data is not None
+        assert "blocked by an incomplete subtask" in data["error"]
+        assert "Prepare onboarding guide" in data["error"]
+        text = (org_dir / "tasks.org").read_text()
+        assert "** TODO Prepare onboarding guide" in text
+        assert "** CANCELLED Prepare onboarding guide" not in text
+        assert "NEXT Draft outline" not in text
+        assert "NEXT Write first chapter" not in text
+        assert "*** TODO Draft outline" in text
+        assert "*** TODO Write first chapter" in text
+
+    def test_blocked_parent_dry_run_reports_blocked(self, org_dir):
+        """Dry-run cancellation of a blocked project must report failure."""
+        before = (org_dir / "tasks.org").read_text()
+        data, stderr, rc = run_cli_json(
+            "set-cancelled", "Prepare onboarding guide", "--dry-run",
+            org_dir=org_dir)
+        assert rc != 0
+        assert data is not None
+        assert "blocked by an incomplete subtask" in data["error"]
+        assert data.get("dry_run") is True
+        assert (org_dir / "tasks.org").read_text() == before
 
 
 # ===========================================================================
@@ -2900,6 +3138,315 @@ class TestSiblingReordering:
 
 
 # ===========================================================================
+# 39b. add-subtask: state-aware sibling reorder (Issue #20)
+# ===========================================================================
+
+class TestAddSubtaskStateReorder:
+    def _write_reorder_org(self, org_dir, content):
+        (org_dir / "reorder.org").write_text(content)
+
+    def test_add_next_reorders_above_todo(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project N1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N1", "Gate",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "NEXT Gate", "TODO Alpha")
+        assert_line_before(f, "NEXT Gate", "TODO Beta")
+
+    def test_add_next_reorders_between_done_and_todo(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project N2
+** DONE Old work
+** TODO Alpha
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N2", "Gate",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "DONE Old work", "NEXT Gate")
+        assert_line_before(f, "NEXT Gate", "TODO Alpha")
+
+    def test_add_done_reorders_above_next(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project D1
+** NEXT Active
+** TODO Alpha
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project D1", "Archive item",
+            "--state", "DONE", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "DONE Archive item", "NEXT Active")
+        assert_line_before(f, "NEXT Active", "TODO Alpha")
+
+    def test_add_cancelled_reorders_above_todo(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project C1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project C1", "Aborted item",
+            "--state", "CANCELLED", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "CANCELLED Aborted item", "TODO Alpha")
+
+    def test_add_waiting_preserves_end_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project W1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project W1", "Hold item",
+            "--state", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        # WAITING must appear after existing TODO siblings — reorder MUST
+        # NOT bubble it above them (the WAITING position invariant, see
+        # 3f0802b).
+        assert_line_before(f, "TODO Alpha", "WAITING Hold item")
+        assert_line_before(f, "TODO Beta", "WAITING Hold item")
+
+    def test_add_defer_preserves_end_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project F1
+** TODO Alpha
+** TODO Beta
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project F1", "Defer item",
+            "--state", "DEFER", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "TODO Alpha", "DEFER Defer item")
+        assert_line_before(f, "TODO Beta", "DEFER Defer item")
+
+    def test_add_todo_preserves_end_position(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project T1
+** DONE Old work
+** NEXT Active
+** TODO Alpha
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project T1", "New todo", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        # Default state is TODO. It should be inserted at end, not
+        # bubbled up.
+        assert_line_before(f, "TODO Alpha", "TODO New todo")
+
+    def test_add_next_to_empty_parent(self, org_dir):
+        self._write_reorder_org(org_dir, """\
+* TODO Project N3
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N3", "First child",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert "NEXT First child" in f.read_text()
+
+    def test_add_next_with_single_child(self, org_dir):
+        # Existing single child, add NEXT — should move to top of siblings.
+        self._write_reorder_org(org_dir, """\
+* TODO Project N4
+** TODO Only child
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Project N4", "Gate",
+            "--state", "NEXT", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "reorder.org"
+        assert_line_before(f, "NEXT Gate", "TODO Only child")
+
+
+# ===========================================================================
+# 19b. refile: GTD structural invariants at destination (Issue #21)
+# ===========================================================================
+
+class TestRefileInvariants:
+    def _write(self, org_dir, name, content):
+        (org_dir / name).write_text(content)
+
+    def test_moved_next_to_category_demotes_to_todo(self, org_dir):
+        # NEXT refiled under a plain (non-TODO) category heading has no
+        # TODO ancestor, so it becomes freestanding and must demote.
+        self._write(org_dir, "refile.org", """\
+* Category
+** TODO Parent project
+*** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Category", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "TODO Move me" in text
+        assert "NEXT Move me" not in text
+
+    def test_moved_next_into_project_with_existing_next_demotes(self, org_dir):
+        # Two NEXT direct siblings under one project is invalid; the
+        # newly moved one gets demoted.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Existing active
+** TODO Alpha
+* TODO Project B
+** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        # Existing NEXT preserved
+        assert "NEXT Existing active" in text
+        # Moved NEXT demoted
+        assert "TODO Move me" in text
+        assert "NEXT Move me" not in text
+
+    def test_duplicate_heading_refile_demotes_moved_task_not_existing(self, org_dir):
+        # Duplicate headings are disambiguated by --index. The refile repair
+        # must operate on the just-moved duplicate, not the first same-named
+        # child already present in the destination.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Move me
+** TODO Alpha
+* TODO Project B
+** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", "--index", "2",
+            org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "** NEXT Move me" in text
+        assert "** TODO Move me" in text
+        assert "* TODO Project B\n** NEXT Move me" not in text
+        assert_line_before(org_dir / "refile.org", "NEXT Move me", "TODO Move me")
+
+    def test_moved_next_into_project_without_next_keeps_state(self, org_dir):
+        # No sibling NEXT — moved NEXT stays NEXT, and reordering places
+        # it above existing TODO siblings.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** TODO Alpha
+** TODO Beta
+* TODO Project B
+** NEXT Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "refile.org"
+        text = f.read_text()
+        assert "NEXT Move me" in text
+        # Should be sorted above plain TODO siblings.
+        assert_line_before(f, "NEXT Move me", "TODO Alpha")
+
+    def test_next_parent_becomes_project_demotes(self, org_dir):
+        # Refiling a TODO under a NEXT leaf turns that leaf into a
+        # project — a NEXT project is invalid, so it demotes to TODO.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Was leaf
+* TODO Project B
+** TODO Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Was leaf", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "TODO Was leaf" in text
+        assert "NEXT Was leaf" not in text
+        assert "TODO Move me" in text
+
+    def test_destination_siblings_reordered_after_refile(self, org_dir):
+        # Moved DONE should sort above NEXT/TODO siblings after refile.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Active
+** TODO Alpha
+* Category
+** DONE Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Project A", org_dir=org_dir)
+        assert rc == 0
+        f = org_dir / "refile.org"
+        text = f.read_text()
+        assert "DONE Move me" in text
+        assert_line_before(f, "DONE Move me", "NEXT Active")
+        assert_line_before(f, "NEXT Active", "TODO Alpha")
+
+    def test_category_refile_applies_invariants(self, org_dir):
+        # The --category path (find-category-matches, tasks.org only)
+        # must apply the same invariants as --to. Source: a NEXT under a
+        # project in tasks.org; target: a plain category heading in
+        # tasks.org. The moved NEXT becomes freestanding under a plain
+        # category and must demote to TODO.
+        tasks = org_dir / "tasks.org"
+        tasks.write_text("""\
+#+TITLE: Tasks
+
+* TODO Source project
+** NEXT Move me
+* Category basket
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--category", "Category basket",
+            org_dir=org_dir)
+        assert rc == 0
+        text = tasks.read_text()
+        assert "TODO Move me" in text
+        assert "NEXT Move me" not in text
+
+    def test_dry_run_still_previews_no_invariants(self, org_dir):
+        # Dry-run must not mutate anything. The source NEXT and target
+        # NEXT parent both stay unchanged.
+        self._write(org_dir, "refile.org", """\
+* TODO Project A
+** NEXT Was leaf
+* TODO Project B
+** TODO Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Was leaf",
+            "--dry-run", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "Would refile" in stdout
+        assert "NEXT Was leaf" in text
+        # Move me stays under Project B
+        assert "** TODO Move me" in text
+
+    def test_refile_empty_parent_no_reorder_needed(self, org_dir):
+        # Refile a single task under a currently-empty parent — no
+        # crash, no reorder needed.
+        self._write(org_dir, "refile.org", """\
+* Category
+** Empty Basket
+* Source
+** TODO Move me
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move me", "--to", "Empty Basket", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "refile.org").read_text()
+        assert "*** TODO Move me" in text
+
+
+# ===========================================================================
 # 40. agenda-view
 # ===========================================================================
 
@@ -4602,10 +5149,10 @@ class TestJsonMutations:
         assert data["dry_run"] is True
 
     def test_set_cancelled_json(self, org_dir):
-        """set-cancelled delegates to set-state, should produce JSON."""
+        """set-cancelled is a high-level command with its own command name."""
         data, _, rc = run_cli_json("set-cancelled", "Buy groceries", org_dir=org_dir)
         assert rc == 0
-        assert data["command"] == "set-state"
+        assert data["command"] == "set-cancelled"
         assert data["new_state"] == "CANCELLED"
 
     def test_set_priority_json(self, org_dir):
@@ -4766,6 +5313,20 @@ class TestJsonMutations:
         assert task["heading"] == title
         assert task["id"] == disk_id
         assert task["properties"]["ID"] == disk_id
+
+    def test_add_subtask_json_duplicate_title_returns_new_task(self, org_dir):
+        title = "Buy groceries"
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", title,
+            org_dir=org_dir,
+        )
+        assert rc == 0, stderr
+        assert "task" in data
+        task = data["task"]
+        assert task["heading"] == title
+        assert task["parent"] == "Write quarterly report"
+        assert task["id"] is not None
+        assert _id_under(org_dir / "tasks.org", title) == task["id"]
 
     def test_add_event_json(self, org_dir):
         data, _, rc = run_cli_json(
@@ -6706,9 +7267,12 @@ class TestJsonErrorsOnStdout:
 
     def test_category_collision_hint_on_stdout(self, org_dir):
         """A --json substring that matches only a category heading yields the
-        add-task --category guidance in the stdout JSON object."""
+        add-task --category guidance in the stdout JSON object.  We probe
+        this through `add-subtask` (which requires a TODO parent) because
+        `show` now resolves plain category headings as first-class targets
+        instead of erroring."""
         stdout, stderr, rc = run_cli(
-            "--json", "show", "Pet Ants", org_dir=org_dir)
+            "--json", "add-subtask", "Pet Ants", "New child", org_dir=org_dir)
         assert rc == 1
         data = json.loads(stdout)
         assert "category heading, not a task" in data["hint"]

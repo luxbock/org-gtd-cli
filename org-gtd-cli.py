@@ -641,8 +641,8 @@ def cmd_set_priority(args):
 def cmd_set_cancelled(args):
     if not validate_target(args):
         return 1
-    expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
-            f'"CANCELLED" {to_elisp(args.index)} '
+    expr = (f'(org-gtd-cli/set-cancelled {to_elisp(args.substr)} '
+            f'{to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)})')
     expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)

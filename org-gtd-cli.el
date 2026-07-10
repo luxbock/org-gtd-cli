@@ -1054,41 +1054,224 @@ FILE-NAME restricts search to a single file in org-directory."
 
 ;; --- show ---
 
+(defun org-gtd-cli/find-category-exact (name)
+  "Find plain (non-TODO) headings in tasks.org whose leaf heading exactly
+matches NAME (case-insensitive, markup-stripped).  NAME may contain `/'
+separators for ancestor-path disambiguation (each segment matched exactly
+against its ancestor).  Returns a list: (BUFFER POS FILE HEADING-PATH)."
+  (let* ((cat-parts (split-string name "/" t))
+         (needle (downcase (car (last cat-parts))))
+         (parents (butlast cat-parts))
+         (matches '())
+         (cat-file (expand-file-name "tasks.org" org-directory)))
+    (when (file-exists-p cat-file)
+      (with-current-buffer (find-file-noselect cat-file)
+        (org-with-wide-buffer
+         (goto-char (point-min))
+         (while (re-search-forward org-heading-regexp nil t)
+           (unless (org-get-todo-state)
+             (let* ((heading (org-get-heading t t t t))
+                    (stripped (org-gtd-cli/strip-markup heading)))
+               (when (or (string= needle (downcase heading))
+                         (string= needle (downcase stripped)))
+                 (let ((path-match t))
+                   (save-excursion
+                     (dolist (part (reverse parents))
+                       (let ((need (downcase part)))
+                         (unless (and (org-up-heading-safe)
+                                      (let ((h (org-get-heading t t t t)))
+                                        (or (string= need (downcase h))
+                                            (string= need (downcase
+                                                           (org-gtd-cli/strip-markup h))))))
+                           (setq path-match nil)))))
+                   (when path-match
+                     (push (list (current-buffer) (line-beginning-position) cat-file
+                                 (org-gtd-cli/heading-path-at-point))
+                           matches))))))))))
+    (nreverse matches)))
+
+(defun org-gtd-cli/emit-category-ambiguity (name matches)
+  "Emit a Multiple-category-matches error for NAME with MATCHES and exit 2."
+  (let ((paths (mapcar (lambda (m) (nth 3 m)) matches))
+        (hint "Use the full path (e.g. \"Parent/Category\") to disambiguate."))
+    (if org-gtd-cli/json-mode
+        (org-gtd-cli/output
+         `((error . ,(format "Multiple category matches for \"%s\"" name))
+           (matches . ,(apply #'vector
+                              (cl-loop for p in paths for i from 1
+                                       collect `((index . ,i) (path . ,p)))))
+           (hint . ,hint)))
+      (org-gtd-cli/error "Multiple category matches for \"%s\":" name)
+      (dolist (p paths)
+        (org-gtd-cli/error "  %s" p))
+      (org-gtd-cli/error "%s" hint)))
+  (kill-emacs 2))
+
+(defun org-gtd-cli/category-children-at-point (&optional include-body)
+  "Collect direct children of the plain heading at point.
+Return (CHILDREN DONE-COUNT TOTAL-COUNT), where CHILDREN is a list of
+alists in file order (still needing an `nreverse'), DONE-COUNT counts
+children whose state is in `org-done-keywords', and TOTAL-COUNT counts
+children carrying any TODO state.  When INCLUDE-BODY is non-nil, each
+child alist gains a `body' field."
+  (let* ((level (org-current-level))
+         (child-level (1+ level))
+         (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+         (children '())
+         (done-count 0)
+         (total-count 0))
+    (save-excursion
+      (forward-line 1)
+      (while (and (< (point) subtree-end)
+                  (re-search-forward org-heading-regexp subtree-end t))
+        (when (= (org-current-level) child-level)
+          (let* ((child-state (org-get-todo-state))
+                 (child-heading (org-get-heading t t t t))
+                 (child-priority (org-gtd-cli/get-explicit-priority))
+                 (child-tags (org-get-tags))
+                 (child-id (org-entry-get nil "ID"))
+                 (child-scheduled (org-entry-get nil "SCHEDULED"))
+                 (child-deadline (org-entry-get nil "DEADLINE"))
+                 (child-is-project (org-gtd-cli/has-todo-children-p))
+                 (child-body (when include-body
+                               (org-gtd-cli/get-body-at-point)))
+                 (alist `((heading . ,child-heading)
+                          (state . ,(or child-state :null))
+                          (priority . ,(or child-priority :null))
+                          (tags . ,(vconcat (mapcar #'identity child-tags)))
+                          (id . ,(or child-id :null))
+                          (scheduled . ,(or child-scheduled :null))
+                          (deadline . ,(or child-deadline :null))
+                          (is_project . ,(if child-is-project t :false)))))
+            (when child-state
+              (cl-incf total-count)
+              (when (member child-state org-done-keywords)
+                (cl-incf done-count)))
+            (when include-body
+              (setq alist (append alist `((body . ,(or child-body :null))))))
+            (push alist children)))))
+    (list children done-count total-count)))
+
+(defun org-gtd-cli/category-envelope-at-point (command &optional include-body)
+  "Build the JSON envelope for the plain (category) heading at point.
+COMMAND is the string command name to embed (\"show\" or \"subtasks\")."
+  (let* ((heading (org-get-heading t t t t))
+         (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+         (path (org-gtd-cli/heading-path-at-point))
+         (parent (save-excursion
+                   (if (org-up-heading-safe)
+                       (org-get-heading t t t t)
+                     nil)))
+         (id (org-entry-get nil "ID"))
+         (tags (org-get-tags))
+         (result (org-gtd-cli/category-children-at-point include-body))
+         (children (nth 0 result))
+         (done-count (nth 1 result))
+         (total-count (nth 2 result)))
+    `((version . 1)
+      (command . ,command)
+      (kind . "category")
+      (heading . ,heading)
+      (path . ,path)
+      (id . ,(or id :null))
+      (file . ,rel-file)
+      (parent . ,(or parent :null))
+      (tags . ,(vconcat (mapcar #'identity tags)))
+      (progress . ,(if (> total-count 0)
+                       `((done . ,done-count) (total . ,total-count))
+                     :null))
+      (subtasks . ,(apply #'vector (nreverse children))))))
+
+(defun org-gtd-cli/render-category-show (match is-plain)
+  "Render category MATCH for the `show' command.
+MATCH is (BUFFER POS FILE HEADING-PATH)."
+  (with-current-buffer (nth 0 match)
+    (org-with-wide-buffer
+     (goto-char (nth 1 match))
+     (if org-gtd-cli/json-mode
+         (org-gtd-cli/output
+          (org-gtd-cli/category-envelope-at-point "show"))
+       (let* ((rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (heading (org-get-heading t t t t))
+              (base-level (org-current-level))
+              (subtree-end (save-excursion (org-end-of-subtree t) (point))))
+         (princ (format "(%s)\n" rel-file))
+         (if is-plain
+             (progn
+               (princ (format "%s\n" heading))
+               (save-excursion
+                 (forward-line 1)
+                 (while (and (< (point) subtree-end)
+                             (re-search-forward org-heading-regexp subtree-end t))
+                   (let* ((level (org-current-level))
+                          (indent (make-string (* 2 (- level base-level)) ?\s))
+                          (h (org-get-heading t nil nil t)))
+                     (princ (format "%s%s\n" indent h))))))
+           (princ (format "Category: %s\n" heading))
+           (let* ((result (org-gtd-cli/category-children-at-point nil))
+                  (children (nreverse (nth 0 result)))
+                  (done-count (nth 1 result))
+                  (total-count (nth 2 result)))
+             (dolist (child children)
+               (let* ((state (let ((s (cdr (assq 'state child))))
+                               (if (or (null s) (eq s :null)) "-" s)))
+                      (h (cdr (assq 'heading child))))
+                 (princ (format "  %s %s\n" state h))))
+             (when (> total-count 0)
+               (princ (format "\nProgress: %d/%d done\n" done-count total-count)))))))))
+  (kill-emacs 0))
+
 (defun org-gtd-cli/show (substring &optional index plain)
-  "Show full content of a task.
+  "Show full content of a task or plain category heading.
 When PLAIN is non-nil, show only the heading hierarchy with TODO
-state and priority — no tags, body, drawers, or planning lines."
+state and priority — no tags, body, drawers, or planning lines.
+
+Plain (no-TODO) category headings in tasks.org resolve as first-class
+lookup targets: if SUBSTRING exactly matches one such heading's leaf
+name (case-insensitive; `Parent/Leaf' path form disambiguates), the
+category is returned with a subtasks-shaped envelope (kind=category).
+Otherwise resolution falls through to normal task substring lookup."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-plain (and plain (not (equal plain "nil"))
                         (not (string-empty-p plain))))
-         (buf-pos (org-gtd-cli/find-task substring idx t)))
-    (with-current-buffer (car buf-pos)
-      (org-with-wide-buffer
-       (goto-char (cdr buf-pos))
-       (if org-gtd-cli/json-mode
-           (org-gtd-cli/show-json)
-         (let* ((file (buffer-file-name))
-                (rel-file (org-gtd-cli/relative-filename file)))
-           (princ (format "(%s)\n" rel-file))
-           (if is-plain
-               (let* ((base-level (org-current-level))
-                      (subtree-end (save-excursion (org-end-of-subtree t) (point))))
-                 (while (< (point) subtree-end)
-                   (let* ((level (org-current-level))
-                          (indent (make-string (* 2 (- level base-level)) ?\s))
-                          (heading (org-get-heading t nil nil t)))
-                     (princ (format "%s%s\n" indent heading)))
-                   (unless (outline-next-heading)
-                     (goto-char subtree-end))))
-             (let* ((beg (point))
-                    (end (save-excursion (org-end-of-subtree t) (point)))
-                    ;; Strip LOGBOOK drawers (state-change history) — noise in a
-                    ;; human-readable dump, and JSON `show' already omits them.
-                    (content (org-gtd-cli/strip-logbook
-                              (buffer-substring-no-properties beg end))))
-               (princ content)
-               (princ "\n"))))))))
-  (kill-emacs 0))
+         (cat-matches (and substring
+                           (not org-gtd-cli/forced-id)
+                           (not idx)
+                           (org-gtd-cli/find-category-exact substring))))
+    (cond
+     ((and cat-matches (= (length cat-matches) 1))
+      (org-gtd-cli/render-category-show (car cat-matches) is-plain))
+     ((and cat-matches (> (length cat-matches) 1))
+      (org-gtd-cli/emit-category-ambiguity substring cat-matches))
+     (t
+      (let ((buf-pos (org-gtd-cli/find-task substring idx t)))
+        (with-current-buffer (car buf-pos)
+          (org-with-wide-buffer
+           (goto-char (cdr buf-pos))
+           (if org-gtd-cli/json-mode
+               (org-gtd-cli/show-json)
+             (let* ((file (buffer-file-name))
+                    (rel-file (org-gtd-cli/relative-filename file)))
+               (princ (format "(%s)\n" rel-file))
+               (if is-plain
+                   (let* ((base-level (org-current-level))
+                          (subtree-end (save-excursion (org-end-of-subtree t) (point))))
+                     (while (< (point) subtree-end)
+                       (let* ((level (org-current-level))
+                              (indent (make-string (* 2 (- level base-level)) ?\s))
+                              (heading (org-get-heading t nil nil t)))
+                         (princ (format "%s%s\n" indent heading)))
+                       (unless (outline-next-heading)
+                         (goto-char subtree-end))))
+                 (let* ((beg (point))
+                        (end (save-excursion (org-end-of-subtree t) (point)))
+                        ;; Strip LOGBOOK drawers (state-change history) — noise in a
+                        ;; human-readable dump, and JSON `show' already omits them.
+                        (content (org-gtd-cli/strip-logbook
+                                  (buffer-substring-no-properties beg end))))
+                   (princ content)
+                   (princ "\n"))))))))
+      (kill-emacs 0)))))
 
 (defconst org-gtd-cli/properties-exclude '("CATEGORY")
   "Standard properties to omit from the generic `properties' JSON field.
@@ -1163,7 +1346,8 @@ minus the version/command wrapper."
                     (is_project . ,(if child-is-project t :false)))
                   children)))))
     (let ((is-project (> total-count 0)))
-      `((heading . ,heading)
+      `((kind . "task")
+        (heading . ,heading)
         (state . ,(or state :null))
         (priority . ,(or priority-char :null))
         (tags . ,(vconcat (mapcar #'identity tags)))
@@ -1232,10 +1416,76 @@ field with the full task state (same schema as show --json)."
 
 ;; --- subtasks ---
 
+(defun org-gtd-cli/render-category-subtasks (match)
+  "Render category MATCH for the `subtasks' command.
+MATCH is (BUFFER POS FILE HEADING-PATH)."
+  (with-current-buffer (nth 0 match)
+    (org-with-wide-buffer
+     (goto-char (nth 1 match))
+     (if org-gtd-cli/json-mode
+         (org-gtd-cli/output
+          (org-gtd-cli/category-envelope-at-point
+           "subtasks" org-gtd-cli/full-mode))
+       (let* ((rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (heading (org-get-heading t t t t))
+              (result (org-gtd-cli/category-children-at-point
+                       org-gtd-cli/full-mode))
+              (children (nreverse (nth 0 result)))
+              (done-count (nth 1 result))
+              (total-count (nth 2 result)))
+         (princ (format "Category: %s (%s)\n" heading rel-file))
+         (dolist (child children)
+           (let* ((state (let ((s (cdr (assq 'state child))))
+                           (if (or (null s) (eq s :null)) "-" s)))
+                  (h (cdr (assq 'heading child)))
+                  (priority (let ((p (cdr (assq 'priority child))))
+                              (unless (or (eq p :null) (null p)
+                                          (string= p "B")) p)))
+                  (deadline (let ((d (cdr (assq 'deadline child))))
+                              (unless (eq d :null) d)))
+                  (scheduled (let ((s (cdr (assq 'scheduled child))))
+                               (unless (eq s :null) s)))
+                  (line (format "  %s %s (%s)" state h rel-file)))
+             (when priority (setq line (concat line " [#" priority "]")))
+             (when deadline (setq line (concat line "  D:" deadline)))
+             (when scheduled (setq line (concat line "  S:" scheduled)))
+             (princ (concat line "\n"))
+             (when org-gtd-cli/full-mode
+               (let ((body (cdr (assq 'body child))))
+                 (when (and body (not (eq body :null)))
+                   (princ (concat "      " (replace-regexp-in-string
+                                            "\n" "\n      " body)
+                                  "\n\n")))))))
+         (when (> total-count 0)
+           (princ (format "\nProgress: %d/%d done\n" done-count total-count)))))))
+  (kill-emacs 0))
+
 (defun org-gtd-cli/subtasks (substring &optional index)
-  "List subtasks of a project."
+  "List subtasks of a project or plain category heading.
+
+Plain (no-TODO) category headings in tasks.org resolve as first-class
+lookup targets: if SUBSTRING exactly matches one such heading's leaf
+name (case-insensitive; `Parent/Leaf' path form disambiguates), the
+category's direct children are returned with a category-shaped envelope
+(kind=category).  Otherwise resolution falls through to normal task
+lookup (a task parent must have subtasks)."
   (let* ((idx (org-gtd-cli/parse-index index))
-         (buf-pos (org-gtd-cli/find-task substring idx t)))
+         (cat-matches (and substring
+                           (not org-gtd-cli/forced-id)
+                           (not idx)
+                           (org-gtd-cli/find-category-exact substring))))
+    (cond
+     ((and cat-matches (= (length cat-matches) 1))
+      (org-gtd-cli/render-category-subtasks (car cat-matches)))
+     ((and cat-matches (> (length cat-matches) 1))
+      (org-gtd-cli/emit-category-ambiguity substring cat-matches))
+     (t
+      (org-gtd-cli/subtasks-task substring idx))))
+  (kill-emacs 0))
+
+(defun org-gtd-cli/subtasks-task (substring idx)
+  "Original task-parent code path for `subtasks'."
+  (let ((buf-pos (org-gtd-cli/find-task substring idx t)))
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
@@ -1327,6 +1577,7 @@ ID is the parent heading's own org :ID: (or nil)."
     (org-gtd-cli/output
      `((version . 1)
        (command . "subtasks")
+       (kind . "task")
        (heading . ,heading)
        (state . ,(or state :null))
        (id . ,(or id :null))
@@ -2017,17 +2268,26 @@ any state (including DONE) and plain category/note headings."
          ;; Go to end of subtree
          (org-end-of-subtree t)
          (unless (bolp) (insert "\n"))
-         (let ((child-pos (point)))
+         (let ((child-pos (point))
+               (child-id nil))
            (insert (org-gtd-cli/build-entry
                     child-level todo-state title
                     priority tags-csv schedule deadline body)
                    "\n")
            (save-excursion
              (goto-char child-pos)
-             (org-id-get-create))
+             (setq child-id (org-id-get-create)))
          ;; Remove orphaned blank lines at insertion point
            (while (and (not (eobp)) (looking-at-p "\n"))
              (delete-char 1))
+           ;; Reorder siblings by state when the created state sorts above
+           ;; plain TODO (NEXT or any done keyword). WAITING/DEFER/TODO
+           ;; must preserve position (WAITING invariant, see 3f0802b).
+           (when (or (string= todo-state "NEXT")
+                     (member todo-state org-done-keywords))
+             (save-excursion
+               (goto-char child-pos)
+               (org-gtd-cli/reorder-siblings-by-state)))
            (save-buffer)
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
@@ -2040,7 +2300,7 @@ any state (including DONE) and plain category/note headings."
                                                  (old_state . "NEXT")
                                                  (new_state . "TODO")))
                                      [])))
-                (cons (current-buffer) child-pos))
+                (org-gtd-cli/find-task-by-id child-id))
              (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
                             title parent-heading rel-file))))))))
   (kill-emacs 0))
@@ -2377,21 +2637,22 @@ Returns a list of message strings in printing order."
                             (setq promoted t))))))))))))))
     msgs))
 
-(defun org-gtd-cli/auto-progress-preview (rel-file)
-  "Preview auto-progress from point (task simulated as DONE).
+(defun org-gtd-cli/auto-progress-preview (rel-file &optional sim-state)
+  "Preview auto-progress from point (task simulated as SIM-STATE, default DONE).
 Returns a list of message strings in printing order."
-  (let ((msgs '()))
+  (let ((msgs '())
+        (sim (or sim-state "DONE")))
     (when (gtd/is-project-subtree-p)
       (let ((saved-pos (point))
             (has-active nil)
             (all-done t))
-        ;; Scan ALL siblings, treating saved-pos as DONE
+        ;; Scan ALL siblings, treating saved-pos as sim
         (save-excursion
           (org-up-heading-safe)
           (when (org-goto-first-child)
             (catch 'scanned
               (while t
-                (let ((s (if (= (point) saved-pos) "DONE" (org-get-todo-state))))
+                (let ((s (if (= (point) saved-pos) sim (org-get-todo-state))))
                   ;; NEXT or WAITING both count as "active" (see the real
                   ;; `org-gtd-cli/auto-progress' guard) — keep the preview honest.
                   (when (member s '("NEXT" "WAITING")) (setq has-active t))
@@ -2536,6 +2797,98 @@ Returns a list of message strings in printing order."
                       (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
                     heading)
                  (princ (format "Done: %s (%s)\n" heading rel-file))
+                 (dolist (msg auto-msgs)
+                   (princ msg))))))))))
+  (kill-emacs 0))
+
+;; --- cancelled ---
+
+(defun org-gtd-cli/set-cancelled (substring &optional index dry-run)
+  "Mark a task as CANCELLED with auto-progress (mirrors set-done)."
+  (let* ((idx (org-gtd-cli/parse-index index))
+         (is-dry-run (and dry-run (not (equal dry-run "nil"))
+                          (not (string-empty-p dry-run))))
+         (buf-pos (org-gtd-cli/find-task substring idx)))
+    (with-current-buffer (car buf-pos)
+      (org-with-wide-buffer
+       (goto-char (cdr buf-pos))
+       (let* ((heading (org-get-heading t t t t))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              (old-state (org-get-todo-state)))
+         (if is-dry-run
+             (if (org-entry-blocked-p)
+                 (let ((blocker (and (boundp 'org-block-entry-blocking)
+                                     (stringp org-block-entry-blocking)
+                                     org-block-entry-blocking)))
+                   (if org-gtd-cli/json-mode
+                       (org-gtd-cli/output
+                        `((error . ,(format "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask" heading))
+                          (hint . ,(if blocker
+                                       (format "Complete or cancel \"%s\" first, then retry." blocker)
+                                     "Complete or cancel its open subtasks first, then retry."))
+                          (dry_run . t)
+                          (exit_code . 1)))
+                     (if blocker
+                         (org-gtd-cli/error
+                          "Would be blocked: cannot mark \"%s\" CANCELLED — blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
+                          heading blocker)
+                       (org-gtd-cli/error
+                        "Would be blocked: cannot mark \"%s\" CANCELLED — blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
+                        heading)))
+                   (kill-emacs 1))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-cancelled")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_state . ,old-state)
+                      (new_state . "CANCELLED")
+                      (dry_run . t)
+                      (side_effects . ,(org-gtd-cli/parse-side-effects-preview
+                                        (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
+                                        rel-file))))
+                 (princ (format "Would cancel: %s (%s)\n" heading rel-file))
+                 (dolist (msg (org-gtd-cli/auto-progress-preview rel-file "CANCELLED"))
+                   (princ msg))))
+           ;; Real path
+           (let ((org-inhibit-logging nil))
+             (org-todo "CANCELLED"))
+           (if (not (equal (org-get-todo-state) "CANCELLED"))
+               (let ((blocker (and (boundp 'org-block-entry-blocking)
+                                   (stringp org-block-entry-blocking)
+                                   org-block-entry-blocking)))
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/output
+                      `((error . ,(format "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask" heading))
+                        (hint . ,(if blocker
+                                     (format "Complete or cancel \"%s\" first, then retry." blocker)
+                                   "Complete or cancel its open subtasks first, then retry."))
+                        (exit_code . 1)))
+                   (if blocker
+                       (org-gtd-cli/error
+                        "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
+                        heading blocker)
+                     (org-gtd-cli/error
+                      "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
+                      heading)))
+                 (kill-emacs 1))
+             (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
+               (save-excursion
+                 (goto-char (cdr buf-pos))
+                 (org-gtd-cli/reorder-siblings-by-state))
+               (save-buffer)
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/mutation-output
+                    `((version . 1)
+                      (command . "set-cancelled")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_state . ,old-state)
+                      (new_state . "CANCELLED")
+                      (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
+                    heading)
+                 (princ (format "Cancelled: %s (%s)\n" heading rel-file))
                  (dolist (msg auto-msgs)
                    (princ msg))))))))))
   (kill-emacs 0))
@@ -2917,10 +3270,23 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                         (target_file . ,rel-target) (dry_run . t)))
                    (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
                                   heading rel-target target-name rel-file)))
-               ;; Perform the refile
-               (let ((rfloc (list (org-get-heading t t t t)
-                                  target-file nil target-pos)))
-                 (org-refile nil nil rfloc))
+               ;; Perform the refile. Use a marker for target-pos so it
+               ;; tracks correctly when source and target share a buffer
+               ;; (deletion of the source subtree can shift positions).
+               (let* ((target-marker (with-current-buffer target-buf
+                                       (save-excursion
+                                         (goto-char target-pos)
+                                         (point-marker))))
+                      (rfloc (list (org-get-heading t t t t)
+                                   target-file nil target-marker)))
+                 (org-refile nil nil rfloc)
+                 ;; Restore GTD invariants at the destination: demote a moved
+                 ;; NEXT that becomes freestanding or a duplicate NEXT sibling,
+                 ;; demote a NEXT parent that has just become a project, then
+                 ;; reorder destination siblings by state.
+                 (org-gtd-cli/refile-repair-invariants
+                  target-buf (marker-position target-marker) heading)
+                 (set-marker target-marker nil))
                (save-buffer)
                (with-current-buffer target-buf (save-buffer))
                (if org-gtd-cli/json-mode
@@ -2933,6 +3299,63 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                  (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
                                 heading rel-target target-name rel-file)))))))))
     (kill-emacs 0)))
+
+(defun org-gtd-cli/refile-repair-invariants (target-buf target-pos moved-heading)
+  "Restore GTD invariants after refiling MOVED-HEADING under TARGET-POS in TARGET-BUF.
+Demotes the moved subtree to TODO when it is a NEXT that would be freestanding
+or a duplicate NEXT sibling in its new home; demotes a NEXT parent that has just
+become a project because a child was refiled under it; and reorders destination
+siblings by state (DONE > NEXT > TODO > WAITING > DEFER)."
+  (with-current-buffer target-buf
+    (org-with-wide-buffer
+     (goto-char target-pos)
+     (let* ((parent-level (org-current-level))
+            (child-level (1+ parent-level))
+            (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+            (moved-pos nil))
+       ;; Locate the moved subtree among the target's direct children.  Org
+       ;; appends the refiled subtree, so when duplicate headings exist the
+       ;; just-moved child is the last direct child with this heading, not the
+       ;; first one already present in the destination.
+       (save-excursion
+         (forward-line 1)
+         (while (and (< (point) subtree-end)
+                     (re-search-forward org-heading-regexp subtree-end t))
+           (when (and (= (org-current-level) child-level)
+                      (string= (org-get-heading t t t t) moved-heading))
+             (setq moved-pos (line-beginning-position)))))
+       (when moved-pos
+         (goto-char moved-pos)
+         (let ((moved-state (org-get-todo-state)))
+           ;; Demote moved NEXT when it becomes freestanding, or when a
+           ;; sibling NEXT already occupies the destination project.
+           (when (string= moved-state "NEXT")
+             (let ((freestanding (not (gtd/is-subproject-p)))
+                   (has-other-next nil))
+               (save-excursion
+                 (goto-char target-pos)
+                 (let ((sib-end (save-excursion (org-end-of-subtree t) (point))))
+                   (save-excursion
+                     (forward-line 1)
+                     (while (and (not has-other-next) (< (point) sib-end)
+                                 (re-search-forward org-heading-regexp sib-end t))
+                       (when (and (= (org-current-level) child-level)
+                                  (not (= (line-beginning-position) moved-pos))
+                                  (equal (org-get-todo-state) "NEXT"))
+                         (setq has-other-next t))))))
+               (when (or freestanding has-other-next)
+                 (let ((org-inhibit-logging nil))
+                   (org-todo "TODO")))))
+           ;; Reorder destination siblings using the standard rank.
+           (org-gtd-cli/reorder-siblings-by-state)))
+       ;; Demote target parent from NEXT to TODO when it just gained a
+       ;; TODO-keyword child (a NEXT that becomes a project must be TODO).
+       (save-excursion
+         (goto-char target-pos)
+         (when (and (equal (org-get-todo-state) "NEXT")
+                    (org-gtd-cli/has-todo-children-p))
+           (let ((org-inhibit-logging nil))
+             (org-todo "TODO"))))))))
 
 ;; --- set-next ---
 
@@ -4403,9 +4826,8 @@ index in the batch array."
      (org-gtd-cli/batch--result
       idx (org-gtd-cli/batch--with-addr item t
             (org-gtd-cli/batch--delegate
-             #'org-gtd-cli/set-state
-             (org-gtd-cli/batch--addr item)
-             "CANCELLED"))))
+             #'org-gtd-cli/set-cancelled
+             (org-gtd-cli/batch--addr item)))))
 
     ("set-next"
      (org-gtd-cli/batch--result
