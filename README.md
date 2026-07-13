@@ -94,6 +94,27 @@ Multiple category leaves sharing a name (e.g. `Tools` under both `Computers`
 and `Research`) yield a deterministic multi-match error listing the paths;
 retry with `Parent/Leaf` to select one.
 
+### Stable read identity (`read_id`) — joining `outline` and `agenda-view`
+
+Both `outline` (per node) and `agenda-view` (per task row) emit a `read_id`
+and a `read_id_kind`, a **non-mutating** join key so a consumer (e.g. a
+dashboard) can correlate the two reads for the same source heading — including
+id-less, duplicate calendar headings that carry no Org `:ID:`. Reads never
+write identities into files. The value is chosen from the first tier that
+applies:
+
+| `read_id_kind` | `read_id` value | Stability |
+|----------------|-----------------|-----------|
+| `org-id`   | the heading's own Org `:ID:` (equals the `id` field) | authoritative; stable across any edit/reordering |
+| `entry-id` | the org-gcal `:entry-id:` (a Google Calendar event id) | stable across any edit/reordering |
+| `locator`  | `loc:<digest>` over `(file, outline-path, occurrence-index)` | stable across repeated reads and edits that do not rename the heading, move it under a different parent, or add/remove an earlier same-path duplicate |
+
+`read_id` is always present (never null). Duplicate id-less headings receive
+distinct `locator` identities via their occurrence index, and the same source
+heading produces the same `read_id` from both commands. Prefer the `org-id`
+and `entry-id` tiers; treat `locator` as best-effort and consult
+`read_id_kind` before relying on cross-edit stability.
+
 ### render-file — server-side org→HTML for view-only docs
 
 ```sh

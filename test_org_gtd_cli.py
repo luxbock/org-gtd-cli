@@ -7747,6 +7747,137 @@ class TestOutlineEvents:
         assert node["body"] == "<2026-03-14 Sat 10:00-11:00>"
 
 
+READ_ID_SRC = FIXTURES_DIR / "read-id" / "entries.org"
+
+
+def _install_read_id_fixture(org_dir, rel="entries.org"):
+    """Copy the read-identity fixture into ORG_DIR at REL.
+
+    The fixture lives at fixtures/read-id/entries.org and is deliberately NOT
+    under the top-level `org_dir` glob (non-recursive), so it never pollutes
+    other tests' org-directory. Returns the destination Path.
+    """
+    dest = org_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(READ_ID_SRC, dest)
+    dest.chmod(0o644)
+    return dest
+
+
+class TestReadIdentity:
+    """Stable read identity (`read_id` / `read_id_kind`) surfaced identically
+    by `outline` and `agenda-view`, so a dashboard can join the two reads for
+    the same source heading — including id-less, duplicate calendar headings
+    (issue #29). Tiers, in priority order: org-id, entry-id, locator."""
+
+    def _outline_nodes(self, org_dir):
+        """Flattened list of every outline node for the read-id fixture."""
+        data, stderr, rc = run_cli_json(
+            "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        out = []
+
+        def walk(nodes):
+            for n in nodes:
+                out.append(n)
+                walk(n.get("children", []))
+
+        walk(data["nodes"])
+        return out
+
+    def test_locator_distinguishes_duplicate_idless_headings(self, org_dir):
+        """Two identical id-less headings get two distinct locator identities."""
+        _install_read_id_fixture(org_dir)
+        chores = [n for n in self._outline_nodes(org_dir)
+                  if n["heading"] == "Recurring Chore"]
+        assert len(chores) == 2
+        assert all(n["read_id_kind"] == "locator" for n in chores)
+        ids = {n["read_id"] for n in chores}
+        assert len(ids) == 2, "duplicate headings must not collide"
+        assert all(r.startswith("loc:") for r in ids)
+
+    def test_entry_id_tier(self, org_dir):
+        """Id-less headings carrying an org-gcal :entry-id: use it as identity,
+        distinguishing same-text calendar events by their event id."""
+        books = None
+        _install_read_id_fixture(org_dir)
+        books = [n for n in self._outline_nodes(org_dir)
+                 if n["heading"] == "Book Club"]
+        assert len(books) == 2
+        assert all(n["read_id_kind"] == "entry-id" for n in books)
+        assert {n["read_id"] for n in books} == {
+            "evt-bookclub-a/test-family@group.calendar.google.com",
+            "evt-bookclub-b/test-family@group.calendar.google.com",
+        }
+
+    def test_org_id_tier_is_authoritative(self, org_dir):
+        """A heading with an Org :ID: reports org-id kind and read_id == id;
+        the existing `id` field is unchanged."""
+        _install_read_id_fixture(org_dir)
+        node = next(n for n in self._outline_nodes(org_dir)
+                    if n["heading"] == "Distinct Chore")
+        assert node["read_id_kind"] == "org-id"
+        assert node["read_id"] == "read-id-distinct-chore"
+        assert node["id"] == "read-id-distinct-chore"
+
+    def test_read_id_always_present_and_typed(self, org_dir):
+        """Every outline node carries a non-empty read_id and a valid kind."""
+        _install_read_id_fixture(org_dir)
+        for n in self._outline_nodes(org_dir):
+            assert isinstance(n["read_id"], str) and n["read_id"]
+            assert n["read_id_kind"] in ("org-id", "entry-id", "locator")
+
+    def test_agenda_view_rows_carry_read_id(self, org_dir):
+        """agenda-view task rows carry the same read_id / read_id_kind fields."""
+        _install_read_id_fixture(org_dir)
+        data, stderr, rc = run_cli_json("agenda-view", "w", org_dir=org_dir)
+        assert rc == 0, stderr
+        rows = [t for b in data["blocks"] for t in b["tasks"]]
+        assert rows, "the Waiting view should contain the fixture's chores"
+        for t in rows:
+            assert isinstance(t["read_id"], str) and t["read_id"]
+            assert t["read_id_kind"] in ("org-id", "entry-id", "locator")
+
+    def test_agenda_outline_locator_join(self, org_dir):
+        """The same source heading yields the same read_id in both commands,
+        and each of two duplicate id-less rows joins its own outline node."""
+        _install_read_id_fixture(org_dir)
+        outline_ids = sorted(
+            n["read_id"] for n in self._outline_nodes(org_dir)
+            if n["heading"] == "Recurring Chore")
+        data, _, rc = run_cli_json("agenda-view", "w", org_dir=org_dir)
+        assert rc == 0
+        agenda_ids = sorted(
+            t["read_id"] for b in data["blocks"] for t in b["tasks"]
+            if t["heading"] == "Recurring Chore")
+        assert len(outline_ids) == 2 and len(set(outline_ids)) == 2
+        assert outline_ids == agenda_ids
+
+    def test_repeated_reads_are_stable(self, org_dir):
+        """Reading an unchanged file twice yields identical identities."""
+        _install_read_id_fixture(org_dir)
+        first = {(n["heading"], n["read_id"]) for n in self._outline_nodes(org_dir)}
+        second = {(n["heading"], n["read_id"]) for n in self._outline_nodes(org_dir)}
+        assert first == second
+
+    def test_reads_do_not_mutate_file(self, org_dir):
+        """Neither outline nor agenda-view writes to the source file."""
+        dest = _install_read_id_fixture(org_dir)
+        before = dest.read_bytes()
+        run_cli_json("outline", "--file", "entries.org", org_dir=org_dir)
+        run_cli_json("agenda-view", "w", org_dir=org_dir)
+        assert dest.read_bytes() == before
+
+    def test_standard_fixture_id_bearing_record(self, org_dir):
+        """An existing ID-bearing heading keeps org-id semantics: read_id == id."""
+        data, _, rc = run_cli_json("outline", "--file", "tasks.org", org_dir=org_dir)
+        assert rc == 0
+        work = _find_node(data["nodes"], "Work")
+        assert work["id"] == "test-id-work"
+        assert work["read_id"] == "test-id-work"
+        assert work["read_id_kind"] == "org-id"
+
+
 # ===========================================================================
 # render-file command: shared org->HTML render helper + path containment
 # ===========================================================================

@@ -1,0 +1,22 @@
+#+title: Read Identity Fixture
+#+PROPERTY: calendar-id test-family@group.calendar.google.com
+
+* Chores
+** WAITING Recurring Chore
+** WAITING Recurring Chore
+** WAITING Distinct Chore
+:PROPERTIES:
+:ID:       read-id-distinct-chore
+:END:
+
+* Book Club
+:PROPERTIES:
+:entry-id: evt-bookclub-a/test-family@group.calendar.google.com
+:END:
+<2026-06-15 Mon>
+
+* Book Club
+:PROPERTIES:
+:entry-id: evt-bookclub-b/test-family@group.calendar.google.com
+:END:
+<2026-06-15 Mon>
