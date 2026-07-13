@@ -1709,6 +1709,81 @@ at least one direct child with a TODO keyword."
        (projects . ,(apply #'vector (nreverse projects)))
        (count . ,(length results))))))
 
+;; --- read identity (issue #29) ---
+;;
+;; A stable, non-mutating join key surfaced identically by `outline' and
+;; `agenda-view', so a dashboard can correlate the two reads for the same
+;; source heading — including id-less, duplicate calendar headings that carry
+;; no Org `:ID:'.  Three tiers, in priority order:
+;;
+;;   org-id    the heading's own Org `:ID:' (authoritative; behavior unchanged)
+;;   entry-id  the org-gcal `:entry-id:' (a Google Calendar event id) if present
+;;   locator   a deterministic digest of (file, outline-path, occurrence-index)
+;;
+;; The locator distinguishes duplicate headings by their 0-based occurrence
+;; among headings sharing the same outline path in the same file.  It is stable
+;; across repeated reads of an unchanged file and across edits that do not
+;; rename the heading, move it under a different parent, or add/remove an
+;; earlier same-path duplicate.  Nothing here writes to the buffer.
+
+(defvar-local org-gtd-cli/--occurrence-cache nil
+  "Buffer-local memo of (TICK . TABLE) for occurrence indexing.
+TABLE maps an outline-path key (see `org-gtd-cli/heading-path-key') to a
+vector of heading start positions in document order.  TICK is the buffer's
+`buffer-chars-modified-tick' at capture, so the table is recomputed only when
+buffer content changes — reads never invalidate it.")
+
+(defun org-gtd-cli/heading-path-key ()
+  "Return the outline path (ancestors + this heading) at point as a string.
+Point must be on a heading.  Components are the bare heading texts (no
+todo/priority/tags), joined with a NUL that cannot occur in a heading."
+  (mapconcat #'identity (org-get-outline-path t) "\0"))
+
+(defun org-gtd-cli/--occurrence-table ()
+  "Return the memoized occurrence table for the current widened buffer.
+Maps each outline-path key to a vector of heading start positions in
+document order.  Computed once per buffer content (see the cache tick)."
+  (let ((tick (buffer-chars-modified-tick)))
+    (unless (and org-gtd-cli/--occurrence-cache
+                 (eq (car org-gtd-cli/--occurrence-cache) tick))
+      (let ((table (make-hash-table :test 'equal)))
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward org-heading-regexp nil t)
+            (goto-char (line-beginning-position))
+            (let ((key (org-gtd-cli/heading-path-key)))
+              (puthash key (cons (point) (gethash key table)) table))
+            (forward-line 1)))
+        (maphash (lambda (k v) (puthash k (apply #'vector (nreverse v)) table))
+                 table)
+        (setq org-gtd-cli/--occurrence-cache (cons tick table))))
+    (cdr org-gtd-cli/--occurrence-cache)))
+
+(defun org-gtd-cli/heading-occurrence-index ()
+  "Return the 0-based index of the heading at point among same-path siblings.
+\"Same-path\" means sharing the full outline path from
+`org-gtd-cli/heading-path-key'.  Deterministic and identical whether reached
+via `outline' or `agenda-view'."
+  (let* ((key (org-gtd-cli/heading-path-key))
+         (positions (gethash key (org-gtd-cli/--occurrence-table)))
+         (here (line-beginning-position))
+         (idx (and positions (cl-position here positions :test #'=))))
+    (or idx 0)))
+
+(defun org-gtd-cli/read-identity-at-point ()
+  "Return (READ-ID . KIND) for the heading at point in a widened buffer.
+KIND is \"org-id\", \"entry-id\", or \"locator\".  Never writes."
+  (let ((id (org-entry-get nil "ID"))
+        (entry-id (org-entry-get nil "entry-id")))
+    (cond
+     (id (cons id "org-id"))
+     (entry-id (cons entry-id "entry-id"))
+     (t (let* ((file (org-gtd-cli/relative-filename (or (buffer-file-name) "?")))
+               (key (org-gtd-cli/heading-path-key))
+               (idx (org-gtd-cli/heading-occurrence-index))
+               (digest (md5 (format "%s\0%s\0%d" file key idx))))
+          (cons (concat "loc:" digest) "locator"))))))
+
 ;; --- outline ---
 
 (defun org-gtd-cli/outline-node-at-point ()
@@ -1757,7 +1832,8 @@ regardless of full-mode."
                           (when (member child-state org-done-keywords)
                             (cl-incf done-count)))))))
                 `((done . ,done-count) (total . ,total-count)))
-            :null)))
+            :null))
+         (identity (org-gtd-cli/read-identity-at-point)))
     `((heading . ,heading)
       (level . ,level)
       (todo_state . ,(or state :null))
@@ -1768,6 +1844,8 @@ regardless of full-mode."
       (is_project . ,(if is-project t :false))
       (progress . ,progress)
       (id . ,(or id :null))
+      (read_id . ,(car identity))
+      (read_id_kind . ,(cdr identity))
       (timestamp . ,(or timestamp :null))
       (body . ,(if org-gtd-cli/full-mode (or body :null) :null)))))
 
@@ -4384,11 +4462,14 @@ parent, is_project, properties), plus `body' when `--full' is set."
                                     (org-get-heading t t t t)
                                   nil)))
               (is-project (org-gtd-cli/has-todo-children-p))
+              (identity (org-gtd-cli/read-identity-at-point))
               (task `((heading . ,heading)
                       (state . ,(or state :null))
                       (priority . ,(or priority-char :null))
                       (tags . ,(vconcat (mapcar #'identity tags)))
                       (id . ,(or id :null))
+                      (read_id . ,(car identity))
+                      (read_id_kind . ,(cdr identity))
                       (file . ,rel-file)
                       (scheduled . ,(or scheduled :null))
                       (deadline . ,(or deadline :null))
