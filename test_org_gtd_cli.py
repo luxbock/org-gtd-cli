@@ -12,8 +12,10 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -59,6 +61,7 @@ def run_cli(*args, org_dir, env_overrides=None):
     to simulate the non-UTF-8 locale of systemd/bwrap invocations).
     """
     env = os.environ.copy()
+    env["ORG_GTD_CLI_DAEMON"] = "0"
     env["ORG_DIRECTORY"] = str(org_dir) + "/"
     env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
     env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
@@ -75,18 +78,239 @@ def daemon_socket_paths(daemon_tmp):
     return sorted(base.glob("*/server"))
 
 
-def kill_test_daemons(daemon_tmp):
-    """Kill any scoped org-gtd-cli daemon started under daemon_tmp."""
-    for socket in daemon_socket_paths(daemon_tmp):
+def _read_process_file(pid, name):
+    """Read a procfs process file, tolerating processes that already exited."""
+    try:
+        return (Path("/proc") / str(pid) / name).read_bytes()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        return b""
+
+
+def _server_socket_from_cmdline(args):
+    """Extract the org-gtd-cli Emacs server socket from daemon arguments."""
+    prefix = '(setq server-name "'
+    for arg in args:
+        if arg.startswith(prefix) and arg.endswith('")'):
+            value = arg[len(prefix):-2]
+            return value.replace("\\\"", '"').replace("\\\\", "\\")
+    return None
+
+
+def _discover_org_gtd_daemons():
+    """Return running org-gtd-cli Emacs daemons visible through procfs."""
+    daemons = []
+    for proc_dir in Path("/proc").glob("[0-9]*"):
+        pid = int(proc_dir.name)
+        cmdline = _read_process_file(pid, "cmdline")
+        if not cmdline:
+            continue
+        args = [os.fsdecode(arg) for arg in cmdline.rstrip(b"\0").split(b"\0")]
+        executable = Path(args[0]).name
+        if "emacs" not in executable or "--daemon" not in args:
+            continue
+        socket = _server_socket_from_cmdline(args)
+        if not socket or "/org-gtd-cli-" not in socket:
+            continue
+
+        environ = _read_process_file(pid, "environ")
+        env = {}
+        for entry in environ.rstrip(b"\0").split(b"\0"):
+            key, separator, value = entry.partition(b"=")
+            if separator:
+                env[os.fsdecode(key)] = os.fsdecode(value)
+        daemons.append({
+            "pid": pid,
+            "socket": socket,
+            "org_directory": env.get("ORG_DIRECTORY"),
+        })
+    return daemons
+
+
+def _path_is_beneath(path, root):
+    """Return whether path resolves strictly beneath root."""
+    if not path:
+        return False
+    try:
+        relative = Path(path).resolve().relative_to(Path(root).resolve())
+    except (OSError, ValueError):
+        return False
+    return relative != Path(".")
+
+
+def _daemon_is_for_worker(daemon, worker_tmp_root):
+    """Select only daemons whose org directory belongs to this pytest worker."""
+    return _path_is_beneath(daemon["org_directory"], worker_tmp_root)
+
+
+def _daemon_uses_socket_root(daemon, socket_root):
+    """Select only daemons whose isolated socket belongs to one daemon test."""
+    return _path_is_beneath(daemon["socket"], socket_root)
+
+
+def _remaining_daemon_pids(pids, selector):
+    """Revalidate process identities before waiting on or signalling PIDs."""
+    return {
+        daemon["pid"]
+        for daemon in _discover_org_gtd_daemons()
+        if daemon["pid"] in pids and selector(daemon)
+    }
+
+
+def _wait_for_daemons(pids, selector, timeout):
+    """Wait up to timeout seconds for selected daemon PIDs to disappear."""
+    deadline = time.monotonic() + timeout
+    remaining = _remaining_daemon_pids(pids, selector)
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.05)
+        remaining = _remaining_daemon_pids(pids, selector)
+    return remaining
+
+
+def _signal_daemons(pids, selector, sig):
+    """Signal only PIDs that still identify as the originally selected daemons."""
+    for pid in _remaining_daemon_pids(pids, selector):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+def _shutdown_daemons(daemons, selector):
+    """Gracefully stop daemons, then use bounded TERM/KILL fallbacks."""
+    pids = {daemon["pid"] for daemon in daemons}
+    if not pids:
+        return
+
+    for daemon in daemons:
         try:
             subprocess.run(
-                ["emacsclient", "--socket-name", str(socket),
+                ["emacsclient", "--socket-name", daemon["socket"],
                  "--eval", "(kill-emacs)"],
-                capture_output=True, timeout=10)
-        except subprocess.TimeoutExpired:
+                capture_output=True, timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
             pass
-    subprocess.run(["pkill", "-f", daemon_tmp], capture_output=True)
+
+    remaining = _wait_for_daemons(pids, selector, timeout=3)
+    if remaining:
+        _signal_daemons(remaining, selector, signal.SIGTERM)
+        remaining = _wait_for_daemons(remaining, selector, timeout=2)
+    if remaining:
+        _signal_daemons(remaining, selector, signal.SIGKILL)
+        remaining = _wait_for_daemons(remaining, selector, timeout=1)
+    if remaining:
+        print(
+            f"warning: org-gtd-cli test daemons did not exit: {sorted(remaining)}",
+            file=sys.stderr,
+        )
+
+
+def kill_test_daemons(daemon_tmp):
+    """Stop daemons started with one daemon test's isolated socket root."""
+    selector = lambda daemon: _daemon_uses_socket_root(daemon, daemon_tmp)
+    daemons = [daemon for daemon in _discover_org_gtd_daemons()
+               if selector(daemon)]
+    _shutdown_daemons(daemons, selector)
     shutil.rmtree(daemon_tmp, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_pytest_worker_daemons(tmp_path_factory):
+    """Last-resort cleanup for daemons tied to this xdist worker's temp root."""
+    worker_tmp_root = tmp_path_factory.getbasetemp().resolve()
+    yield
+    selector = lambda daemon: _daemon_is_for_worker(daemon, worker_tmp_root)
+    daemons = [daemon for daemon in _discover_org_gtd_daemons()
+               if selector(daemon)]
+    _shutdown_daemons(daemons, selector)
+
+
+class TestPytestDaemonIsolation:
+    def test_run_cli_defaults_to_batch_under_ambient_daemon(
+            self, monkeypatch, org_dir):
+        """An interactive shell's daemon opt-in must not leak into normal tests."""
+        observed_envs = []
+
+        def fake_run(cmd, **kwargs):
+            observed_envs.append(kwargs["env"])
+            return subprocess.CompletedProcess(cmd, 0, "batch output", "")
+
+        monkeypatch.setenv("ORG_GTD_CLI_DAEMON", "1")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        stdout, stderr, rc = run_cli(
+            "org-timestamp", "2026-01-01", org_dir=org_dir)
+
+        assert (stdout, stderr, rc) == ("batch output", "", 0)
+        assert observed_envs[0]["ORG_GTD_CLI_DAEMON"] == "0"
+
+    def test_run_cli_explicit_daemon_opt_in_wins(self, monkeypatch, org_dir):
+        """Daemon-specific tests can still explicitly opt in after the default."""
+        observed_envs = []
+
+        def fake_run(cmd, **kwargs):
+            observed_envs.append(kwargs["env"])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setenv("ORG_GTD_CLI_DAEMON", "0")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        run_cli(
+            "org-timestamp", "2026-01-01",
+            org_dir=org_dir,
+            env_overrides={"ORG_GTD_CLI_DAEMON": "1"},
+        )
+
+        assert observed_envs[0]["ORG_GTD_CLI_DAEMON"] == "1"
+
+    def test_cleanup_is_scoped_to_worker_tmp_root(self, monkeypatch, tmp_path):
+        """Cleanup must leave sibling-worker and pre-existing daemons untouched."""
+        worker_root = tmp_path / "pytest-of-agent" / "popen-gw0"
+        candidates = [
+            {
+                "pid": 101,
+                "socket": "/run/user/1000/org-gtd-cli-1000/a/server",
+                "org_directory": str(worker_root / "test_current0"),
+            },
+            {
+                "pid": 102,
+                "socket": "/run/user/1000/org-gtd-cli-1000/b/server",
+                "org_directory": str(
+                    tmp_path / "pytest-of-agent" / "popen-gw1" / "test_peer0"),
+            },
+            {
+                "pid": 103,
+                "socket": "/run/user/1000/org-gtd-cli-1000/c/server",
+                "org_directory": str(
+                    tmp_path / "pytest-of-agent" / "popen-gw0-old"),
+            },
+            {
+                "pid": 104,
+                "socket": "/run/user/1000/org-gtd-cli-1000/d/server",
+                "org_directory": "/home/user/org",
+            },
+        ]
+        selector = lambda daemon: _daemon_is_for_worker(daemon, worker_root)
+        selected = [daemon for daemon in candidates if selector(daemon)]
+        shutdown_commands = []
+
+        def fake_run(cmd, **kwargs):
+            shutdown_commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setitem(
+            globals(), "_wait_for_daemons",
+            lambda pids, selected_by, timeout: set(),
+        )
+
+        _shutdown_daemons(selected, selector)
+
+        assert [daemon["pid"] for daemon in selected] == [101]
+        assert shutdown_commands == [[
+            "emacsclient", "--socket-name",
+            "/run/user/1000/org-gtd-cli-1000/a/server",
+            "--eval", "(kill-emacs)",
+        ]]
 
 
 def reset_fixtures(org_dir):

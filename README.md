@@ -208,8 +208,7 @@ Each invocation starts Emacs. For latency-sensitive use, set
 ```sh
 nix flake check          # runs the pytest suite
 # or directly:
-nix develop --command env ORG_GTD_CLI_DAEMON=0 \
-  python3 -m pytest test_org_gtd_cli.py -q -n 4
+nix develop --command python3 -m pytest test_org_gtd_cli.py -q -n 4
 ```
 
 The `render-file` src-highlighting test asserts `htmlize`'s `org-*` CSS face
@@ -219,6 +218,15 @@ the same test inputs, including Python, pytest, pytest-xdist, procps, and Emacs
 with `htmlize`, so direct test runs do not need an ad-hoc `nix shell`.
 Running the suite against a plain `emacs` (no htmlize) is fine — that one
 assertion self-skips.
+
+The default development shell sets `ORG_GTD_CLI_DAEMON=0`, overriding an
+interactive shell that has opted into daemon mode. The pytest `run_cli()` helper
+also defaults each subprocess to batch mode before applying explicit per-test
+environment overrides. Daemon-specific tests opt back in with
+`ORG_GTD_CLI_DAEMON=1`, give each daemon an isolated socket root, and stop it in
+a `finally` block. A bounded session cleanup scoped to each xdist worker's
+temporary org directories is only a last-resort safety net; it does not target
+unrelated or pre-existing daemons.
 
 ### Testing an uncommitted working copy
 
@@ -232,14 +240,14 @@ silently test the *wrong* code if you let them:
   points `ORG_GTD_CORE_FILE` / `ORG_GTD_ELISP_FILE` at the checkout's own `.el`
   files.
 
-- **Prefer `ORG_GTD_CLI_DAEMON=0` for direct test runs.** Daemon mode now scopes
+- **Direct test runs default to `ORG_GTD_CLI_DAEMON=0`.** Daemon mode now scopes
   sockets by resolved `ORG_DIRECTORY` and loaded core/elisp file identity, so
   editing or pointing at different `.el` files selects a fresh daemon instead of
-  silently reusing stale elisp. Disabling the daemon is still the simplest test
-  posture: it avoids long-lived background Emacs state while you iterate and
-  matches the direct-run command above. If you intentionally test daemon mode,
-  ensure the relevant identity inputs (org directory plus core/elisp paths and
-  contents) are the ones you mean to exercise.
+  silently reusing stale elisp. Batch mode avoids long-lived background Emacs
+  state while you iterate. If you intentionally test daemon mode, use an
+  isolated socket root and immediate `finally` teardown, and ensure the relevant
+  identity inputs (org directory plus core/elisp paths and contents) are the
+  ones you mean to exercise.
 
 For elisp changes, byte-compile in dependency order to catch warnings the plain
 source-load path misses (the `.elc` outputs are git-ignored):

@@ -42,6 +42,7 @@
 
           devShells.default = pkgs.mkShell {
             packages = orgGtdCli.passthru.testInputs;
+            ORG_GTD_CLI_DAEMON = "0";
           };
         };
     in
