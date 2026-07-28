@@ -1805,6 +1805,8 @@ regardless of full-mode."
          (priority (org-gtd-cli/get-explicit-priority))
          (tags (org-get-tags))
          (id (org-entry-get nil "ID"))
+         (scheduled (org-entry-get nil "SCHEDULED"))
+         (deadline (org-entry-get nil "DEADLINE"))
          (body (org-gtd-cli/get-body-at-point))
          (timestamp
           (and body
@@ -1847,6 +1849,8 @@ regardless of full-mode."
       (read_id . ,(car identity))
       (read_id_kind . ,(cdr identity))
       (timestamp . ,(or timestamp :null))
+      (scheduled . ,(or scheduled :null))
+      (deadline . ,(or deadline :null))
       (body . ,(if org-gtd-cli/full-mode (or body :null) :null)))))
 
 (defun org-gtd-cli/outline-tree (file)
