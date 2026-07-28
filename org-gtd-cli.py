@@ -198,6 +198,14 @@ def _run_batch(expr: str, json_mode: bool = False, full_mode: bool = False) -> i
             "--eval", f'(setenv "ORG_DIRECTORY" "{escape_elisp(ORG_DIR)}")',
             "-l", CORE_FILE,
             "-l", ELISP_FILE,
+            # Emit the once-per-invocation text-mode sync-conflict warning
+            # (issue #35) before the command body runs. The marker check and
+            # all warning logic live in elisp (reading `org-directory`); this
+            # is a pure plumbing hook so the text line fires exactly once per
+            # batch-Emacs invocation regardless of which command `expr` runs
+            # (command bodies end in `kill-emacs`, so a prefix form is the one
+            # guaranteed once-per-process entry point). No-op in JSON mode.
+            "--eval", "(org-gtd-cli/emit-text-sync-conflict-warning)",
             "--eval", expr,
         ]
         env = os.environ.copy()

@@ -71,6 +71,12 @@ JSON returns structured data with a `version` field and command-specific fields.
 
 **Exception:** `org-timestamp` does not support `--json` (it prints a bare timestamp string). `agenda-view` *does* support `--json` — it emits an envelope with `version`/`command`/`key`/`blocks`, plus a top-level `warnings` array (see the README `warnings` note).
 
+### Relay the `sync-conflict` warning to the human
+
+`warnings` is a **universal** envelope field (present on any command, reads and mutations alike). One entry you MUST NOT silently swallow is `{"type": "sync-conflict", ...}` (text mode: a `Warning: org sync conflict pending — local view may be stale/diverged` line on stderr). It means `~/org` has diverged from the other machines' view — a git sync conflict is pending and the local clone may be **stale**. When you see it, **tell the human** rather than continuing to plan or mutate on a possibly-stale view: the task you are about to act on may have moved, been completed, or been re-filed on another host. The CLI is a pure consumer of this signal (it never resolves or clears the conflict); resolution is a human/sync-infrastructure job, so surface it and let the human decide before you proceed.
+
+> Note: the **deployed** copies of the GTD skills live in `nixos-config` and are updated there separately; this note lives in the org-gtd-cli repo's own `skills/gtd/SKILL.md`.
+
 ## Substring matching
 
 Most commands take a `SUBSTR` argument that matches task headings case-insensitively.

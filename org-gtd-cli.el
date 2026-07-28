@@ -109,13 +109,89 @@ of locale, and keeps the daemon-dispatch capture (which rebinds
 `send-string-to-terminal'."
   (decode-coding-string (json-serialize alist) 'utf-8))
 
+;; ── Environmental warnings (universal `warnings' envelope field) ──────────────
+;; `warnings' is a global envelope field (ruling olli 2026-07-28, #32/#35):
+;; typed, exit-neutral facts about pre-existing/environmental state OBSERVED
+;; while running a command — never state changes CAUSED by a mutation (those are
+;; `side_effects').  Every `(version . 1)' JSON envelope may carry it; text mode
+;; mirrors each entry as one `Warning:' stderr line.  The vocabulary is built by
+;; independent sources that all feed the same array: `duplicate-idless-heading'
+;; (#32, computed per command from a duplicate scan) and `sync-conflict' (#35,
+;; an environmental marker check injected universally at the `output' choke
+;; point below).  Composition rule: an envelope that already carries a
+;; `warnings' key (e.g. outline/agenda-view built one from its duplicate scan)
+;; must end up with ONE `warnings' array holding both vocabularies' entries —
+;; `org-gtd-cli/output' MERGES the sync-conflict entry into that existing key
+;; rather than adding a second one.
+
+(defun org-gtd-cli/sync-conflict-marker-present-p ()
+  "Non-nil when the org-sync conflict marker is present.
+A plain existence check of `.sync-conflict' at the root of the live
+`org-directory' — no git, no side effects.  External sync units own the
+marker (create/latch/clear it); this CLI is a pure consumer that never
+writes it.  Reads `org-directory' at call time so the check is
+per-invocation-fresh in both batch and daemon mode (daemon-dispatch resets
+`org-directory' per call); the path is never cached at load time."
+  (file-exists-p (expand-file-name ".sync-conflict" org-directory)))
+
+(defconst org-gtd-cli/sync-conflict-detail
+  "org sync conflict pending — local view may be stale"
+  "Detail string carried in the JSON `sync-conflict' warning entry.")
+
+(defun org-gtd-cli/sync-conflict-warning ()
+  "Return the `sync-conflict' warning alist when the marker is present, else nil."
+  (when (org-gtd-cli/sync-conflict-marker-present-p)
+    `((type . "sync-conflict")
+      (detail . ,org-gtd-cli/sync-conflict-detail))))
+
+(defun org-gtd-cli/inject-warnings (alist)
+  "Return ALIST with universal environmental warnings folded into `warnings'.
+Only `(version . 1)' envelopes are touched; anything else (e.g. bare error
+objects) is returned unchanged.  When the sync-conflict marker is present,
+its entry is MERGED into an existing `warnings' vector (composing with the
+per-command vocabulary #32 already built there) or, absent that key, a new
+`warnings' vector is added.  Marker absent → ALIST is returned untouched,
+so envelopes stay byte-identical to their pre-#35 shape."
+  (if (not (equal (alist-get 'version alist) 1))
+      alist
+    (let ((extra (delq nil (list (org-gtd-cli/sync-conflict-warning)))))
+      (if (null extra)
+          alist
+        (let* ((existing (alist-get 'warnings alist))
+               ;; `warnings' is stored as a JSON vector; splice both sources
+               ;; into one vector, duplicate-scan entries first.
+               (merged (apply #'vector
+                              (append (append existing nil) extra))))
+          (if (assq 'warnings alist)
+              (mapcar (lambda (cell)
+                        (if (eq (car cell) 'warnings)
+                            (cons 'warnings merged)
+                          cell))
+                      alist)
+            (append alist `((warnings . ,merged)))))))))
+
 (defun org-gtd-cli/output (alist)
   "Output ALIST as JSON (json-mode) or do nothing (text mode).
 In JSON mode, serializes ALIST with `org-gtd-cli/json-encode' and prints to
-stdout.  In text mode, this is a no-op — callers handle their own text output."
+stdout.  In text mode, this is a no-op — callers handle their own text output.
+Universal environmental warnings (the `sync-conflict' marker) are folded into
+the envelope's `warnings' array here, at the single JSON emission choke point,
+so every read, mutation, dry-run, and batch envelope carries them uniformly
+and composes with any `warnings' the command already built."
   (when org-gtd-cli/json-mode
-    (princ (org-gtd-cli/json-encode alist))
+    (princ (org-gtd-cli/json-encode (org-gtd-cli/inject-warnings alist)))
     (princ "\n")))
+
+(defun org-gtd-cli/emit-text-sync-conflict-warning ()
+  "In text mode, emit the once-per-invocation `sync-conflict' stderr line.
+No-op in JSON mode (there the warning rides the envelope via
+`org-gtd-cli/output').  Emitted via `message' so it reaches real stderr in
+batch Emacs and the dispatch stderr-file in daemon mode.  Called exactly once
+per invocation from the entry points (the batch `--eval' wrapper and
+`org-gtd-cli/daemon-dispatch'), so it never duplicates per result item."
+  (when (and (not org-gtd-cli/json-mode)
+             (org-gtd-cli/sync-conflict-marker-present-p))
+    (message "Warning: org sync conflict pending — local view may be stale/diverged")))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
 ;; Daemon mode support
@@ -437,6 +513,12 @@ buffers are reloaded from disk, and a JSON/text conflict envelope with
                    (lambda (&optional _arg)
                      (org-gtd-cli/save-buffer-with-conflict-check))))
           (catch 'org-gtd-cli-exit
+            ;; Once-per-dispatch text-mode sync-conflict line (captured to
+            ;; stderr-file by the `message' rebind above).  Reads the live
+            ;; `org-directory' just set from ORG-DIR, so a marker that appears
+            ;; while this long-lived daemon runs is seen on the very next
+            ;; dispatch — never cached at daemon start.
+            (org-gtd-cli/emit-text-sync-conflict-warning)
             (condition-case err
                 (funcall body-fn)
               (org-gtd-cli/file-conflict
@@ -5232,11 +5314,18 @@ failure (non-zero exit) signals `error' with the message FN reported."
 (defun org-gtd-cli/batch--result (idx payload &optional extra)
   "Build a per-item batch result from a delegated command's PAYLOAD.
 Strips PAYLOAD's version/command wrapper and prepends the batch
-bookkeeping fields (index, success) plus EXTRA fields."
+bookkeeping fields (index, success) plus EXTRA fields.  Also strips the
+universal `warnings' field: the delegate re-serializes each command through
+`org-gtd-cli/output', which injects environmental warnings (e.g.
+`sync-conflict') into every `(version . 1)' envelope — but those are a
+property of the *invocation*, not of any single item, so they ride the
+top-level batch envelope once (added when `batch--output' calls `output')
+and must not be duplicated onto per-item results."
   (append `((index . ,idx) (success . t))
           extra
-          (cl-remove-if (lambda (kv) (memq (car-safe kv) '(version command)))
-                        payload)))
+          (cl-remove-if
+           (lambda (kv) (memq (car-safe kv) '(version command warnings)))
+           payload)))
 
 (defun org-gtd-cli/batch-one (command item shared-arg idx)
   "Execute one batch ITEM for COMMAND.  Returns a per-item result alist.

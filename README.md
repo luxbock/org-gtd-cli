@@ -118,9 +118,30 @@ headings fall into this `locator` tier and share the same bare heading text in
 one file, `outline`/`agenda-view` flag them via the `warnings` array below, so
 you can add an `:ID:`/`:entry-id:` or dedupe.
 
-### `warnings` — duplicate id-less headings on `outline` / `agenda-view`
+### `warnings` — the universal environmental-warning channel
 
-`outline` and `agenda-view` — and **only** these two read commands — emit a
+`warnings` is a **universal** top-level envelope field: it is allowed on **every**
+`--json` command — reads *and* mutations alike (the moment "your view may be
+stale" matters most is right before a mutation lands). It carries typed,
+exit-neutral facts about **pre-existing or environmental state observed while
+running** — never state changes *caused* by a mutation (those are
+`side_effects`). Entries are typed objects `{"type": "<kebab-slug>", ...}`; the
+`type` string is stable contract surface. In text mode each entry is mirrored as
+one `Warning: ...` line on **stderr**. The array is **absent/empty when there is
+nothing to warn about**, so the clean path is byte-identical to a CLI without
+this channel. Multiple sources compose into **one** `warnings` array on a given
+envelope (e.g. an `outline` over a file with id-less duplicates *and* a pending
+sync conflict carries both entries — the duplicate entries first, the
+sync-conflict entry last).
+
+Current vocabulary:
+
+- `duplicate-idless-heading` (on `outline` / `agenda-view`) — see below.
+- `sync-conflict` (on **all** commands) — see below.
+
+#### `duplicate-idless-heading` — id-less duplicates on `outline` / `agenda-view`
+
+`outline` and `agenda-view` emit a
 top-level `warnings` array in their `--json` envelope. It surfaces id-less
 headings that are *duplicated*: two or more headings sharing the same bare
 heading text within one file, where each resolves to the `locator` read-id
@@ -154,8 +175,40 @@ In **text mode**, each duplicated group is mirrored as one `Warning: ...` line
 on **stderr**; stdout carries only the normal output (the indented outline tree
 / the agenda listing), with no `Warning:` line and no JSON.
 
-The `type` string is stable contract surface. Mutation commands do **not** emit
-`warnings`; this array is confined to the two read commands.
+The `type` string is stable contract surface. This warning is computed per
+command and is confined to the two read commands, but it shares the universal
+`warnings` array with any other applicable warning (e.g. `sync-conflict`).
+
+#### `sync-conflict` — pending org-sync conflict (all commands)
+
+`~/org` is synced across machines by an external git-based sync unit
+(nixos-config `home/common/services/org-sync.nix`). When a 3-way merge genuinely
+conflicts, that unit parks the local line on a `<host>-<user>-conflict` branch
+and drops a marker file **`${ORG_DIRECTORY}/.sync-conflict`** at the org-dir
+root (latched cross-host while any `*-conflict` branch exists on the forge). It
+means the local clone may have diverged from the other machines' view.
+
+Every `org-gtd-cli` invocation checks for that marker by a **plain file-existence
+test** (no git, no parsing) and, when present, surfaces a warning:
+
+```json
+{"type": "sync-conflict", "detail": "org sync conflict pending — local view may be stale"}
+```
+
+- **Checked once per invocation, freshly** — in both batch and daemon mode. In
+  daemon mode the marker is re-read on every dispatch (`org-directory` is reset
+  per call), so a marker that appears while a long-lived daemon is running is
+  seen by the very next command; it is never cached at daemon start.
+- **On every command** — reads and mutations. A mutation with the marker present
+  still executes and persists normally; the warning never changes an exit code
+  and never aborts a command (warn-only).
+- **The CLI is a pure consumer.** It never creates, clears, moves, or otherwise
+  writes `.sync-conflict` — the external sync units own that marker entirely.
+- In **text mode**, the marker surfaces as one line on **stderr** for the whole
+  invocation (once, not per result item):
+  `Warning: org sync conflict pending — local view may be stale/diverged`.
+- **Marker absent → output is byte-identical to before**: no `sync-conflict`
+  entry, no stderr line, and no `warnings` key added on its account.
 
 ### render-file — server-side org→HTML for view-only docs
 
