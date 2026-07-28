@@ -7,10 +7,13 @@ This script parses arguments and calls Emacs in batch mode.
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -61,6 +64,31 @@ def _daemon_identity_hash() -> str:
 # Daemon mode: opt-in via ORG_GTD_CLI_DAEMON=1
 DAEMON_ENABLED = os.environ.get("ORG_GTD_CLI_DAEMON") == "1"
 _TMPDIR = os.environ.get("TMPDIR", "/tmp")
+# Idle TTL for the daemon: seconds since last completed dispatch after which
+# the daemon self-terminates. Default 7200 (two hours). `0` = immortal.
+# Negative or non-integer values are errors for daemon-backed commands; they
+# must not start or dispatch to a daemon. Parsed at call time so an already-
+# running identity picks up a new value on its next dispatch.
+_DEFAULT_DAEMON_TTL = 7200
+
+
+def _parse_daemon_ttl(raw):
+    """Return (ttl_seconds, error_message) for `ORG_GTD_CLI_DAEMON_TTL' RAW.
+
+    Unset or empty → the documented default. `0` → immortal (no timer).
+    Positive integers → seconds. Negative or non-integer → error message
+    and no daemon start (per issue #26 spec)."""
+    if raw is None or raw == "":
+        return _DEFAULT_DAEMON_TTL, None
+    if not re.fullmatch(r"-?\d+", raw):
+        return None, (f"ORG_GTD_CLI_DAEMON_TTL={raw!r} is not a base-10 "
+                      "integer; unset it, use 0 for immortal, or a positive "
+                      "number of seconds")
+    val = int(raw, 10)
+    if val < 0:
+        return None, (f"ORG_GTD_CLI_DAEMON_TTL={raw!r} must be non-negative "
+                      "(0 = immortal, positive = seconds)")
+    return val, None
 # Daemon state (socket + user-emacs-dir) MUST be per-user. On a shared host
 # (e.g. convox, where both `olli` and `agent` reach this code) a path that is
 # not namespaced by uid lets whoever runs first create a 0700 dir that wedges
@@ -292,6 +320,16 @@ def _run_daemon(
     _retried: bool = False,
 ) -> int:
     """Run an elisp expression via emacsclient against the daemon."""
+    ttl, ttl_err = _parse_daemon_ttl(os.environ.get("ORG_GTD_CLI_DAEMON_TTL"))
+    if ttl_err:
+        # Reject before spawning or dispatching: an invalid TTL must not
+        # start a daemon (issue #26 spec).
+        if json_mode:
+            print(json.dumps({"error": ttl_err}))
+        else:
+            print(f"Error: {ttl_err}", file=sys.stderr)
+        return 1
+
     _ensure_daemon()
 
     # Unique per-invocation output dir: concurrent CLI calls share the daemon,
@@ -310,7 +348,8 @@ def _run_daemon(
                f' "{escape_elisp(ORG_DIR)}"'
                f' "{escape_elisp(stdout_file)}"'
                f' "{escape_elisp(stderr_file)}"'
-               f' "{escape_elisp(exit_file)}")')
+               f' "{escape_elisp(exit_file)}"'
+               f' {ttl})')
 
     try:
         result = subprocess.run(
@@ -354,6 +393,501 @@ def run_elisp(expr: str, json_mode: bool = False, full_mode: bool = False) -> in
     if DAEMON_ENABLED:
         return _run_daemon(expr, json_mode, full_mode)
     return _run_batch(expr, json_mode, full_mode)
+
+
+# =============================================================================
+# Daemon management: `org-gtd-cli daemon status | stop | gc`
+# =============================================================================
+#
+# All three run regardless of `ORG_GTD_CLI_DAEMON', never call
+# `_ensure_daemon()', and never create a daemon. They are also NOT available
+# through homogeneous or mixed batch modes (see build_parser).
+#
+# Discovery inspects the current UID's own private identity directories
+# beneath `_DAEMON_BASE'. Live daemons are probed by asking them to serialise
+# `org-gtd-cli/daemon-info' via `emacsclient --eval'. A pre-#26 (upgrade-in-
+# flight) live daemon that does not yet know `daemon-info' still shows up in
+# `daemon status' / `daemon gc' via its socket and cmdline metadata; only
+# its TTL is reported as null.
+#
+# Safety (spec §Files involved / §Acceptance criteria):
+# - Never signal a PID we cannot confirm belongs to a current-UID Emacs
+#   daemon owning the expected socket.
+# - Recursive `shutil.rmtree` is allowed only for owned identity dirs whose
+#   resolved path is strictly beneath `_DAEMON_BASE'.
+# - Foreign-owned or malformed candidates are left alone and reported as
+#   errors; commands exit 1 if any candidate cannot be safely handled.
+
+_DAEMON_PROBE_ELISP = "(prin1-to-string (org-gtd-cli/daemon-info))"
+
+# Regex for a valid identity component (sha-256 slice from
+# `_daemon_identity_hash'). Anything else is rejected as malformed.
+_IDENTITY_HASH_RE = re.compile(r"\A[0-9a-f]{32}\Z")
+
+
+def _current_uid() -> int:
+    return os.getuid()
+
+
+def _daemon_base_ok() -> bool:
+    """Return True when `_DAEMON_BASE' either does not exist or is owned by us.
+
+    A foreign-owned base directory is where cross-user squatting would land;
+    the wrappers refuse to touch it and management commands should surface
+    the situation rather than silently ignoring it."""
+    try:
+        st = os.stat(_DAEMON_BASE)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return st.st_uid == _current_uid()
+
+
+def _list_identity_dirs():
+    """Yield (identity_hash, dir_path) for every direct child of `_DAEMON_BASE'
+    that looks like an owned identity directory.
+
+    Foreign-owned or malformed entries are surfaced separately by the caller
+    (they never yield successfully) — this helper returns only safe candidates
+    plus a list of error descriptors."""
+    candidates = []
+    errors = []
+    try:
+        entries = os.listdir(_DAEMON_BASE)
+    except FileNotFoundError:
+        return candidates, errors
+    except OSError as exc:
+        errors.append({"path": _DAEMON_BASE,
+                       "error": f"cannot list daemon base: {exc}"})
+        return candidates, errors
+    for name in sorted(entries):
+        path = os.path.join(_DAEMON_BASE, name)
+        try:
+            st = os.lstat(path)
+        except OSError as exc:
+            errors.append({"path": path, "error": str(exc)})
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            # Not a directory — daemon dirs are 0700 dirs. Ignore silently
+            # (e.g. a stray file from an aborted spawn).
+            continue
+        if st.st_uid != _current_uid():
+            errors.append({"path": path,
+                           "error": (f"foreign-owned identity dir (uid "
+                                     f"{st.st_uid}); refusing to inspect")})
+            continue
+        if not _IDENTITY_HASH_RE.match(name):
+            errors.append({"path": path,
+                           "error": (f"malformed identity component {name!r}; "
+                                     "refusing to inspect")})
+            continue
+        candidates.append((name, path))
+    return candidates, errors
+
+
+def _socket_for_identity_dir(dir_path):
+    return os.path.join(dir_path, "server")
+
+
+def _probe_daemon(socket_path, timeout=3):
+    """Ask a daemon for its `org-gtd-cli/daemon-info' plist.
+
+    Returns (info_dict | None, error | None). A dead/stale socket, foreign
+    server, wedged daemon, or unrecognised probe response counts as a
+    non-live daemon and yields `(None, error_message)`.
+    """
+    try:
+        st = os.stat(socket_path)
+    except FileNotFoundError:
+        return None, "socket-missing"
+    except OSError as exc:
+        return None, f"socket-stat-failed: {exc}"
+    if st.st_uid != _current_uid():
+        return None, "foreign-socket"
+    # Bounded probe: kill the emacsclient if the daemon does not answer.
+    try:
+        result = subprocess.run(
+            [EMACSCLIENT_BIN, "--socket-name", socket_path,
+             "--eval", _DAEMON_PROBE_ELISP],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "probe-timeout"
+    except OSError as exc:
+        return None, f"probe-failed: {exc}"
+    if result.returncode != 0:
+        return None, f"probe-exit-{result.returncode}"
+    return _parse_daemon_info(result.stdout), None
+
+
+def _parse_daemon_info(raw):
+    """Turn the `prin1-to-string' output of `org-gtd-cli/daemon-info' into a
+    Python dict. Returns None when the daemon is a pre-#26 build (no such
+    function), or when parsing fails.
+
+    We do not eval the elisp; we scan tokens because the output shape is
+    small and fixed (`(:pid N :org "..." :socket "..." :ttl N|nil ...)`)."""
+    if raw is None:
+        return None
+    # `emacsclient --eval` wraps the result in double quotes; strip and
+    # unquote once.
+    raw = raw.strip()
+    if raw.startswith('"') and raw.endswith('"'):
+        # Peel the outer emacsclient quoting: it printed `prin1-to-string''s
+        # output as an elisp string, which itself contains an elisp form.
+        inner = raw[1:-1].encode("utf-8").decode("unicode_escape")
+    else:
+        inner = raw
+    inner = inner.strip()
+    if not inner.startswith("(") or not inner.endswith(")"):
+        return None
+    inner = inner[1:-1]
+    # Tokenise: keys are `:kw' symbols; values are integers, `nil', or
+    # double-quoted strings. This matches exactly the shape of
+    # `org-gtd-cli/daemon-info' and is the only expected input.
+    tokens = []
+    i = 0
+    while i < len(inner):
+        c = inner[i]
+        if c.isspace():
+            i += 1
+        elif c == '"':
+            j = i + 1
+            buf = []
+            while j < len(inner):
+                if inner[j] == "\\" and j + 1 < len(inner):
+                    buf.append(inner[j:j + 2])
+                    j += 2
+                elif inner[j] == '"':
+                    break
+                else:
+                    buf.append(inner[j])
+                    j += 1
+            if j >= len(inner):
+                return None
+            tokens.append(("str", "".join(buf).encode("utf-8")
+                           .decode("unicode_escape")))
+            i = j + 1
+        else:
+            j = i
+            while j < len(inner) and not inner[j].isspace():
+                j += 1
+            tokens.append(("atom", inner[i:j]))
+            i = j
+    info = {}
+    idx = 0
+    while idx < len(tokens) - 1:
+        ktype, key = tokens[idx]
+        vtype, val = tokens[idx + 1]
+        if ktype != "atom" or not key.startswith(":"):
+            return None
+        name = key[1:]
+        if vtype == "str":
+            info[name] = val
+        elif val == "nil":
+            info[name] = None
+        else:
+            try:
+                info[name] = int(val)
+            except ValueError:
+                try:
+                    info[name] = float(val)
+                except ValueError:
+                    info[name] = val
+        idx += 2
+    return info
+
+
+def _stop_daemon_via_socket(socket_path, timeout=5):
+    """Ask a live daemon to `kill-emacs' via its own socket, bounded.
+
+    Returns (pid_before_or_None, ok, error). `ok` is True when the daemon
+    was already gone or has exited within TIMEOUT."""
+    info, probe_err = _probe_daemon(socket_path, timeout=min(3, timeout))
+    if info is None and probe_err in ("socket-missing", "probe-exit-1"):
+        return None, True, None
+    if info is None:
+        # Probe failed for some other reason (foreign, timeout). Do not
+        # signal any PID — that could hit a reused PID.
+        return None, False, probe_err or "unknown-probe-failure"
+    pid = info.get("pid") if isinstance(info.get("pid"), int) else None
+    try:
+        result = subprocess.run(
+            [EMACSCLIENT_BIN, "--socket-name", socket_path,
+             "--eval", "(kill-emacs 0)"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return pid, False, "stop-timeout"
+    # Wait for the socket to disappear (a good proxy for actual exit,
+    # bounded so we can't hang here forever).
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.stat(socket_path)
+        except FileNotFoundError:
+            return pid, True, None
+        except OSError:
+            break
+        time.sleep(0.05)
+    # Emacs sometimes stays around briefly with the socket already unlinked;
+    # if `result` succeeded, treat it as stopped.
+    if result.returncode == 0:
+        return pid, True, None
+    return pid, False, f"stop-exit-{result.returncode}"
+
+
+def _resolved_beneath(candidate, root):
+    """True iff CANDIDATE resolves strictly beneath ROOT after realpath.
+    Guards against symlink escape when removing an identity directory."""
+    try:
+        cand_real = os.path.realpath(candidate)
+        root_real = os.path.realpath(root)
+    except OSError:
+        return False
+    if not cand_real.startswith(root_real + os.sep):
+        return False
+    rel = os.path.relpath(cand_real, root_real)
+    return rel not in (".", "") and not rel.startswith("..")
+
+
+def _safe_remove_identity_dir(dir_path, identity):
+    """Recursively remove an owned identity directory, with belt-and-braces.
+
+    Rejects paths that escape `_DAEMON_BASE', foreign-owned directories, or
+    an identity component that does not match the sha-256 hash pattern.
+    Returns (ok, error_message)."""
+    if not _IDENTITY_HASH_RE.match(identity):
+        return False, f"malformed identity {identity!r}; refusing to remove"
+    if not _resolved_beneath(dir_path, _DAEMON_BASE):
+        return False, (f"resolved path {os.path.realpath(dir_path)!r} escapes "
+                       f"{_DAEMON_BASE!r}; refusing to remove")
+    try:
+        st = os.lstat(dir_path)
+    except FileNotFoundError:
+        return True, None
+    except OSError as exc:
+        return False, f"stat failed: {exc}"
+    if st.st_uid != _current_uid():
+        return False, (f"foreign-owned dir (uid {st.st_uid}); refusing to "
+                       "remove")
+    try:
+        shutil.rmtree(dir_path)
+    except OSError as exc:
+        return False, f"rmtree failed: {exc}"
+    return True, None
+
+
+def _relative_socket(socket_path):
+    """Absolute socket path — spec requires this shape verbatim."""
+    return socket_path
+
+
+def _canonical_org_directory(path):
+    """Return a canonical form of a reported ORG_DIRECTORY string.
+    Trailing slashes are normalised; missing files are still fine (an
+    identity's org dir may have been deleted — that's the gc target)."""
+    if not path:
+        return ""
+    canonical = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    return canonical
+
+
+def _age_seconds(info):
+    """Compute a non-negative age from `daemon-info' plist fields."""
+    now = info.get("now") if info else None
+    ince = info.get("inception") if info else None
+    if isinstance(now, (int, float)) and isinstance(ince, (int, float)):
+        age = max(0, int(round(now - ince)))
+        return age
+    # Fallback for a pre-#26 daemon: age from the socket file's ctime
+    # (created by _ensure_daemon; is close enough for observability).
+    return None
+
+
+def _make_daemon_record(identity, socket_path, info):
+    return {
+        "identity": identity,
+        "socket": _relative_socket(socket_path),
+        "org_directory": _canonical_org_directory(
+            (info or {}).get("org", "")),
+        "pid": (info or {}).get("pid"),
+        "age_seconds": _age_seconds(info),
+        "ttl": (info or {}).get("ttl"),
+    }
+
+
+def _emit_daemon_json(payload, json_mode, exit_code):
+    payload["version"] = 1
+    if json_mode:
+        print(json.dumps(payload))
+    return exit_code
+
+
+def cmd_daemon_status(args):
+    """Enumerate live daemons owned by this UID under `_DAEMON_BASE'."""
+    if not _daemon_base_ok():
+        msg = (f"daemon base {_DAEMON_BASE!r} is owned by another user; "
+               "refusing to inspect")
+        if args.json:
+            print(json.dumps({"version": 1, "command": "daemon status",
+                              "daemons": [], "errors": [{"error": msg}]}))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 1
+    candidates, errors = _list_identity_dirs()
+    daemons = []
+    for identity, dir_path in candidates:
+        socket_path = _socket_for_identity_dir(dir_path)
+        info, probe_err = _probe_daemon(socket_path)
+        if info is None:
+            # A quiet dead identity (no live daemon) is not a status error —
+            # it just shouldn't appear in the list. `gc` cleans these up.
+            # Missing/socket-not-there is normal; probe-timeout / foreign
+            # socket / other are surfaced as errors.
+            if probe_err and probe_err not in ("socket-missing",):
+                errors.append({"identity": identity, "socket": socket_path,
+                               "error": probe_err})
+            continue
+        daemons.append(_make_daemon_record(identity, socket_path, info))
+    daemons.sort(key=lambda d: (d["identity"], d["socket"]))
+    exit_code = 1 if errors else 0
+    if args.json:
+        print(json.dumps({"version": 1, "command": "daemon status",
+                          "daemons": daemons, "errors": errors}))
+    else:
+        if not daemons and not errors:
+            print("No live daemons for this UID.")
+        for d in daemons:
+            age = d["age_seconds"] if d["age_seconds"] is not None else "?"
+            ttl = d["ttl"] if d["ttl"] is not None else "?"
+            print(f'{d["identity"]}  pid={d["pid"]}  age={age}s  ttl={ttl}s'
+                  f'  org={d["org_directory"]}  socket={d["socket"]}')
+        for e in errors:
+            key = e.get("identity") or e.get("path") or "?"
+            print(f'error: {key}: {e["error"]}', file=sys.stderr)
+    return exit_code
+
+
+def cmd_daemon_stop(args):
+    """Stop only the current identity's daemon. Idempotent."""
+    identity = _DAEMON_IDENTITY
+    socket_path = SOCKET_PATH
+    if not _daemon_base_ok():
+        msg = (f"daemon base {_DAEMON_BASE!r} is owned by another user; "
+               "refusing to act")
+        if args.json:
+            print(json.dumps({"version": 1, "command": "daemon stop",
+                              "identity": identity, "stopped": False,
+                              "pid": None, "error": msg}))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 1
+    pid, ok, err = _stop_daemon_via_socket(socket_path)
+    stopped = ok and (pid is not None)
+    # Remove the identity dir on any successful stop. If the daemon was
+    # already absent (`pid is None and ok`), also remove any stale dir that
+    # remains — being idempotent is spec-required.
+    removed_err = None
+    dir_path = _SOCKET_DIR
+    if ok and os.path.isdir(dir_path):
+        _, removed_err = _safe_remove_identity_dir(dir_path, identity)
+    payload = {"version": 1, "command": "daemon stop",
+               "identity": identity, "stopped": bool(stopped), "pid": pid}
+    if err:
+        payload["error"] = err
+    if removed_err:
+        payload["error"] = removed_err
+    exit_code = 1 if (err or removed_err) else 0
+    if args.json:
+        print(json.dumps(payload))
+    else:
+        if err:
+            print(f"Error: {err}", file=sys.stderr)
+        elif stopped:
+            print(f"Stopped daemon for identity {identity} (pid {pid}).")
+        else:
+            print(f"No daemon running for identity {identity}.")
+    return exit_code
+
+
+def cmd_daemon_gc(args):
+    """Reap daemons whose ORG_DIRECTORY is gone and clean stale owned dirs."""
+    if not _daemon_base_ok():
+        msg = (f"daemon base {_DAEMON_BASE!r} is owned by another user; "
+               "refusing to act")
+        payload = {"version": 1, "command": "daemon gc",
+                   "reaped": [], "kept": [], "stale_dirs_removed": [],
+                   "errors": [{"error": msg}]}
+        if args.json:
+            print(json.dumps(payload))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 1
+    candidates, errors = _list_identity_dirs()
+    reaped = []
+    kept = []
+    stale_dirs_removed = []
+    for identity, dir_path in candidates:
+        socket_path = _socket_for_identity_dir(dir_path)
+        info, probe_err = _probe_daemon(socket_path)
+        if info is None:
+            # No live daemon here. If the socket file is entirely absent,
+            # this is a stale owned identity dir — remove it. If the socket
+            # exists but the daemon didn't answer (foreign socket, wedged),
+            # report as an error instead of stomping.
+            if probe_err in ("socket-missing", "probe-exit-1"):
+                ok, err = _safe_remove_identity_dir(dir_path, identity)
+                if ok:
+                    stale_dirs_removed.append(dir_path)
+                else:
+                    errors.append({"identity": identity, "path": dir_path,
+                                   "error": err})
+            else:
+                errors.append({"identity": identity, "socket": socket_path,
+                               "error": (probe_err or "unresponsive")})
+            continue
+        org = _canonical_org_directory(info.get("org", ""))
+        record = _make_daemon_record(identity, socket_path, info)
+        if org and os.path.isdir(org):
+            kept.append(record)
+            continue
+        # Reap: ORG_DIRECTORY no longer exists.
+        _, ok, stop_err = _stop_daemon_via_socket(socket_path)
+        if not ok:
+            errors.append({"identity": identity, "socket": socket_path,
+                           "error": stop_err or "stop-failed"})
+            continue
+        remove_ok, remove_err = _safe_remove_identity_dir(dir_path, identity)
+        if not remove_ok:
+            errors.append({"identity": identity, "path": dir_path,
+                           "error": remove_err})
+            continue
+        reaped.append(record)
+    reaped.sort(key=lambda d: (d["identity"], d["socket"]))
+    kept.sort(key=lambda d: (d["identity"], d["socket"]))
+    stale_dirs_removed.sort()
+    exit_code = 1 if errors else 0
+    if args.json:
+        print(json.dumps({"version": 1, "command": "daemon gc",
+                          "reaped": reaped, "kept": kept,
+                          "stale_dirs_removed": stale_dirs_removed,
+                          "errors": errors}))
+    else:
+        if not reaped and not stale_dirs_removed and not errors:
+            print("Nothing to reap.")
+        for r in reaped:
+            print(f'reaped: {r["identity"]} (pid {r["pid"]}, org gone: '
+                  f'{r["org_directory"]})')
+        for d in stale_dirs_removed:
+            print(f"removed stale dir: {d}")
+        for k in kept:
+            print(f'kept: {k["identity"]}  org={k["org_directory"]}')
+        for e in errors:
+            key = e.get("identity") or e.get("path") or "?"
+            print(f'error: {key}: {e["error"]}', file=sys.stderr)
+    return exit_code
 
 
 # --- Grouped help formatter ---
@@ -930,9 +1464,13 @@ Maintenance:
   delete            Delete a task (exact match, no projects)
   fix-timestamps    (removed)
   org-timestamp     Generate formatted org timestamp
+  daemon            Manage the org-gtd-cli Emacs daemon
+                    (subcommands: status, stop, gc)
 
 Environment:
-  ORG_DIRECTORY     Path to org files (default: ~/org/)
+  ORG_DIRECTORY             Path to org files (default: ~/org/)
+  ORG_GTD_CLI_DAEMON        Set to 1 to reuse a per-identity Emacs daemon
+  ORG_GTD_CLI_DAEMON_TTL    Idle TTL in seconds (default 7200; 0=immortal)
 
 Exit codes: 0 success, 1 error, 2 ambiguous match
 
@@ -1295,6 +1833,47 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_get_session_ids)
 
+    # --- Daemon lifecycle management ---
+    #
+    # `daemon status/stop/gc' run regardless of ORG_GTD_CLI_DAEMON, never call
+    # `_ensure_daemon' and never create a daemon. They are also intentionally
+    # NOT exposed through homogeneous or mixed batch modes (per issue #26 spec).
+
+    p = sub.add_parser(
+        "daemon",
+        help="Manage the org-gtd-cli Emacs daemon (status/stop/gc)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""\
+Manage the org-gtd-cli Emacs daemon.
+
+All subcommands run regardless of ORG_GTD_CLI_DAEMON and never spawn a
+daemon; they only inspect existing ones for this UID. The default idle
+TTL is 7200s and is configurable via ORG_GTD_CLI_DAEMON_TTL:
+  ORG_GTD_CLI_DAEMON_TTL=<positive seconds>   idle TTL in seconds
+  ORG_GTD_CLI_DAEMON_TTL=0                    immortal (no timer)
+  ORG_GTD_CLI_DAEMON_TTL unset or empty       default 7200s
+  negative / non-integer values                error; no daemon start
+
+Subcommands:
+  status  List live daemons owned by this UID with identity, socket,
+          org directory, PID, age, and TTL.
+  stop    Stop only the current identity's daemon (idempotent).
+  gc      Stop daemons whose ORG_DIRECTORY no longer exists, remove
+          owned stale identity directories that have no live daemon,
+          and leave every daemon with a live org directory running.
+""")
+    daemon_sub = p.add_subparsers(dest="daemon_command")
+    q = daemon_sub.add_parser("status", help="List live daemons for this UID")
+    q.set_defaults(func=cmd_daemon_status)
+    q = daemon_sub.add_parser("stop", help="Stop the current identity's daemon")
+    q.set_defaults(func=cmd_daemon_stop)
+    q = daemon_sub.add_parser(
+        "gc",
+        help="Reap daemons whose ORG_DIRECTORY is gone; clean owned stale dirs")
+    q.set_defaults(func=cmd_daemon_gc)
+    # Fallback: `daemon` with no subcommand prints help and exits 1.
+    p.set_defaults(func=lambda args: (p.print_help(sys.stderr) or 1))
+
     # --- Batch ---
 
     p = sub.add_parser(
@@ -1548,13 +2127,23 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    if not CORE_FILE or not ELISP_FILE:
+    # `daemon status/gc` never spawn or dispatch to Emacs — they only inspect
+    # existing sockets — so they run even when the elisp paths are not set.
+    # `daemon stop` derives its identity from ORG_GTD_{CORE,ELISP}_FILE, so it
+    # DOES need them (a missing path becomes a mismatched identity, i.e. a
+    # different socket root, which would silently no-op).
+    daemon_command = getattr(args, "daemon_command", None)
+    is_daemon_readonly = (args.command == "daemon"
+                          and daemon_command in ("status", "gc"))
+    if not is_daemon_readonly and (not CORE_FILE or not ELISP_FILE):
         print("Error: ORG_GTD_CORE_FILE and ORG_GTD_ELISP_FILE must be set",
               file=sys.stderr)
         sys.exit(1)
 
     # Handle --batch mode (the `batch` subcommand dispatches normally;
-    # a redundant --batch flag on it is ignored)
+    # a redundant --batch flag on it is ignored). `daemon` is intentionally
+    # not exposed through homogeneous batch — its subcommands run once per
+    # invocation and manage global state, not per-item work.
     if args.batch and args.command != "batch":
         rc = cmd_batch(args)
         sys.exit(rc)

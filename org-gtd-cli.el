@@ -449,7 +449,93 @@ so a batch or multi-file mutation reports its true partial state."
       (message "Error: %s" message-text)
       (message "Hint: %s" hint-text))))
 
-(defun org-gtd-cli/daemon-dispatch (body-fn json-mode-p full-mode-p org-dir stdout-file stderr-file exit-file)
+;; --- Bounded daemon lifecycle (Forgejo #26) ----------------------------------
+;;
+;; The daemon opts in through `ORG_GTD_CLI_DAEMON=1' and lives, by default, for
+;; two hours of idleness before self-terminating. The Python side parses
+;; `ORG_GTD_CLI_DAEMON_TTL' (seconds; 0 = immortal; negative/malformed = error)
+;; and threads it into `daemon-dispatch' per call, so an already-running
+;; identity picks up a new TTL from the caller's environment on its next
+;; dispatch. Each dispatch cancels the pending timer at start and re-arms it
+;; at the end (including error exits — the unwind-protect below), so the
+;; timer never kills a command in flight. When it does fire, we tear down
+;; only this identity's owned socket dir; peer identities under the same
+;; `_DAEMON_BASE' are untouched.
+;;
+;; The Python management commands (`daemon status/stop/gc') probe live
+;; daemons via `emacsclient --eval', reading `org-gtd-cli/daemon-info' below.
+
+(defvar org-gtd-cli/daemon-inception-ts nil
+  "Universal-time float when this daemon first served a dispatch.
+Set once (idempotently) by `org-gtd-cli/daemon-record-startup'. Reported
+as `age' by `daemon status' and unaffected by later TTL changes.")
+
+(defvar org-gtd-cli/daemon-ttl-seconds nil
+  "Current idle TTL for this daemon in seconds.
+`nil' — the daemon predates any TTL request in this session (only
+possible for a pre-#26 client talking to a #26 daemon before the client
+has made its first dispatch under it). `0' means immortal (no timer).
+Positive means the timer expires this many seconds after the LAST
+completed dispatch. Reported by `daemon status'.")
+
+(defvar org-gtd-cli/daemon-ttl-timer nil
+  "Active idle-TTL timer, or nil when disarmed.
+Cancelled at every dispatch start and re-armed at every dispatch end.")
+
+(defun org-gtd-cli/daemon-record-startup ()
+  "Record the inception timestamp on the first dispatch this daemon serves."
+  (unless org-gtd-cli/daemon-inception-ts
+    (setq org-gtd-cli/daemon-inception-ts (float-time))))
+
+(defun org-gtd-cli/daemon-cancel-ttl ()
+  "Cancel a pending TTL timer so it cannot terminate Emacs mid-command."
+  (when (and org-gtd-cli/daemon-ttl-timer
+             (timerp org-gtd-cli/daemon-ttl-timer))
+    (cancel-timer org-gtd-cli/daemon-ttl-timer))
+  (setq org-gtd-cli/daemon-ttl-timer nil))
+
+(defun org-gtd-cli/daemon-arm-ttl (seconds)
+  "Store SECONDS as the current TTL and (re-)arm the idle timer.
+`nil' leaves the stored TTL unchanged (a client that has not routed a
+TTL through the wrapper). Otherwise SECONDS is stored; a positive value
+arms the timer, `0' leaves it disarmed (immortal)."
+  (org-gtd-cli/daemon-cancel-ttl)
+  (when (integerp seconds)
+    (setq org-gtd-cli/daemon-ttl-seconds seconds))
+  (when (and (integerp org-gtd-cli/daemon-ttl-seconds)
+             (> org-gtd-cli/daemon-ttl-seconds 0))
+    (setq org-gtd-cli/daemon-ttl-timer
+          (run-with-timer
+           org-gtd-cli/daemon-ttl-seconds nil
+           #'org-gtd-cli/daemon-ttl-expire))))
+
+(defun org-gtd-cli/daemon-ttl-expire ()
+  "Timer callback: clean shutdown, remove this identity's owned dir."
+  (let* ((socket (and (boundp 'server-name) server-name))
+         (dir (and (stringp socket)
+                   (file-name-directory (expand-file-name socket)))))
+    (when (and dir (file-directory-p dir))
+      (condition-case _
+          ;; `delete-directory' as this user; foreign files would error out.
+          ;; The socket dir is `_DAEMON_BASE/<identity>' — removing it also
+          ;; drops the private `emacs.d/' and any lifecycle state, and the
+          ;; per-UID `_DAEMON_BASE' parent (used by peer identities) is
+          ;; kept intact.
+          (delete-directory dir t nil)
+        (error nil))))
+  (kill-emacs 0))
+
+(defun org-gtd-cli/daemon-info ()
+  "Return a plist snapshot of this daemon's lifecycle state.
+Consumed by the Python management commands via `emacsclient --eval'."
+  (list :pid (emacs-pid)
+        :org (or (bound-and-true-p org-directory) "")
+        :socket (or (and (boundp 'server-name) server-name) "")
+        :ttl org-gtd-cli/daemon-ttl-seconds
+        :inception org-gtd-cli/daemon-inception-ts
+        :now (float-time)))
+
+(defun org-gtd-cli/daemon-dispatch (body-fn json-mode-p full-mode-p org-dir stdout-file stderr-file exit-file &optional ttl-seconds)
   "Evaluate BODY-FN with output captured to temp files.
 Used by emacsclient --eval in daemon mode.
 
@@ -465,7 +551,15 @@ during the body (via `ask-user-about-supersession-threat' or the
 inline modtime check) becomes a `org-gtd-cli/file-conflict' signal.
 On conflict the dispatch is aborted, unsaved edits are discarded, the
 buffers are reloaded from disk, and a JSON/text conflict envelope with
-`file'/`partial'/`saved_files' is returned with exit code 1."
+`file'/`partial'/`saved_files' is returned with exit code 1.
+
+Optional TTL-SECONDS is the caller's current
+`ORG_GTD_CLI_DAEMON_TTL' value (non-negative integer; `0' = immortal).
+Nil leaves the current TTL unchanged. The idle timer is cancelled at
+dispatch start so it can never terminate Emacs mid-command, and re-armed
+at dispatch end (including error exits, via `unwind-protect') using the
+caller's TTL request — so changing the environment affects an
+already-running identity on its next call."
   ;; Update org-directory per call (may differ between invocations)
   (setq org-directory org-dir)
   (unless (string-suffix-p "/" org-directory)
@@ -473,83 +567,92 @@ buffers are reloaded from disk, and a JSON/text conflict envelope with
   (setq org-agenda-files (list org-directory))
   (setq org-gtd-cli/json-mode json-mode-p)
   (setq org-gtd-cli/full-mode full-mode-p)
-  (let ((org-gtd-cli--exit-code 0)
-        (stderr-msgs '())
-        (org-gtd-cli/dispatch-saved-files nil)
-        ;; Capture the real `verify-visited-file-modtime' BEFORE any letf
-        ;; shadow of it, so the guard can still perform an authentic check
-        ;; while BODY-FN sees the shadowed constant `t' (see below).
-        (org-gtd-cli/dispatch--real-verify-visited-file-modtime
-         (symbol-function 'verify-visited-file-modtime)))
-    ;; Dispatch-start refresh: an external change that landed BEFORE the
-    ;; command begins is loaded normally and must not be misclassified as a
-    ;; mid-dispatch conflict.  The C-level supersession probe (via `lock-file'
-    ;; reached from `prepare_to_modify_buffer', including during the revert
-    ;; itself) still calls `ask-user-about-supersession-threat' — return nil so
-    ;; the revert proceeds silently instead of prompting or signaling
-    ;; `file-supersession'.
-    (cl-letf (((symbol-function 'ask-user-about-supersession-threat)
-               (lambda (_filename) nil)))
-      (org-gtd-cli/revert-org-buffers))
-    (with-temp-file stdout-file
-      (let ((standard-output (current-buffer)))
-        (cl-letf (((symbol-function 'kill-emacs)
-                   (lambda (&optional code)
-                     (setq org-gtd-cli--exit-code (or code 0))
-                     (throw 'org-gtd-cli-exit nil)))
-                  ((symbol-function 'message)
-                   (lambda (fmt &rest args)
-                     (when fmt
-                       (push (apply #'format fmt args) stderr-msgs))))
-                  ;; Convert any supersession probe that fires inside BODY-FN
-                  ;; (e.g. a path that bypasses the modtime shadow below and
-                  ;; still ends up calling `ask-user-about-supersession-threat')
-                  ;; into the one noninteractive conflict signal — no path may
-                  ;; open a minibuffer or wait indefinitely.
-                  ((symbol-function 'ask-user-about-supersession-threat)
-                   (lambda (filename)
-                     (signal 'org-gtd-cli/file-conflict (list filename))))
-                  ;; Shadow `verify-visited-file-modtime' to `t' inside
-                  ;; BODY-FN.  Two paths depend on it:
-                  ;;   (1) The C `lock-file' probe reached from
-                  ;;       `prepare_to_modify_buffer' skips
-                  ;;       `ask-user-about-supersession-threat' entirely
-                  ;;       when this returns `t', so a hammered mtime cannot
-                  ;;       fire a rush of signals per modification.
-                  ;;   (2) `basic-save-buffer''s inline supersession check —
-                  ;;       and `find-file-noselect''s revisit check — see `t'
-                  ;;       instead of hitting `yes-or-no-p' (which would hang
-                  ;;       a headless daemon).
-                  ;; The centralized guard (`org-gtd-cli/save-buffer-with-
-                  ;; conflict-check') still performs an authentic modtime
-                  ;; check via the saved reference above, so the shadow does
-                  ;; NOT bypass the actual detection at save time.
-                  ((symbol-function 'verify-visited-file-modtime)
-                   (lambda (&optional _b) t))
-                  ;; Route every `save-buffer' — single-file, multi-file,
-                  ;; refile, archive, and delegated batch item — through the
-                  ;; centralized guard, so they share the same conflict
-                  ;; semantics.
-                  ((symbol-function 'save-buffer)
-                   (lambda (&optional _arg)
-                     (org-gtd-cli/save-buffer-with-conflict-check))))
-          (catch 'org-gtd-cli-exit
-            ;; Once-per-dispatch text-mode sync-conflict line (captured to
-            ;; stderr-file by the `message' rebind above).  Reads the live
-            ;; `org-directory' just set from ORG-DIR, so a marker that appears
-            ;; while this long-lived daemon runs is seen on the very next
-            ;; dispatch — never cached at daemon start.
-            (org-gtd-cli/emit-text-sync-conflict-warning)
-            (condition-case err
-                (funcall body-fn)
-              (org-gtd-cli/file-conflict
-               (org-gtd-cli/handle-file-conflict err json-mode-p)
-               (setq org-gtd-cli--exit-code 1)))))))
-    (with-temp-file stderr-file
-      (dolist (msg (nreverse stderr-msgs))
-        (insert msg "\n")))
-    (with-temp-file exit-file
-      (insert (number-to-string org-gtd-cli--exit-code))))
+  (org-gtd-cli/daemon-record-startup)
+  ;; Cancel any pending idle timer so it cannot kill this Emacs while the
+  ;; dispatch is running.
+  (org-gtd-cli/daemon-cancel-ttl)
+  (unwind-protect
+      (let ((org-gtd-cli--exit-code 0)
+            (stderr-msgs '())
+            (org-gtd-cli/dispatch-saved-files nil)
+            ;; Capture the real `verify-visited-file-modtime' BEFORE any letf
+            ;; shadow of it, so the guard can still perform an authentic check
+            ;; while BODY-FN sees the shadowed constant `t' (see below).
+            (org-gtd-cli/dispatch--real-verify-visited-file-modtime
+             (symbol-function 'verify-visited-file-modtime)))
+        ;; Dispatch-start refresh: an external change that landed BEFORE the
+        ;; command begins is loaded normally and must not be misclassified as a
+        ;; mid-dispatch conflict.  The C-level supersession probe (via `lock-file'
+        ;; reached from `prepare_to_modify_buffer', including during the revert
+        ;; itself) still calls `ask-user-about-supersession-threat' — return nil so
+        ;; the revert proceeds silently instead of prompting or signaling
+        ;; `file-supersession'.
+        (cl-letf (((symbol-function 'ask-user-about-supersession-threat)
+                   (lambda (_filename) nil)))
+          (org-gtd-cli/revert-org-buffers))
+        (with-temp-file stdout-file
+          (let ((standard-output (current-buffer)))
+            (cl-letf (((symbol-function 'kill-emacs)
+                       (lambda (&optional code)
+                         (setq org-gtd-cli--exit-code (or code 0))
+                         (throw 'org-gtd-cli-exit nil)))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (when fmt
+                           (push (apply #'format fmt args) stderr-msgs))))
+                      ;; Convert any supersession probe that fires inside BODY-FN
+                      ;; (e.g. a path that bypasses the modtime shadow below and
+                      ;; still ends up calling `ask-user-about-supersession-threat')
+                      ;; into the one noninteractive conflict signal — no path may
+                      ;; open a minibuffer or wait indefinitely.
+                      ((symbol-function 'ask-user-about-supersession-threat)
+                       (lambda (filename)
+                         (signal 'org-gtd-cli/file-conflict (list filename))))
+                      ;; Shadow `verify-visited-file-modtime' to `t' inside
+                      ;; BODY-FN.  Two paths depend on it:
+                      ;;   (1) The C `lock-file' probe reached from
+                      ;;       `prepare_to_modify_buffer' skips
+                      ;;       `ask-user-about-supersession-threat' entirely
+                      ;;       when this returns `t', so a hammered mtime cannot
+                      ;;       fire a rush of signals per modification.
+                      ;;   (2) `basic-save-buffer''s inline supersession check —
+                      ;;       and `find-file-noselect''s revisit check — see `t'
+                      ;;       instead of hitting `yes-or-no-p' (which would hang
+                      ;;       a headless daemon).
+                      ;; The centralized guard (`org-gtd-cli/save-buffer-with-
+                      ;; conflict-check') still performs an authentic modtime
+                      ;; check via the saved reference above, so the shadow does
+                      ;; NOT bypass the actual detection at save time.
+                      ((symbol-function 'verify-visited-file-modtime)
+                       (lambda (&optional _b) t))
+                      ;; Route every `save-buffer' — single-file, multi-file,
+                      ;; refile, archive, and delegated batch item — through the
+                      ;; centralized guard, so they share the same conflict
+                      ;; semantics.
+                      ((symbol-function 'save-buffer)
+                       (lambda (&optional _arg)
+                         (org-gtd-cli/save-buffer-with-conflict-check))))
+              (catch 'org-gtd-cli-exit
+                ;; Once-per-dispatch text-mode sync-conflict line (captured to
+                ;; stderr-file by the `message' rebind above).  Reads the live
+                ;; `org-directory' just set from ORG-DIR, so a marker that appears
+                ;; while this long-lived daemon runs is seen on the very next
+                ;; dispatch — never cached at daemon start.
+                (org-gtd-cli/emit-text-sync-conflict-warning)
+                (condition-case err
+                    (funcall body-fn)
+                  (org-gtd-cli/file-conflict
+                   (org-gtd-cli/handle-file-conflict err json-mode-p)
+                   (setq org-gtd-cli--exit-code 1)))))))
+        (with-temp-file stderr-file
+          (dolist (msg (nreverse stderr-msgs))
+            (insert msg "\n")))
+        (with-temp-file exit-file
+          (insert (number-to-string org-gtd-cli--exit-code))))
+    ;; Re-arm the idle timer even on error exit. `nil' TTL from an old
+    ;; wrapper leaves the current TTL unchanged; an integer stores AND
+    ;; arms.
+    (org-gtd-cli/daemon-arm-ttl ttl-seconds))
   nil)
 
 ;; ══════════════════════════════════════════════════════════════════════════════

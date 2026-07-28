@@ -6773,6 +6773,411 @@ class TestDaemonSortStalenessRegression:
 
 
 # ===========================================================================
+# Forgejo #26: bounded daemon lifecycle (idle TTL + daemon status/stop/gc)
+# ===========================================================================
+
+
+class TestDaemonLifecycleCore:
+    """Idle-TTL semantics: expiry, cancel-mid-dispatch, respawn."""
+
+    @staticmethod
+    def _make_daemon_tmp():
+        return tempfile.mkdtemp(prefix="ogc-", dir=os.environ.get("TMPDIR", "/tmp"))
+
+    @staticmethod
+    def _kill_daemon(daemon_tmp):
+        kill_test_daemons(daemon_tmp)
+
+    @staticmethod
+    def _identity_dirs(daemon_tmp):
+        base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+        if not base.exists():
+            return []
+        return sorted(p for p in base.iterdir() if p.is_dir())
+
+    def _warm(self, org_dir, env):
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "Buy groceries",
+            org_dir=org_dir, env_overrides=env)
+        assert rc == 0, f"warm stderr={stderr}"
+
+    def test_daemon_ttl_expiry_removes_identity_dir_and_respawns(self, org_dir):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": "", "ORG_GTD_CLI_DAEMON_TTL": "2"}
+        try:
+            self._warm(org_dir, env)
+            sockets_before = daemon_socket_paths(daemon_tmp)
+            assert len(sockets_before) == 1
+            id_dir = sockets_before[0].parent
+            assert id_dir.exists()
+
+            # Wait past TTL for the idle timer to fire; the identity dir
+            # (socket + private emacs.d + lifecycle state) is removed.
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline and id_dir.exists():
+                time.sleep(0.1)
+            assert not id_dir.exists(), \
+                f"identity dir {id_dir!r} was not cleaned up"
+
+            # The next call transparently respawns; PID differs.
+            stdout, stderr, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert data["daemons"] == []
+
+            self._warm(org_dir, env)
+            stdout, _, _ = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            data = json.loads(stdout)
+            assert len(data["daemons"]) == 1
+            new_pid = data["daemons"][0]["pid"]
+            # First warm-up's PID isn't preserved (dir was reaped), but the
+            # new PID must be a valid live process. Different daemon → new PID.
+            assert isinstance(new_pid, int) and new_pid > 0
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_ttl_zero_immortal_survives_test_window(self, org_dir):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": "", "ORG_GTD_CLI_DAEMON_TTL": "0"}
+        try:
+            self._warm(org_dir, env)
+            sockets = daemon_socket_paths(daemon_tmp)
+            assert len(sockets) == 1
+            id_dir = sockets[0].parent
+            time.sleep(3)  # positive-TTL test window
+            assert id_dir.exists(), "immortal daemon was reaped"
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert len(data["daemons"]) == 1
+            assert data["daemons"][0]["ttl"] == 0
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_ttl_unset_uses_default_7200(self, org_dir):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(org_dir, env)
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert data["daemons"][0]["ttl"] == 7200
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    @pytest.mark.parametrize("bad", ["-1", "abc", "1.5", "5 "])
+    def test_daemon_ttl_invalid_rejected_no_spawn(self, org_dir, bad):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": "", "ORG_GTD_CLI_DAEMON_TTL": bad}
+        try:
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 1, f"expected 1, got {rc}"
+            data = json.loads(stdout)
+            assert "error" in data
+            assert "ORG_GTD_CLI_DAEMON_TTL" in data["error"]
+            # No daemon spawned.
+            assert daemon_socket_paths(daemon_tmp) == []
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_ttl_batch_mode_is_unaffected(self, org_dir):
+        """`ORG_GTD_CLI_DAEMON=0' ignores TTL entirely — no daemon, no timer,
+        no lifecycle metadata."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": "",
+               "ORG_GTD_CLI_DAEMON_TTL": "-1"}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["command"] == "show"
+            assert daemon_socket_paths(daemon_tmp) == []
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_ttl_timer_cancelled_around_dispatch(self, org_dir):
+        """A dispatch resets the TTL — a very short TTL followed by
+        continuous traffic never expires because each dispatch re-arms it."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": "", "ORG_GTD_CLI_DAEMON_TTL": "2"}
+        try:
+            self._warm(org_dir, env)
+            id_dir = daemon_socket_paths(daemon_tmp)[0].parent
+            # Keep the daemon busy across two TTL windows.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                stdout, stderr, rc = run_cli(
+                    "--json", "show", "Buy groceries",
+                    org_dir=org_dir, env_overrides=env)
+                assert rc == 0, f"stderr={stderr}"
+                time.sleep(0.5)
+            assert id_dir.exists(), \
+                "identity dir vanished under continuous traffic"
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+
+class TestDaemonManagementCommands:
+    """`daemon status/stop/gc' — output shape and safety guards."""
+
+    @staticmethod
+    def _make_daemon_tmp():
+        return tempfile.mkdtemp(prefix="ogc-", dir=os.environ.get("TMPDIR", "/tmp"))
+
+    @staticmethod
+    def _kill_daemon(daemon_tmp):
+        kill_test_daemons(daemon_tmp)
+
+    def _warm(self, org_dir, env):
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "Buy groceries",
+            org_dir=org_dir, env_overrides=env)
+        assert rc == 0, f"warm stderr={stderr}"
+
+    def test_daemon_status_empty_ok(self, tmp_path):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=tmp_path, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert data == {"version": 1, "command": "daemon status",
+                            "daemons": [], "errors": []}
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_status_lists_multiple_deterministically(self, org_dir):
+        daemon_tmp = self._make_daemon_tmp()
+        other = Path(tempfile.mkdtemp(prefix="ogc-org-", dir=daemon_tmp))
+        for f in FIXTURES_DIR.glob("*.org"):
+            shutil.copy(f, other / f.name)
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(org_dir, env)
+            self._warm(other, env)
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert len(data["daemons"]) == 2
+            required = {"identity", "socket", "org_directory", "pid",
+                        "age_seconds", "ttl"}
+            for d in data["daemons"]:
+                assert required <= set(d)
+                assert isinstance(d["pid"], int) and d["pid"] > 0
+                assert d["age_seconds"] >= 0
+                assert d["ttl"] == 7200
+            # Deterministic order (identity, socket).
+            identities = [d["identity"] for d in data["daemons"]]
+            assert identities == sorted(identities)
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_stop_idempotent_when_absent(self, org_dir):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "stop",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert data["command"] == "daemon stop"
+            assert data["stopped"] is False
+            assert data["pid"] is None
+            # And a second call is still a success.
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "stop",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_stop_removes_identity_dir(self, org_dir):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(org_dir, env)
+            id_dir = daemon_socket_paths(daemon_tmp)[0].parent
+            assert id_dir.exists()
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "stop",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert data["stopped"] is True
+            assert isinstance(data["pid"], int)
+            assert not id_dir.exists()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_stop_works_when_org_directory_deleted(self, tmp_path):
+        daemon_tmp = self._make_daemon_tmp()
+        org = tmp_path / "org-goes-away"
+        org.mkdir()
+        for f in FIXTURES_DIR.glob("*.org"):
+            shutil.copy(f, org / f.name)
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(org, env)
+            shutil.rmtree(org)
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "stop",
+                org_dir=org, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert data["stopped"] is True
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_gc_reaps_missing_org_dir_leaves_others(self, tmp_path):
+        daemon_tmp = self._make_daemon_tmp()
+        keep = tmp_path / "keep"
+        drop = tmp_path / "drop"
+        for d in (keep, drop):
+            d.mkdir()
+            for f in FIXTURES_DIR.glob("*.org"):
+                shutil.copy(f, d / f.name)
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(keep, env)
+            self._warm(drop, env)
+            assert len(daemon_socket_paths(daemon_tmp)) == 2
+            shutil.rmtree(drop)
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=drop, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["command"] == "daemon gc"
+            assert data["stale_dirs_removed"] == []
+            assert len(data["reaped"]) == 1
+            assert len(data["kept"]) == 1
+            reaped_org = data["reaped"][0]["org_directory"]
+            assert os.path.realpath(str(drop)) == reaped_org
+            kept_org = data["kept"][0]["org_directory"]
+            assert os.path.realpath(str(keep)) == kept_org
+            # After gc, only the surviving daemon's socket remains.
+            surviving = daemon_socket_paths(daemon_tmp)
+            assert len(surviving) == 1
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_gc_works_when_current_org_directory_missing(self, tmp_path):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=(tmp_path / "nonexistent"), env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert data["reaped"] == data["kept"] == \
+                data["stale_dirs_removed"] == []
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_gc_removes_stale_owned_identity_dirs(self, org_dir):
+        """A stale identity dir (no live daemon, socket file gone) is
+        cleaned up by gc even without probing anything."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        # Build a synthetic identity dir with the correct sha-256 hash shape
+        base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+        base.mkdir(parents=True)
+        stale = base / ("f" * 32)  # 32 hex chars → matches identity regex
+        stale.mkdir()
+        (stale / "emacs.d").mkdir()
+        assert stale.exists()
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            data = json.loads(stdout)
+            assert str(stale) in data["stale_dirs_removed"]
+            assert not stale.exists()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_gc_foreign_owned_dir_is_reported_not_touched(self, org_dir):
+        """A directory that doesn't match the identity regex must be
+        reported as malformed and left alone."""
+        daemon_tmp = self._make_daemon_tmp()
+        base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+        base.mkdir(parents=True)
+        malformed = base / "not-a-hex-hash"
+        malformed.mkdir()
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 1, stdout
+            data = json.loads(stdout)
+            assert malformed.exists()
+            error_paths = [e.get("path") for e in data["errors"]]
+            assert str(malformed) in error_paths
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_status_never_calls_ensure_daemon(self, tmp_path):
+        """`daemon status` must not spawn a daemon."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=tmp_path, env_overrides=env)
+            assert rc == 0
+            assert daemon_socket_paths(daemon_tmp) == []
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_management_not_in_homogeneous_batch(self, org_dir):
+        """`--batch daemon` is not exposed."""
+        env = {"ORG_GTD_CLI_DAEMON": "0"}
+        stdout, stderr, rc = run_cli(
+            "--json", "--batch", "daemon",
+            org_dir=org_dir, env_overrides=env)
+        assert rc == 1
+        assert "not supported" in (stdout + stderr).lower() or \
+            "daemon" in stderr.lower()
+
+
+# ===========================================================================
 # Removed commands
 # ===========================================================================
 
