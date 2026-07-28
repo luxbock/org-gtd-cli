@@ -381,6 +381,14 @@ path-escaping candidates are left untouched and reported as errors
 `gc.reaped` / `gc.kept`. Every `emacsclient` probe and stop is time-bounded
 so a wedged daemon cannot hang the command indefinitely.
 
+A live **pre-upgrade daemon** (started before these commands existed, so it
+cannot answer the info probe) is still recognized as running via a
+`(emacs-pid)` fallback probe: `status` lists it with `ttl: null` and an
+empty `org_directory`, `gc` keeps it (its org directory cannot be proven
+gone), and `stop` stops it normally. A socket file left behind by an
+uncleanly killed daemon (nothing listening) is a quiet dead identity:
+`status` skips it with exit 0 and `gc` removes its directory.
+
 ## Development
 
 ```sh

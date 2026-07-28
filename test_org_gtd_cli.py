@@ -7166,6 +7166,146 @@ class TestDaemonManagementCommands:
         finally:
             self._kill_daemon(daemon_tmp)
 
+    def test_daemon_legacy_without_daemon_info_is_live_not_stale(self, org_dir):
+        """org-gtd-cli-92y.5: a live pre-#26 daemon has no
+        `org-gtd-cli/daemon-info', so the probe eval fails with the same
+        emacsclient exit code as a dead socket. It must still be treated as
+        RUNNING: listed by `status' (ttl null), kept by `gc' (its org dir
+        cannot be proven gone), and stoppable by `stop' — never rmtree'd
+        out from under a live Emacs into an unreachable orphan."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(org_dir, env)
+            socket = daemon_socket_paths(daemon_tmp)[0]
+            id_dir = socket.parent
+            # Turn the live daemon into a pre-#26 one: remove daemon-info.
+            r = subprocess.run(
+                ["emacsclient", "--socket-name", str(socket), "--eval",
+                 "(fmakunbound 'org-gtd-cli/daemon-info)"],
+                capture_output=True, text=True, timeout=10, check=False)
+            assert r.returncode == 0, f"fmakunbound failed: {r.stderr}"
+
+            # status: listed as live, ttl unknown (null), pid real.
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["errors"] == []
+            assert len(data["daemons"]) == 1
+            pid = data["daemons"][0]["pid"]
+            assert isinstance(pid, int) and pid > 0
+            assert data["daemons"][0]["ttl"] is None
+
+            # gc: kept, not reaped, not "stale dir removed"; the daemon
+            # survives with its identity dir intact.
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["reaped"] == []
+            assert data["stale_dirs_removed"] == []
+            assert len(data["kept"]) == 1
+            assert id_dir.exists(), "gc removed a LIVE daemon's identity dir"
+            os.kill(pid, 0)  # raises if gc killed the daemon
+
+            # stop: a legacy daemon is still stoppable through its socket.
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "stop",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["stopped"] is True
+            assert data["pid"] == pid
+            assert not id_dir.exists()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_status_ok_after_sigkill_leftover_socket(self, org_dir):
+        """org-gtd-cli-92y.5 (mirror image): a SIGKILLed daemon leaves its
+        socket file behind with nothing listening. `status' must treat that
+        as a quiet dead identity (exit 0, not an error on every call, per
+        the README's empty-successful-result contract); `gc' cleans it."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(org_dir, env)
+            socket = daemon_socket_paths(daemon_tmp)[0]
+            id_dir = socket.parent
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0
+            pid = json.loads(stdout)["daemons"][0]["pid"]
+
+            os.kill(pid, signal.SIGKILL)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail(f"daemon pid {pid} survived SIGKILL")
+            assert socket.exists(), "SIGKILL should leave the socket file"
+
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"status must not error on a dead socket: {stdout}"
+            data = json.loads(stdout)
+            assert data["daemons"] == []
+            assert data["errors"] == []
+
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert str(id_dir) in data["stale_dirs_removed"]
+            assert not id_dir.exists()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_non_ascii_org_directory_round_trips(self, tmp_path):
+        """org-gtd-cli-92y.6: a non-ASCII ORG_DIRECTORY must round-trip
+        through `daemon-info' without mojibake — `status' reports the real
+        path and `gc' keeps the daemon (its org dir exists)."""
+        daemon_tmp = self._make_daemon_tmp()
+        org = tmp_path / "örg"
+        org.mkdir()
+        for f in FIXTURES_DIR.glob("*.org"):
+            shutil.copy(f, org / f.name)
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            self._warm(org, env)
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert len(data["daemons"]) == 1
+            reported = data["daemons"][0]["org_directory"]
+            assert reported == os.path.realpath(str(org)), \
+                f"mangled org path: {reported!r}"
+            assert "Ã" not in reported  # the latin-1 mojibake signature
+
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=org, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["reaped"] == []
+            assert len(data["kept"]) == 1
+        finally:
+            self._kill_daemon(daemon_tmp)
+
     def test_daemon_management_not_in_homogeneous_batch(self, org_dir):
         """`--batch daemon` is not exposed."""
         env = {"ORG_GTD_CLI_DAEMON": "0"}
