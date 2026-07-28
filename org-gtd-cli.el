@@ -144,6 +144,20 @@ per-invocation-fresh in both batch and daemon mode (daemon-dispatch resets
     `((type . "sync-conflict")
       (detail . ,org-gtd-cli/sync-conflict-detail))))
 
+(defvar org-gtd-cli/suppress-universal-warnings nil
+  "When non-nil, `org-gtd-cli/inject-warnings' is a no-op.
+Bound to t around delegated per-item batch execution (see
+`org-gtd-cli/batch--delegate'): universal environmental warnings like
+`sync-conflict' are a property of the *invocation*, so they belong ONCE
+on the top-level batch envelope (injected when `batch--output' calls
+`org-gtd-cli/output' outside this binding), never on per-item results.
+Suppressing the injection at this boundary — instead of stripping the
+`warnings' key from per-item payloads downstream — keeps each item's own
+per-item warnings intact: outline/agenda-view's `duplicate-idless-heading'
+entries (#32) are computed per item's file and must survive on the item
+exactly as a single CLI call would report them (including the
+always-present `warnings: []' on the clean path).")
+
 (defun org-gtd-cli/inject-warnings (alist)
   "Return ALIST with universal environmental warnings folded into `warnings'.
 Only `(version . 1)' envelopes are touched; anything else (e.g. bare error
@@ -151,8 +165,12 @@ objects) is returned unchanged.  When the sync-conflict marker is present,
 its entry is MERGED into an existing `warnings' vector (composing with the
 per-command vocabulary #32 already built there) or, absent that key, a new
 `warnings' vector is added.  Marker absent → ALIST is returned untouched,
-so envelopes stay byte-identical to their pre-#35 shape."
-  (if (not (equal (alist-get 'version alist) 1))
+so envelopes stay byte-identical to their pre-#35 shape.  When
+`org-gtd-cli/suppress-universal-warnings' is non-nil (delegated per-item
+batch execution), ALIST is returned untouched so per-item payloads keep
+exactly their single-call shape."
+  (if (or org-gtd-cli/suppress-universal-warnings
+          (not (equal (alist-get 'version alist) 1)))
       alist
     (let ((extra (delq nil (list (org-gtd-cli/sync-conflict-warning)))))
       (if (null extra)
@@ -5268,7 +5286,13 @@ failure (non-zero exit) signals `error' with the message FN reported."
     (unwind-protect
         (progn
           (let ((standard-output cap)
-                (org-gtd-cli/json-mode t))
+                (org-gtd-cli/json-mode t)
+                ;; Universal environmental warnings (e.g. `sync-conflict')
+                ;; describe the invocation, not this one item: keep them off
+                ;; the delegated payload here so per-item results carry only
+                ;; their own per-item warnings (#32), and let `batch--output's
+                ;; top-level `output' call inject them once.
+                (org-gtd-cli/suppress-universal-warnings t))
             (cl-letf (((symbol-function 'kill-emacs)
                        (lambda (&optional code)
                          (setq exit-code (or code 0))
@@ -5314,17 +5338,17 @@ failure (non-zero exit) signals `error' with the message FN reported."
 (defun org-gtd-cli/batch--result (idx payload &optional extra)
   "Build a per-item batch result from a delegated command's PAYLOAD.
 Strips PAYLOAD's version/command wrapper and prepends the batch
-bookkeeping fields (index, success) plus EXTRA fields.  Also strips the
-universal `warnings' field: the delegate re-serializes each command through
-`org-gtd-cli/output', which injects environmental warnings (e.g.
-`sync-conflict') into every `(version . 1)' envelope — but those are a
-property of the *invocation*, not of any single item, so they ride the
-top-level batch envelope once (added when `batch--output' calls `output')
-and must not be duplicated onto per-item results."
+bookkeeping fields (index, success) plus EXTRA fields.  Any `warnings'
+the command itself built (e.g. outline/agenda-view's per-file
+`duplicate-idless-heading' entries, #32) are kept on the item; universal
+invocation-level warnings never reach PAYLOAD because
+`org-gtd-cli/batch--delegate' binds
+`org-gtd-cli/suppress-universal-warnings' — they ride the top-level batch
+envelope once instead (added when `batch--output' calls `output')."
   (append `((index . ,idx) (success . t))
           extra
           (cl-remove-if
-           (lambda (kv) (memq (car-safe kv) '(version command warnings)))
+           (lambda (kv) (memq (car-safe kv) '(version command)))
            payload)))
 
 (defun org-gtd-cli/batch-one (command item shared-arg idx)

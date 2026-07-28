@@ -9215,6 +9215,52 @@ class TestSyncConflictWarning:
         assert data["batch"] is True
         assert SYNC_CONFLICT_TEXT_LINE not in result.stderr
 
+    def test_batch_mixed_outline_keeps_per_item_duplicate_warnings(self, org_dir):
+        """Regression (review-bot on PR #51): a mixed-batch `outline` item
+        KEEPS its own per-item `warnings` — #32's `duplicate-idless-heading`
+        groups are computed per item's file and must survive batch delegation
+        exactly as a single CLI call reports them.  The invocation-level
+        `sync-conflict` entry rides the top-level batch envelope exactly once
+        and never leaks onto per-item results.  The shared tasks.org fixture
+        deliberately carries two id-less `Tools` headings, so the item's
+        array is non-empty."""
+        _drop_sync_marker(org_dir)
+        items = [{"command": "outline", "args": {"file": "tasks.org"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0, stderr
+        item = data["results"][0]
+        assert "warnings" in item, "per-item outline warnings must survive batch"
+        item_types = [w["type"] for w in item["warnings"]]
+        assert {
+            "type": "duplicate-idless-heading",
+            "file": "tasks.org",
+            "heading": "Tools",
+            "count": 2,
+        } in item["warnings"]
+        # The invocation-level warning stays off per-item results ...
+        assert "sync-conflict" not in item_types
+        # ... and rides the top-level envelope exactly once.
+        top = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert top == [SYNC_CONFLICT_ENTRY]
+
+    def test_batch_mixed_outline_clean_file_keeps_empty_warnings(self, org_dir):
+        """The clean path keeps its pre-#35 per-item shape too: a mixed-batch
+        `outline` item over a file with no id-less duplicates carries
+        `warnings: []` (the #32 contract — always present, `[]` when there is
+        nothing to report), even with the sync-conflict marker present."""
+        (org_dir / "clean.org").write_text(
+            "#+title: Clean\n\n"
+            "* NEXT Solo next task\n"
+            "* WAITING Solo waiting task\n")
+        (org_dir / "clean.org").chmod(0o644)
+        _drop_sync_marker(org_dir)
+        items = [{"command": "outline", "args": {"file": "clean.org"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["results"][0]["warnings"] == []
+        top = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert top == [SYNC_CONFLICT_ENTRY]
+
     # --- composition with #32's duplicate warnings in one envelope ----------
 
     def test_composes_with_duplicate_warnings_one_array(self, org_dir):
