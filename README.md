@@ -384,10 +384,14 @@ so a wedged daemon cannot hang the command indefinitely.
 A live **pre-upgrade daemon** (started before these commands existed, so it
 cannot answer the info probe) is still recognized as running via a
 `(emacs-pid)` fallback probe: `status` lists it with `ttl: null` and an
-empty `org_directory`, `gc` keeps it (its org directory cannot be proven
-gone), and `stop` stops it normally. A socket file left behind by an
-uncleanly killed daemon (nothing listening) is a quiet dead identity:
-`status` skips it with exit 0 and `gc` removes its directory.
+empty `org_directory`, and `gc` keeps it (its org directory cannot be
+proven gone). Such a daemon necessarily loaded older elisp and therefore
+lives under a *different* identity hash, so `daemon stop` — which targets
+only the current identity — will not reach it; it also has no idle TTL, so
+nothing reaps it automatically. Stop it via the PID that `status` reports.
+A socket file left behind by an uncleanly killed daemon (nothing
+listening) is a quiet dead identity: `status` skips it with exit 0 and
+`gc` removes its directory.
 
 ## Development
 
