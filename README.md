@@ -113,7 +113,49 @@ applies:
 distinct `locator` identities via their occurrence index, and the same source
 heading produces the same `read_id` from both commands. Prefer the `org-id`
 and `entry-id` tiers; treat `locator` as best-effort and consult
-`read_id_kind` before relying on cross-edit stability.
+`read_id_kind` before relying on cross-edit stability. When two or more
+headings fall into this `locator` tier and share the same bare heading text in
+one file, `outline`/`agenda-view` flag them via the `warnings` array below, so
+you can add an `:ID:`/`:entry-id:` or dedupe.
+
+### `warnings` — duplicate id-less headings on `outline` / `agenda-view`
+
+`outline` and `agenda-view` — and **only** these two read commands — emit a
+top-level `warnings` array in their `--json` envelope. It surfaces id-less
+headings that are *duplicated*: two or more headings sharing the same bare
+heading text within one file, where each resolves to the `locator` read-id
+tier (i.e. carries **neither** an Org `:ID:` **nor** an org-gcal `:entry-id:` —
+either property suppresses the warning). Such headings are disambiguated only
+by position, so a consumer joining on `(file, heading)` cannot tell them apart;
+the warning tells the user to add an id or dedupe.
+
+Each entry is a typed object:
+
+```json
+{"type": "duplicate-idless-heading", "file": "family-calendar.org", "heading": "Recurring Chore", "count": 2}
+```
+
+- **One entry per duplicated `(file, heading)` group, not per occurrence** —
+  `count` is the number of colliding id-less headings in that group, always ≥ 2.
+- **Grouped by bare heading text** (`org-get-heading`, the same value emitted as
+  the node/row `heading` field) — *not* by the full outline path that the
+  `locator` digest uses. Two same-named category headings under different
+  parents (e.g. `Computers/Tools` and `Research/Tools`) therefore warn.
+- `agenda-view` computes over the set of files that contributed task rows to the
+  view (deduped by file); each entry's `file` names the file the duplicate lives
+  in.
+- **Always present** as a key, and equal to `[]` when there is nothing to
+  report — no warning noise on the clean path.
+- **Warn-only and read-only.** A duplicate never changes the exit code (a clean
+  read still exits 0 with warnings present), and the diagnostic never creates an
+  `:ID:`/`:entry-id:` — the source file stays byte-identical.
+
+In **text mode**, each duplicated group is mirrored as one `Warning: ...` line
+on **stderr**; stdout carries only the normal output (the indented outline tree
+/ the agenda listing), with no `Warning:` line and no JSON.
+
+The `type` string is stable contract surface. Mutation commands do **not** emit
+`warnings`; this array is confined to the two read commands.
 
 ### render-file — server-side org→HTML for view-only docs
 
