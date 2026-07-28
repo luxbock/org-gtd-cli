@@ -23,6 +23,7 @@ CLOSED: [2026-03-05 Thu 16:00] SCHEDULED: <2026-03-05 Thu>
 [2026-03-12 Thu 10:00]
 ** TODO Plan quarterly offsite
 SCHEDULED: <2026-03-15 Sun> DEADLINE: <2026-03-25 Wed>
+Book the venue and send invites.
 * Computers                                                               :computers:
 :PROPERTIES:
 :ID:       test-id-computers

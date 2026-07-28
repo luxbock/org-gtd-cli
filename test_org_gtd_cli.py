@@ -8003,10 +8003,11 @@ class TestOutline:
         assert node is not None
         assert node["scheduled"] == "<2026-03-15 Sun>"
         assert node["deadline"] == "<2026-03-25 Wed>"
-        # The planning line is stripped from body (body is None here anyway).
-        if node["body"] is not None:
-            assert "SCHEDULED:" not in node["body"]
-            assert "DEADLINE:" not in node["body"]
+        # The planning line is stripped from the body, which keeps its text.
+        assert node["body"] is not None
+        assert "Book the venue and send invites." in node["body"]
+        assert "SCHEDULED:" not in node["body"]
+        assert "DEADLINE:" not in node["body"]
 
 
 class TestOutlineEvents:
