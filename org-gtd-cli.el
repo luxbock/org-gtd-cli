@@ -121,12 +121,22 @@ stdout.  In text mode, this is a no-op — callers handle their own text output.
 ;; Daemon mode support
 ;; ══════════════════════════════════════════════════════════════════════════════
 
+(defsubst org-gtd-cli/guarded-org-file-p (f)
+  "Non-nil when F is a file the daemon conflict guard must track.
+Matches `.org' sources AND `.org_archive' destinations:
+`org-archive-subtree' writes the archive file inside the same dispatch
+(it saves the archive buffer itself, through the shadowed
+`save-buffer'), so archive files participate in preflight, revert,
+discard-and-reload, and `saved_files' bookkeeping exactly like `.org'
+files — otherwise the destination write escapes the guard and the
+envelope under-reports what hit disk."
+  (and f (string-match-p "\\.org\\(_archive\\)?\\'" f)))
+
 (defun org-gtd-cli/revert-org-buffers ()
   "Revert org buffers whose files have changed on disk.
 Called before each daemon-dispatch to ensure fresh file contents."
   (dolist (buf (buffer-list))
-    (when (and (buffer-file-name buf)
-               (string-suffix-p ".org" (buffer-file-name buf))
+    (when (and (org-gtd-cli/guarded-org-file-p (buffer-file-name buf))
                (or (buffer-modified-p buf)
                    (not (verify-visited-file-modtime buf))))
       (with-current-buffer buf
@@ -199,16 +209,23 @@ mode)."
            buf))
 
 (defun org-gtd-cli/preflight-org-buffers (&optional exclude)
-  "Signal `org-gtd-cli/file-conflict' on the first stale modified Org buffer.
+  "Signal `org-gtd-cli/file-conflict' on the first stale Org buffer.
 Skips EXCLUDE (a buffer) so the caller can preflight peers before
-saving itself.  Uses the saved real modtime check
-(`org-gtd-cli/--real-modtime-ok-p') so the answer is not distorted by
-the outer shadow that keeps BODY-FN from prompting."
+saving itself.  Checks staleness on every guarded Org buffer, MODIFIED
+OR NOT: a multi-file mutation (refile, archive) may dirty and save a
+still-clean peer later in the same dispatch — most acutely the archive
+case, where `org-archive-subtree' writes the destination before the
+source is even modified.  A stale unmodified peer means an external
+writer landed mid-dispatch, and no further byte of this dispatch may
+hit disk ahead of that doomed save.  All buffers were reverted fresh
+at dispatch start, so this cannot misfire on pre-dispatch changes.
+Uses the saved real modtime check (`org-gtd-cli/--real-modtime-ok-p')
+so the answer is not distorted by the outer shadow that keeps BODY-FN
+from prompting."
   (dolist (buf (buffer-list))
     (unless (eq buf exclude)
       (let ((f (buffer-file-name buf)))
-        (when (and f (string-suffix-p ".org" f)
-                   (buffer-modified-p buf)
+        (when (and (org-gtd-cli/guarded-org-file-p f)
                    (file-exists-p f)
                    (not (org-gtd-cli/--real-modtime-ok-p buf)))
           (signal 'org-gtd-cli/file-conflict (list f)))))))
@@ -230,14 +247,15 @@ buffer's visited file against disk (through the saved real
 BEFORE any bytes hit disk."
   (let* ((this (current-buffer))
          (f (buffer-file-name this))
-         (is-org (and f (string-suffix-p ".org" f))))
+         (is-org (org-gtd-cli/guarded-org-file-p f)))
     ;; Test hook: exercised only when the isolated test daemon sets it.
     (when (and org-gtd-cli/dispatch--before-save-hook f)
       (funcall org-gtd-cli/dispatch--before-save-hook f))
-    ;; Preflight peers first: a conflict in a refile/archive destination must
-    ;; abort BEFORE the source buffer's save lands (spec §Required conflict
-    ;; policy — "preflight every modified existing Org buffer visible to that
-    ;; command before the first save").
+    ;; Preflight peers first: a conflict in ANY file of a multi-file mutation
+    ;; must abort BEFORE this save lands (spec §Required conflict policy —
+    ;; "preflight every modified existing Org buffer visible to that command
+    ;; before the first save"; we check unmodified peers too, since a
+    ;; still-clean peer may be dirtied and saved later in this same dispatch).
     (org-gtd-cli/preflight-org-buffers this)
     ;; Immediate final check on the buffer we are about to save.
     (when (and is-org (file-exists-p f)
@@ -266,13 +284,22 @@ the outer body-time shadow (returning constant `t') does not hide it."
     (dolist (buf (buffer-list))
       (with-current-buffer buf
         (let ((f (buffer-file-name)))
-          (when (and f (string-suffix-p ".org" f) (file-exists-p f))
-            (when (or (buffer-modified-p)
-                      (not (org-gtd-cli/--real-modtime-ok-p buf)))
+          (when (org-gtd-cli/guarded-org-file-p f)
+            (cond
+             ((not (file-exists-p f))
+              ;; Never-written destination (e.g. a fresh .org_archive whose
+              ;; save the abort preempted): nothing on disk to reload — kill
+              ;; the buffer so a later dispatch cannot find-file-noselect it
+              ;; and save its stale unsaved contents alongside new ones.
+              (when (buffer-modified-p)
+                (set-buffer-modified-p nil)
+                (kill-buffer buf)))
+             ((or (buffer-modified-p)
+                  (not (org-gtd-cli/--real-modtime-ok-p buf)))
               (set-buffer-modified-p nil)
               (condition-case _
                   (revert-buffer t t t)
-                (error nil)))))))))
+                (error nil))))))))))
 
 (defun org-gtd-cli/handle-file-conflict (err json-mode-p)
   "Emit the conflict output for ERR and reload touched buffers.
@@ -3587,8 +3614,12 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                  (org-gtd-cli/refile-repair-invariants
                   target-buf (marker-position target-marker) heading)
                  (set-marker target-marker nil))
-               (save-buffer)
+               ;; Save destination BEFORE source: if a conflict aborts between
+               ;; the two saves, the subtree is left duplicated on disk
+               ;; (recoverable) instead of deleted from both files — the source
+               ;; save is the one that removes it, so it must land last.
                (with-current-buffer target-buf (save-buffer))
+               (save-buffer)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
                     `((version . 1) (command . "refile")

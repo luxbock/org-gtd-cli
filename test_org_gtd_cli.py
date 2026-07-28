@@ -6354,11 +6354,11 @@ class TestDaemonConflictDetection:
             original_tasks = tasks.read_text()
             external_tasks = original_tasks + "\n* External heading in tasks\n"
             # `refile` runs `refile-repair-invariants` on the destination
-            # buffer (tasks.org), then calls `save-buffer` on the source
-            # (inbox.org, first guarded save), then on the destination.
-            # Fire the external write on the source save so the guard's
-            # peer preflight catches the destination's now-stale disk
-            # state BEFORE the source-buffer save writes.
+            # buffer (tasks.org), then saves the destination first and the
+            # source (inbox.org) last. Fire the external write on the
+            # source save: the destination buffer is clean (just saved) at
+            # that point, so only the staleness-only peer preflight can
+            # catch its now-stale disk state BEFORE the source save writes.
             self._install_before_save_hook(
                 socket, tasks, external_tasks,
                 trigger_path=inbox, skip_first=0)
@@ -6499,6 +6499,113 @@ class TestDaemonConflictDetection:
             content = inbox.read_text()
             assert "external batch-mode append" in content
             assert "daemon body that should never persist" not in content
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_refile_second_save_keeps_task(self, org_dir):
+        """org-gtd-cli-92y.4: refile saves the DESTINATION first, so a
+        conflict on the second (source) save leaves the refiled task alive
+        in the destination — duplicated at worst, never deleted. Pre-fix
+        the source saved first: the abort wrote inbox.org without the
+        task, then reverted the destination buffer, so the task was lost
+        from BOTH files."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        tasks = org_dir / "tasks.org"
+        try:
+            # Warm the daemon with a call that visits BOTH files.
+            self._warm_daemon(org_dir, env)
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Write quarterly report",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr={stderr}"
+            socket = self._daemon_socket(daemon_tmp)
+
+            external_inbox = ("#+title: Inbox\n\n"
+                              "* External inbox writer\nkeep me\n")
+            # Fire the external write on the SOURCE save — the second save
+            # in destination-first order.
+            self._install_before_save_hook(
+                socket, inbox, external_inbox, trigger_path=inbox)
+            try:
+                stdout, stderr, rc = run_cli(
+                    "--json", "refile", "Buy groceries",
+                    "--category", "Work",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                self._clear_before_save_hook(socket)
+
+            assert rc == 1, f"rc={rc}, stdout={stdout!r}"
+            data = json.loads(stdout)
+            assert data["file"] == "inbox.org"
+            # The destination save completed before the conflict, and the
+            # envelope reports it truthfully...
+            assert data["partial"] is True
+            assert data["saved_files"] == ["tasks.org"]
+            # ...so the refiled task SURVIVES in the destination.
+            assert "Buy groceries" in tasks.read_text()
+            # External inbox bytes are authoritative.
+            assert inbox.read_text() == external_inbox
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_archive_destination_stays_guarded(self, org_dir):
+        """org-gtd-cli-92y.3: `org-archive-subtree' saves the archive
+        buffer ITSELF, before the source buffer is even modified. A source
+        gone stale on disk must abort BEFORE that archive write lands — no
+        phantom archived copy, truthful `partial: false` — and a retry
+        archives exactly one copy (the aborted dispatch's unsaved archive
+        buffer must not linger and resurrect)."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        tasks = org_dir / "tasks.org"
+        archive = org_dir / "tasks.org_archive"
+        try:
+            # Warm the daemon with a call that visits tasks.org.
+            self._warm_daemon(org_dir, env)
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Write quarterly report",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr={stderr}"
+            socket = self._daemon_socket(daemon_tmp)
+
+            external_tasks = (tasks.read_text()
+                              + "\n* External heading in tasks\n")
+            # Fire the external write on the ARCHIVE buffer's save — the
+            # FIRST guarded save of the dispatch, while the source buffer
+            # is still unmodified. Only the staleness-only peer preflight
+            # can catch it.
+            self._install_before_save_hook(
+                socket, tasks, external_tasks, trigger_path=archive)
+            try:
+                stdout, stderr, rc = run_cli(
+                    "--json", "archive", "buy new router",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                self._clear_before_save_hook(socket)
+
+            assert rc == 1, f"rc={rc}, stdout={stdout!r}"
+            data = json.loads(stdout)
+            assert data["file"] == "tasks.org"
+            assert data["partial"] is False
+            assert data["saved_files"] == []
+            # No phantom copy: the archive file was never written...
+            assert not archive.exists()
+            # ...and the task is still live in the (external) tasks.org.
+            assert "Buy new router" in tasks.read_text()
+            assert "External heading in tasks" in tasks.read_text()
+
+            # Retry against the now-quiet file: exactly ONE archived copy —
+            # the aborted dispatch's archive buffer must not resurrect.
+            stdout, stderr, rc = run_cli(
+                "--json", "archive", "buy new router",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr={stderr}"
+            assert "Buy new router" not in tasks.read_text()
+            assert archive.read_text().count("Buy new router") == 1
         finally:
             self._kill_daemon(daemon_tmp)
 
