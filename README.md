@@ -203,6 +203,37 @@ echo '[{"command":"set-done","args":{"id":"f95d…"}},
 Each invocation starts Emacs. For latency-sensitive use, set
 `ORG_GTD_CLI_DAEMON=1` to reuse a per-user Emacs daemon.
 
+### Daemon saves are optimistically conflict-checked
+
+Daemon mode holds `.org` files in long-lived buffers between calls. If another
+writer — a batch-mode CLI (`ORG_GTD_CLI_DAEMON=0`), a second daemon identity
+visiting the same file, an editor, or an auto-commit — touches the file between
+this dispatch's start-of-call revert and its save, the CLI does **not**
+overwrite the external bytes. Instead every daemon save is preflighted against
+the on-disk state; on a mismatch the dispatch aborts noninteractively with exit
+code `1`, discards its own unsaved changes, reloads the affected buffers from
+disk, and leaves the conflicting file byte-for-byte intact.
+
+`--json` conflict output is exactly one object on stdout:
+
+```json
+{ "error": "File tasks.org changed during daemon dispatch. …",
+  "hint":  "Concurrent external write detected. …",
+  "file":  "tasks.org",
+  "exit_code": 1,
+  "partial": true,
+  "saved_files": ["inbox.org"] }
+```
+
+`partial=true` with a non-empty `saved_files` reports an earlier save in a
+multi-file mutation (refile/archive) or a homogeneous/mixed batch that
+completed before the conflict — those bytes are on disk and are **not** rolled
+back. Text mode writes the same facts to stderr. No supersession prompt or
+minibuffer read is opened. The daemon stays responsive: the next call sees the
+refreshed on-disk state and succeeds when no further writer races it. No
+automatic retry or merge is attempted; inspect the file and retry after the
+other writer stops.
+
 ## Development
 
 ```sh

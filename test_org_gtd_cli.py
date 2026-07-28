@@ -5798,8 +5798,15 @@ class TestDaemonRobustness:
     def test_daemon_mutation_survives_external_file_change(self, org_dir):
         """A mutation must not hang when the .org file's mtime changes behind
         the daemon's back — including between the dispatch-time revert and the
-        save (simulated by hammering the mtime during the call). Pre-fix this
-        hit Emacs's interactive supersession prompts and hung forever."""
+        save (simulated by hammering the mtime during the call).
+
+        Pre-fix, this hit Emacs's interactive supersession prompts and hung
+        forever. Post-#27, a mid-dispatch mtime/content change may now
+        surface as a fast conflict error (exit 1 with the documented
+        `{error, hint, file, exit_code, partial, saved_files}` envelope on
+        stdout) instead of a success — but it must still: never hang,
+        never overwrite the external content, always emit exactly one
+        valid JSON object, and never wedge later daemon calls."""
         daemon_tmp = self._make_daemon_tmp()
         env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
                "XDG_RUNTIME_DIR": ""}
@@ -5812,7 +5819,8 @@ class TestDaemonRobustness:
             assert rc == 0, f"stderr: {stderr}"
 
             # Touch the file behind the daemon's back: content + future mtime.
-            inbox.write_text(inbox.read_text() + "\n# external edit\n")
+            external_content = inbox.read_text() + "\n# external edit\n"
+            inbox.write_text(external_content)
             future = time.time() + 60
             os.utime(inbox, (future, future))
 
@@ -5840,10 +5848,27 @@ class TestDaemonRobustness:
                 stop.set()
                 th.join(timeout=5)
 
-            assert rc == 0, f"stderr: {stderr}"
+            # Exactly one JSON object on stdout, whether success or conflict.
             data = json.loads(stdout)
-            assert data["command"] == "set-body"
-            assert data["task"]["body"] == "second body"
+            if rc == 0:
+                assert data.get("command") == "set-body"
+                assert data.get("task", {}).get("body") == "second body"
+                assert "second body" in inbox.read_text()
+            else:
+                assert rc == 1, f"unexpected rc={rc}, stdout={stdout!r}"
+                assert data["exit_code"] == 1
+                assert data["file"] == "inbox.org"
+                assert "second body" not in inbox.read_text()
+                # External bytes are not overwritten by the stale buffer.
+                assert "# external edit" in inbox.read_text()
+
+            # Post-race the daemon is not wedged: after the hammer stops, a
+            # follow-up call completes within timeout and JSON is clean.
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"post-race stderr: {stderr}"
+            json.loads(stdout)  # any valid JSON object
         finally:
             self._kill_daemon(daemon_tmp)
 
@@ -5999,6 +6024,532 @@ class TestDaemonRobustness:
                         assert rc == 0, f"{d}: rc {rc}, stderr: {err}"
                         assert d in out, \
                             f"asked for {d}, got another call's output: {out!r}"
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+
+# ===========================================================================
+# Forgejo #27: daemon mid-dispatch save-clobber conflict detection
+# ===========================================================================
+
+
+def _run_daemon_cli(*args, org_dir, env_overrides, stdin=None, timeout=30):
+    """Like `run_cli`, but keeps the caller's env_overrides authoritative and
+    can pass stdin. Used by daemon conflict tests that must set
+    ORG_GTD_CLI_DAEMON=1 and drive `--batch` commands off stdin."""
+    env = os.environ.copy()
+    env["ORG_GTD_CLI_DAEMON"] = "0"
+    env["ORG_DIRECTORY"] = str(org_dir) + "/"
+    env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+    env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+    env.update(env_overrides or {})
+    cmd = ["python3", str(CLI_SCRIPT)] + list(args)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, env=env,
+        input=stdin, timeout=timeout,
+    )
+    return result.stdout, result.stderr, result.returncode
+
+
+class TestDaemonConflictDetection:
+    """Regression tests for Forgejo #27: mid-dispatch save clobbers.
+
+    The daemon holds `.org` files in long-lived buffers between calls. Prior
+    to the fix, `verify-visited-file-modtime' was shadowed to always return t
+    around the dispatch body, so any writer landing between the
+    dispatch-start `revert-org-buffers' and the mutation's save was silently
+    overwritten with the (now-stale) buffer's bytes — the 2026-07-11 incident.
+
+    Every test spins up its OWN isolated Emacs daemon via a unique TMPDIR
+    (`XDG_RUNTIME_DIR=\"\"` forces the socket root inside it), timeouts every
+    subprocess call, and unconditionally kills the daemon in `finally`.
+    """
+
+    @staticmethod
+    def _make_daemon_tmp():
+        return tempfile.mkdtemp(prefix="ogc-", dir=os.environ.get("TMPDIR", "/tmp"))
+
+    @staticmethod
+    def _kill_daemon(daemon_tmp):
+        kill_test_daemons(daemon_tmp)
+
+    @staticmethod
+    def _daemon_socket(daemon_tmp):
+        sockets = daemon_socket_paths(daemon_tmp)
+        assert len(sockets) >= 1, f"no daemon socket beneath {daemon_tmp!r}"
+        return sockets[0]
+
+    @staticmethod
+    def _emacsclient_eval(socket, expr, timeout=10):
+        return subprocess.run(
+            ["emacsclient", "--socket-name", str(socket), "--eval", expr],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+
+    @classmethod
+    def _install_before_save_hook(cls, socket, target_path, external_bytes,
+                                  *, skip_first=0, trigger_path=None):
+        """Ask the daemon to write EXTERNAL_BYTES to TARGET_PATH before its
+        SKIP_FIRST+1'th guarded save of TRIGGER_PATH.
+
+        TRIGGER_PATH is the file whose save fires the hook (defaults to
+        TARGET_PATH — the single-file case). For a multi-buffer mutation
+        (refile, archive), TRIGGER_PATH is the source and TARGET_PATH is
+        the destination: fire the write on the source save so the peer
+        preflight catches the destination's now-stale disk state BEFORE the
+        source save writes.
+
+        The countdown and self-clear only advance when the current save is
+        targeting TRIGGER_PATH, so unrelated saves in a multi-file mutation
+        do not consume the arm. The daemon-only test hook
+        `org-gtd-cli/dispatch--before-save-hook' exists exclusively for this
+        purpose — no user-facing environment backdoor exposes it."""
+        trigger_path = trigger_path or target_path
+        target_lit = json.dumps(str(target_path))
+        trigger_lit = json.dumps(str(trigger_path))
+        content_lit = json.dumps(external_bytes)
+        expr = (
+            "(let ((remaining " + str(skip_first) + ")"
+            "      (trigger " + trigger_lit + ")"
+            "      (target " + target_lit + ")"
+            "      (content " + content_lit + "))"
+            "  (setq org-gtd-cli/dispatch--before-save-hook"
+            "        (lambda (f)"
+            "          (when (string= (file-truename f) (file-truename trigger))"
+            "            (if (> remaining 0)"
+            "                (setq remaining (1- remaining))"
+            "              (setq org-gtd-cli/dispatch--before-save-hook nil)"
+            "              (let ((coding-system-for-write 'utf-8-unix))"
+            "                (with-temp-file target (insert content))))))))")
+        r = cls._emacsclient_eval(socket, expr)
+        assert r.returncode == 0, f"install hook failed: {r.stderr}"
+
+    @classmethod
+    def _clear_before_save_hook(cls, socket):
+        cls._emacsclient_eval(
+            socket, "(setq org-gtd-cli/dispatch--before-save-hook nil)")
+
+    def _warm_daemon(self, org_dir, env):
+        stdout, stderr, rc = run_cli(
+            "--json", "show", "Buy groceries",
+            org_dir=org_dir, env_overrides=env)
+        assert rc == 0, f"warm-up failed: stderr={stderr!r}"
+
+    def test_daemon_conflict_mid_dispatch_writer_json(self, org_dir):
+        """A deterministic external write landing between dispatch refresh
+        and save is never overwritten. The daemon exits 1 without hanging,
+        the external marker survives byte-for-byte, and the attempted CLI
+        mutation is absent from the file."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            socket = self._daemon_socket(daemon_tmp)
+
+            external = (
+                "* External writer marker\n"
+                ":PROPERTIES:\n:MID_DISPATCH: yes\n:END:\n"
+                "Content the daemon must not overwrite.\n")
+            self._install_before_save_hook(socket, inbox, external)
+
+            try:
+                stdout, stderr, rc = run_cli(
+                    "--json", "set-body", "Buy groceries",
+                    "attempted cli mutation body",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                self._clear_before_save_hook(socket)
+
+            assert rc == 1, f"expected exit 1 got {rc}; stdout={stdout!r}"
+            data = json.loads(stdout)
+            assert "error" in data and "changed" in data["error"].lower()
+            assert data["exit_code"] == 1
+            assert data["file"] == "inbox.org"
+            assert data["partial"] is False
+            assert data["saved_files"] == []
+            assert isinstance(data["hint"], str) and data["hint"]
+            # External writer bytes survive exactly.
+            assert inbox.read_text() == external
+            assert "attempted cli mutation body" not in inbox.read_text()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_mid_dispatch_writer_text_mode(self, org_dir):
+        """In text mode the same conflict lands on stderr, not as a JSON
+        object on stdout, and never opens an interactive prompt."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            socket = self._daemon_socket(daemon_tmp)
+            external = "* External\nsome bytes\n"
+            self._install_before_save_hook(socket, inbox, external)
+            try:
+                stdout, stderr, rc = run_cli(
+                    "set-body", "Buy groceries", "text-mode attempt",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                self._clear_before_save_hook(socket)
+
+            assert rc == 1
+            assert stdout == "" or "changed" not in stdout, stdout
+            assert "changed during daemon dispatch" in stderr
+            # No supersession prompt text leaks anywhere.
+            assert "yes-or-no" not in (stdout + stderr).lower()
+            assert "y or n" not in (stdout + stderr).lower()
+            # External bytes survive.
+            assert inbox.read_text() == external
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_daemon_recovers_and_retry_succeeds(self, org_dir):
+        """After a conflict the daemon buffer matches disk, the daemon stays
+        responsive, and retrying the same command against a now-quiet file
+        succeeds without resurrecting stale content."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            socket = self._daemon_socket(daemon_tmp)
+            external = ("#+title: Inbox\n\n"
+                        "* TODO External bystander :tag:\n"
+                        "valid body\n[2026-04-01 Wed 09:00]\n")
+            self._install_before_save_hook(socket, inbox, external)
+            try:
+                _, _, rc = run_cli(
+                    "--json", "set-body", "Buy groceries", "clobber attempt",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                self._clear_before_save_hook(socket)
+            assert rc == 1
+
+            # The next call sees the reloaded on-disk content and succeeds.
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "External bystander",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"retry stderr={stderr}"
+            payload = json.loads(stdout)
+            assert payload["command"] == "show"
+            assert payload["heading"] == "External bystander"
+            # A second mutation actually lands now.
+            stdout, stderr, rc = run_cli(
+                "--json", "set-body", "External bystander", "post-conflict body",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr={stderr}"
+            assert "post-conflict body" in inbox.read_text()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_dispatch_start_refresh_is_not_flagged(self, org_dir):
+        """A change written BEFORE the command begins is loaded normally by
+        the dispatch-start refresh and must not be misclassified as a
+        mid-dispatch conflict."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            # Write outside any dispatch — this is the pre-dispatch case.
+            pre = ("#+title: Inbox\n\n"
+                   "* TODO Buy groceries :buy:@errand:\n"
+                   "pre-existing external body\n"
+                   "[2026-03-12 Thu 14:30]\n")
+            inbox.write_text(pre)
+            future = time.time() + 30
+            os.utime(inbox, (future, future))
+
+            stdout, stderr, rc = run_cli(
+                "--json", "set-body", "Buy groceries",
+                "landed on top of external content",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr={stderr}"
+            data = json.loads(stdout)
+            assert data["command"] == "set-body"
+            assert "landed on top of external content" in inbox.read_text()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_multi_item_batch_aborts_after_first_save(self, org_dir):
+        """A homogeneous daemon batch that hits a conflict on item 2 aborts
+        the dispatch: item 3 never runs, item 1's save is preserved on disk,
+        and the response reports `partial=true` with item 1's file in
+        `saved_files` — no per-item results are silently claimed as
+        rolled back."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            socket = self._daemon_socket(daemon_tmp)
+
+            # Item 1 writes inbox (one save). Item 2 also writes inbox and
+            # will hit the conflict. Item 3 never runs.
+            items = [
+                {"heading": "Buy groceries", "text": "item-1 body content"},
+                {"heading": "Reply to dentist about appointment",
+                 "text": "item-2 body content"},
+                {"heading": "Call the plumber about kitchen sink",
+                 "text": "item-3 body content"},
+            ]
+            external = "* External injected mid-batch\nkeep me\n"
+            # skip_first=1 → hook fires on the SECOND guarded save (item 2).
+            self._install_before_save_hook(
+                socket, inbox, external, skip_first=1)
+
+            try:
+                stdout, stderr, rc = _run_daemon_cli(
+                    "--json", "--batch", "set-body",
+                    org_dir=org_dir, env_overrides=env,
+                    stdin=json.dumps(items))
+            finally:
+                self._clear_before_save_hook(socket)
+
+            assert rc == 1, f"rc={rc}, stdout={stdout!r}"
+            data = json.loads(stdout)
+            assert "error" in data
+            assert data["exit_code"] == 1
+            assert data["file"] == "inbox.org"
+            assert data["partial"] is True
+            assert data["saved_files"] == ["inbox.org"]
+            # External bytes on disk win over item 2's stale buffer.
+            assert inbox.read_text() == external
+            # Item 3 was never dispatched → its body is absent.
+            assert "item-3 body content" not in inbox.read_text()
+            # Item 2's attempted body is absent.
+            assert "item-2 body content" not in inbox.read_text()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_multi_buffer_preflight_saves_no_source(self, org_dir):
+        """Refile is a two-file mutation: refile-repair-invariants may leave
+        the destination buffer modified before the source-buffer save. If
+        the destination file changed on disk, the guard must catch it
+        BEFORE the source-buffer save lands — otherwise the source's tasks
+        would be reordered and refiled without the corresponding write on
+        the destination."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        tasks = org_dir / "tasks.org"
+        try:
+            # Warm the daemon with a call that visits BOTH files so both
+            # have a buffer with a known modtime.
+            self._warm_daemon(org_dir, env)
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Write quarterly report",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr={stderr}"
+
+            socket = self._daemon_socket(daemon_tmp)
+            original_inbox = inbox.read_text()
+            original_tasks = tasks.read_text()
+            external_tasks = original_tasks + "\n* External heading in tasks\n"
+            # `refile` runs `refile-repair-invariants` on the destination
+            # buffer (tasks.org), then calls `save-buffer` on the source
+            # (inbox.org, first guarded save), then on the destination.
+            # Fire the external write on the source save so the guard's
+            # peer preflight catches the destination's now-stale disk
+            # state BEFORE the source-buffer save writes.
+            self._install_before_save_hook(
+                socket, tasks, external_tasks,
+                trigger_path=inbox, skip_first=0)
+
+            try:
+                stdout, stderr, rc = run_cli(
+                    "--json", "refile", "Buy groceries",
+                    "--category", "Work",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                self._clear_before_save_hook(socket)
+
+            assert rc == 1
+            data = json.loads(stdout)
+            assert data["exit_code"] == 1
+            assert data["file"] == "tasks.org"
+            # No source-buffer save should have leaked through: inbox.org is
+            # byte-for-byte unchanged (Buy groceries is still there).
+            assert inbox.read_text() == original_inbox
+            assert "Buy groceries" in inbox.read_text()
+            # tasks.org has the external heading; the refiled item is absent.
+            assert "External heading in tasks" in tasks.read_text()
+            assert "* TODO Buy groceries" not in tasks.read_text()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_json_envelope_schema(self, org_dir):
+        """Exactly one JSON object on stdout with the documented keys and
+        types. No success payload, no interactive prompt text."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            socket = self._daemon_socket(daemon_tmp)
+            self._install_before_save_hook(
+                socket, inbox, "* External\n")
+            try:
+                stdout, stderr, rc = run_cli(
+                    "--json", "set-body", "Buy groceries", "attempt",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                self._clear_before_save_hook(socket)
+            assert rc == 1
+            # Exactly one JSON object.
+            body = stdout.strip()
+            assert body.count("\n{") == 0 and body.startswith("{")
+            data = json.loads(body)
+            assert set(data.keys()) >= {
+                "error", "hint", "file", "exit_code", "partial", "saved_files"}
+            assert isinstance(data["error"], str) and data["error"]
+            assert isinstance(data["hint"], str) and data["hint"]
+            assert isinstance(data["file"], str)
+            assert data["exit_code"] == 1
+            assert isinstance(data["partial"], bool)
+            assert isinstance(data["saved_files"], list)
+            # No success payload keys leaked in.
+            assert "command" not in data
+            assert "task" not in data
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_conflict_batch_external_writer_via_batch_mode(self, org_dir):
+        """The competing writer is a bona fide independent batch-mode CLI
+        process (`ORG_GTD_CLI_DAEMON=0`). Under the daemon's guard, when a
+        batch-mode write lands between refresh and save, the daemon call
+        surfaces the same conflict envelope. This is the incident's canonical
+        writer shape from the 2026-07-11 report."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            socket = self._daemon_socket(daemon_tmp)
+
+            # Marker file the hook checks so we know the batch-mode call
+            # completed before returning the conflict.
+            marker = Path(daemon_tmp) / "batch-done.marker"
+
+            # From inside the hook, invoke a real subprocess in batch mode
+            # (ORG_GTD_CLI_DAEMON=0) to mutate the same file. That IS the
+            # incident's original writer identity, and it is what the spec
+            # names as case (a) of the "same protection" acceptance
+            # criterion.
+            def sh_call():
+                return subprocess.run(
+                    ["python3", str(CLI_SCRIPT), "--json", "append-body",
+                     "Buy groceries", "external batch-mode append"],
+                    capture_output=True, text=True, timeout=20,
+                    env={
+                        **os.environ,
+                        "ORG_GTD_CLI_DAEMON": "0",
+                        "ORG_DIRECTORY": str(org_dir) + "/",
+                        "ORG_GTD_CORE_FILE": str(CORE_FILE),
+                        "ORG_GTD_ELISP_FILE": str(ELISP_FILE),
+                    },
+                )
+
+            # Install a hook whose write is provided by a Python helper: we
+            # can't easily invoke a subprocess from elisp inside emacsclient,
+            # so use a two-step approach — the daemon call blocks on a
+            # simple file marker written by a background Python thread.
+            marker_path = json.dumps(str(marker))
+            expr = (
+                "(setq org-gtd-cli/dispatch--before-save-hook"
+                "  (lambda (f)"
+                "    (setq org-gtd-cli/dispatch--before-save-hook nil)"
+                "    (while (not (file-exists-p " + marker_path + "))"
+                "      (sleep-for 0.05))))")
+            r = self._emacsclient_eval(socket, expr)
+            assert r.returncode == 0
+
+            def background_writer():
+                # Actual batch-mode write.
+                result = sh_call()
+                # Signal completion.
+                marker.write_text(f"rc={result.returncode}\n")
+
+            th = threading.Thread(target=background_writer, daemon=True)
+            th.start()
+            try:
+                stdout, stderr, rc = run_cli(
+                    "--json", "set-body", "Buy groceries",
+                    "daemon body that should never persist",
+                    org_dir=org_dir, env_overrides=env)
+            finally:
+                th.join(timeout=20)
+                self._clear_before_save_hook(socket)
+
+            assert marker.exists(), "external batch writer never completed"
+            assert rc == 1, f"expected conflict, got rc={rc}, stdout={stdout!r}"
+            data = json.loads(stdout)
+            assert data["exit_code"] == 1
+            assert data["file"] == "inbox.org"
+            # The daemon body must not have overwritten the batch append.
+            content = inbox.read_text()
+            assert "external batch-mode append" in content
+            assert "daemon body that should never persist" not in content
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+
+class TestDaemonSortStalenessRegression:
+    """Forgejo #27 §Required regression work item 2: sequential set-done on a
+    child whose siblings are reordered, immediately followed by a different
+    mutation in the same file. The DONE state, closure/logging text, sibling
+    order, and second mutation must all remain on disk.
+
+    Per the spec: run against pre-fix code, keep the regression either way,
+    do not invent a sort-specific change unless the test exposes one."""
+
+    @staticmethod
+    def _make_daemon_tmp():
+        return tempfile.mkdtemp(prefix="ogc-", dir=os.environ.get("TMPDIR", "/tmp"))
+
+    @staticmethod
+    def _kill_daemon(daemon_tmp):
+        kill_test_daemons(daemon_tmp)
+
+    def test_daemon_sort_staleness_two_mutations_persist(self, org_dir):
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        tasks = org_dir / "tasks.org"
+        try:
+            # Set-done on a child that triggers `reorder-siblings-by-state`.
+            # "Draft outline" is a TODO under "Prepare onboarding guide".
+            stdout, stderr, rc = run_cli(
+                "--json", "set-done", "Draft outline",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"set-done stderr={stderr}"
+
+            # Immediately do a different mutation in the SAME file — the
+            # historical clobber path per the incident report.
+            stdout, stderr, rc = run_cli(
+                "--json", "append-body", "Write quarterly report",
+                "post-sort follow-up append",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"append stderr={stderr}"
+
+            text = tasks.read_text()
+            # The DONE state and its CLOSED timestamp are on disk.
+            assert "** DONE Draft outline" in text
+            assert "CLOSED:" in text
+            # The follow-up append is on disk.
+            assert "post-sort follow-up append" in text
+            # Sibling reordering left the file valid — the write chapter
+            # entry (still TODO) survived.
+            assert "Write first chapter" in text
         finally:
             self._kill_daemon(daemon_tmp)
 
