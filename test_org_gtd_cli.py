@@ -5795,6 +5795,12 @@ class TestDaemonRobustness:
             target.chmod(0o644)
         (dest / "agent-notes").mkdir(exist_ok=True)
 
+    @staticmethod
+    def _daemon_pids(daemon_tmp):
+        return sorted(
+            daemon["pid"] for daemon in _discover_org_gtd_daemons()
+            if _daemon_uses_socket_root(daemon, daemon_tmp))
+
     def test_daemon_mutation_survives_external_file_change(self, org_dir):
         """A mutation must not hang when the .org file's mtime changes behind
         the daemon's back — including between the dispatch-time revert and the
@@ -5869,6 +5875,52 @@ class TestDaemonRobustness:
                 org_dir=org_dir, env_overrides=env)
             assert rc == 0, f"post-race stderr: {stderr}"
             json.loads(stdout)  # any valid JSON object
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_survives_deleted_archive_file(self, org_dir):
+        """A visited `.org_archive' deleted (rotated) behind the daemon's
+        back must not break the next dispatch. Pre-fix,
+        `org-gtd-cli/revert-org-buffers' called `revert-buffer' on the
+        dead buffer with no `file-exists-p' guard; the \"file no longer
+        exists\" error escaped daemon-dispatch OUTSIDE the body's
+        condition-case, emacsclient exited non-zero, and the wrapper's
+        stale-socket fallback silently replaced the daemon — an orphaned
+        Emacs process plus a cold restart on every subsequent call."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        archive = org_dir / "tasks.org_archive"
+        try:
+            # Archive a task so the daemon holds a live .org_archive buffer.
+            stdout, stderr, rc = run_cli(
+                "--json", "archive", "buy new router",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            assert archive.exists()
+            pids_before = self._daemon_pids(daemon_tmp)
+            assert len(pids_before) == 1
+
+            # Rotate the archive away behind the daemon's back.
+            archive.unlink()
+
+            # The next dispatch must succeed on the SAME daemon — no
+            # escaped revert error, no kill-and-restart churn.
+            stdout, stderr, rc = run_cli(
+                "--json", "show", "Buy groceries",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            json.loads(stdout)
+            assert self._daemon_pids(daemon_tmp) == pids_before
+
+            # And a follow-up mutation still lands normally, still on the
+            # original daemon.
+            stdout, stderr, rc = run_cli(
+                "--json", "set-body", "Buy groceries", "post-rotation body",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, f"stderr: {stderr}"
+            assert json.loads(stdout)["task"]["body"] == "post-rotation body"
+            assert self._daemon_pids(daemon_tmp) == pids_before
         finally:
             self._kill_daemon(daemon_tmp)
 

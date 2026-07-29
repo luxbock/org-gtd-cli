@@ -134,13 +134,24 @@ envelope under-reports what hit disk."
 
 (defun org-gtd-cli/revert-org-buffers ()
   "Revert org buffers whose files have changed on disk.
-Called before each daemon-dispatch to ensure fresh file contents."
+Called before each daemon-dispatch to ensure fresh file contents.
+Skips buffers whose visited file is gone (a rotated or deleted
+`.org_archive', say): `revert-buffer' would signal \"file no longer
+exists\" OUTSIDE the dispatch's condition-case, escape to emacsclient
+as a non-zero exit, and make the Python wrapper kill and restart the
+daemon.  Any residual revert error is likewise swallowed — a stale
+buffer is harmless here; the mid-dispatch conflict guard still
+protects every save."
   (dolist (buf (buffer-list))
-    (when (and (org-gtd-cli/guarded-org-file-p (buffer-file-name buf))
-               (or (buffer-modified-p buf)
-                   (not (verify-visited-file-modtime buf))))
-      (with-current-buffer buf
-        (revert-buffer t t t)))))
+    (let ((f (buffer-file-name buf)))
+      (when (and (org-gtd-cli/guarded-org-file-p f)
+                 (file-exists-p f)
+                 (or (buffer-modified-p buf)
+                     (not (verify-visited-file-modtime buf))))
+        (with-current-buffer buf
+          (condition-case _
+              (revert-buffer t t t)
+            (error nil)))))))
 
 ;; --- Optimistic mid-dispatch conflict detection ------------------------------
 ;;
@@ -169,12 +180,6 @@ Called before each daemon-dispatch to ensure fresh file contents."
 (define-error 'org-gtd-cli/file-conflict
   "File changed on disk during daemon dispatch"
   'file-error)
-
-(defvar org-gtd-cli/dispatch-in-progress nil
-  "Non-nil while `org-gtd-cli/daemon-dispatch' is running.
-Batch (`emacs --batch') is unaffected: the conflict guard only activates
-when the daemon-dispatch letf shadows `save-buffer' with the guarded
-version.")
 
 (defvar org-gtd-cli/dispatch-saved-files nil
   "Relative paths successfully saved during the current daemon dispatch.
@@ -367,7 +372,6 @@ buffers are reloaded from disk, and a JSON/text conflict envelope with
   (setq org-gtd-cli/full-mode full-mode-p)
   (let ((org-gtd-cli--exit-code 0)
         (stderr-msgs '())
-        (org-gtd-cli/dispatch-in-progress t)
         (org-gtd-cli/dispatch-saved-files nil)
         ;; Capture the real `verify-visited-file-modtime' BEFORE any letf
         ;; shadow of it, so the guard can still perform an authentic check
