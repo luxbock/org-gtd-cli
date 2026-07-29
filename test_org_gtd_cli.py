@@ -6380,6 +6380,65 @@ class TestDaemonConflictDetection:
         finally:
             self._kill_daemon(daemon_tmp)
 
+    def test_daemon_conflict_noop_save_not_in_saved_files(self, org_dir):
+        """A no-op save must not appear in `saved_files`: clearing SCHEDULED
+        on a heading that has none leaves the buffer unmodified, so
+        `basic-save-buffer' writes nothing — yet the guarded save used to
+        record the file unconditionally. When a later item of the same
+        dispatch then hit an external-writer conflict, the envelope
+        over-reported `partial: true` with the untouched file listed as
+        saved, contradicting README's "those bytes are on disk" contract
+        (review-bot on PR #52)."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        inbox = org_dir / "inbox.org"
+        tasks = org_dir / "tasks.org"
+        try:
+            self._warm_daemon(org_dir, env)
+            socket = self._daemon_socket(daemon_tmp)
+            original_tasks = tasks.read_text()
+
+            # Item 1: clear SCHEDULED on a tasks.org heading that has no
+            # SCHEDULED line — its save writes nothing. The task must
+            # already carry an :ID: (test-id-capture-fix): find-task lazily
+            # mints one on mutations, and that would dirty the buffer and
+            # make the save real. Item 2: set-body on inbox.org, where the
+            # hook lands an external write to force the conflict abort.
+            items = [
+                {"command": "set-schedule",
+                 "args": {"heading": "Fix org-capture workspace issue",
+                          "clear": True}},
+                {"command": "set-body",
+                 "args": {"heading": "Buy groceries",
+                          "text": "item-2 body that must not persist"}},
+            ]
+            external = "* External injected before item-2 save\nkeep me\n"
+            self._install_before_save_hook(socket, inbox, external)
+
+            try:
+                stdout, stderr, rc = _run_daemon_cli(
+                    "--json", "batch",
+                    org_dir=org_dir, env_overrides=env,
+                    stdin=json.dumps(items))
+            finally:
+                self._clear_before_save_hook(socket)
+
+            assert rc == 1, f"rc={rc}, stdout={stdout!r}"
+            data = json.loads(stdout)
+            assert "error" in data
+            assert data["exit_code"] == 1
+            assert data["file"] == "inbox.org"
+            # Item 1 wrote no bytes, so nothing may be claimed as saved.
+            assert data["saved_files"] == []
+            assert data["partial"] is False
+            # tasks.org is byte-for-byte untouched; inbox.org keeps the
+            # external writer's bytes and item 2's body never landed.
+            assert tasks.read_text() == original_tasks
+            assert inbox.read_text() == external
+        finally:
+            self._kill_daemon(daemon_tmp)
+
     def test_daemon_conflict_multi_buffer_preflight_saves_no_source(self, org_dir):
         """Refile is a two-file mutation: refile-repair-invariants may leave
         the destination buffer modified before the source-buffer save. If

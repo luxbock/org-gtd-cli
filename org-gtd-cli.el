@@ -266,12 +266,18 @@ BEFORE any bytes hit disk."
     (when (and is-org (file-exists-p f)
                (not (org-gtd-cli/--real-modtime-ok-p this)))
       (signal 'org-gtd-cli/file-conflict (list f)))
-    (org-gtd-cli/really-save-buffer)
-    (when is-org
-      (let ((rel (org-gtd-cli/relative-filename f)))
-        (unless (member rel org-gtd-cli/dispatch-saved-files)
-          (setq org-gtd-cli/dispatch-saved-files
-                (append org-gtd-cli/dispatch-saved-files (list rel))))))
+    ;; Record the file as saved only when the save actually wrote bytes:
+    ;; `basic-save-buffer' is a no-op on an unmodified buffer (e.g. an
+    ;; unguarded `save-buffer' after clearing a SCHEDULED that was never
+    ;; there), and a conflict envelope's `saved_files' must list only
+    ;; files whose bytes really landed on disk.
+    (let ((was-modified (buffer-modified-p)))
+      (org-gtd-cli/really-save-buffer)
+      (when (and is-org was-modified)
+        (let ((rel (org-gtd-cli/relative-filename f)))
+          (unless (member rel org-gtd-cli/dispatch-saved-files)
+            (setq org-gtd-cli/dispatch-saved-files
+                  (append org-gtd-cli/dispatch-saved-files (list rel)))))))
     t))
 
 (defun org-gtd-cli/discard-and-reload-org-buffers ()
