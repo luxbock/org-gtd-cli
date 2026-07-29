@@ -59,7 +59,7 @@ Common commands:
 | `set-schedule` / `set-deadline` / `set-priority` | Set timestamps and priority |
 | `set-tags` / `add-tags` / `remove-tags` / `refile` / `move` / `rename` | Organize and edit |
 | `projects` / `subtasks` / `categories` / `list-tags` | Inspect structure |
-| `outline` | Full nested outline of a file as JSON; nodes are typed (`is_category` / `is_event` / `is_project`) and calendar events carry their `timestamp`; `--full` adds each node's raw org `body` |
+| `outline` | Full nested outline of a file as JSON; nodes are typed (`is_category` / `is_event` / `is_project`), calendar events carry their `timestamp`, and every node exposes its planning line as `scheduled` / `deadline` (raw org timestamp strings, `null` when absent — same representation as `agenda-view` task rows); `--full` adds each node's raw org `body` |
 | `render-file` | Render a view-only `.org` doc to body-only HTML (see below) |
 
 `add-task` has no `--parent` flag — to add a child under an existing task or

@@ -8701,6 +8701,83 @@ class TestOutline:
         assert node["is_event"] is False
         assert node["timestamp"] is None
 
+    def test_deadline_only(self, org_dir):
+        """A heading with only a DEADLINE planning entry exposes deadline;
+        scheduled stays None."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Write quarterly report")
+        assert node is not None
+        assert node["deadline"] == "<2026-03-20 Fri>"
+        assert node["scheduled"] is None
+
+    def test_scheduled_only(self, org_dir):
+        """A heading with only a SCHEDULED planning entry exposes scheduled;
+        deadline stays None."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Consider buying a new monitor")
+        assert node is not None
+        assert node["scheduled"] == "<2026-03-09 Mon>"
+        assert node["deadline"] is None
+
+    def test_scheduled_and_deadline(self, org_dir):
+        """A heading carrying both planning entries exposes both fields."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Plan quarterly offsite")
+        assert node is not None
+        assert node["scheduled"] == "<2026-03-15 Sun>"
+        assert node["deadline"] == "<2026-03-25 Wed>"
+
+    def test_neither_scheduled_nor_deadline(self, org_dir):
+        """A heading with no planning line reports both fields as None."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        node = _find_node(data["nodes"], "Bare heading no body")
+        assert node is not None
+        assert node["scheduled"] is None
+        assert node["deadline"] is None
+
+    def test_scheduled_deadline_present_on_all_nodes(self, org_dir):
+        """Every outline node carries scheduled and deadline keys uniformly."""
+        data, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+
+        def walk(nodes):
+            for node in nodes:
+                assert "scheduled" in node, node["heading"]
+                assert "deadline" in node, node["heading"]
+                walk(node.get("children", []))
+
+        walk(data["nodes"])
+
+    def test_scheduled_deadline_match_agenda(self, org_dir):
+        """The outline fields use the same representation as agenda task rows."""
+        outline, _, rc = run_cli_json("outline", org_dir=org_dir)
+        assert rc == 0
+        agenda, _, rc = run_cli_json("agenda", org_dir=org_dir)
+        assert rc == 0
+        heading = "Write quarterly report"
+        node = _find_node(outline["nodes"], heading)
+        task = next(t for t in agenda["tasks"] if t["heading"] == heading)
+        assert node["scheduled"] == task["scheduled"]
+        assert node["deadline"] == task["deadline"]
+
+    def test_full_body_excludes_planning_line(self, org_dir):
+        """--full body for a scheduled/deadlined node omits the planning line."""
+        data, stderr, rc = run_cli_json("outline", "--full", org_dir=org_dir)
+        assert rc == 0, stderr
+        node = _find_node(data["nodes"], "Plan quarterly offsite")
+        assert node is not None
+        assert node["scheduled"] == "<2026-03-15 Sun>"
+        assert node["deadline"] == "<2026-03-25 Wed>"
+        # The planning line is stripped from the body, which keeps its text.
+        assert node["body"] is not None
+        assert "Book the venue and send invites." in node["body"]
+        assert "SCHEDULED:" not in node["body"]
+        assert "DEADLINE:" not in node["body"]
+
 
 class TestOutlineEvents:
     """Calendar-event typing in `outline` against fixtures/calendar.org."""
