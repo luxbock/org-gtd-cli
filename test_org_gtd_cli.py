@@ -9094,9 +9094,10 @@ class TestReadIdentity:
 #
 # Every invocation checks `${ORG_DIRECTORY}/.sync-conflict` by plain file
 # existence (external sync units own the marker; the CLI is a pure consumer
-# that never writes it). Present -> JSON envelopes gain one `sync-conflict`
-# entry in the top-level `warnings` array (composing with #32's duplicate
-# warnings into ONE array) and text mode emits one stderr `Warning:` line.
+# that never writes it). Present -> every JSON object on stdout (versioned
+# envelopes AND bare error objects) gains one `sync-conflict` entry in the
+# top-level `warnings` array (composing with #32's duplicate warnings into
+# ONE array) and text mode emits one stderr `Warning:` line.
 # Warn-only: exit codes and payloads are unchanged, mutations still persist.
 # Absent -> output is byte-identical to pre-#35 (no `warnings` key added by
 # this feature). See the choke-point injection in `org-gtd-cli/output`.
@@ -9155,6 +9156,81 @@ class TestSyncConflictWarning:
         data, stderr, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
         assert rc == 0, stderr
         assert "warnings" not in data
+
+    # --- JSON error paths carry the warning too (review-bot on PR #51) ------
+    # JSON failure emitters produce objects WITHOUT a `version` key (the
+    # {error, hint} no-match arms and `org-gtd-cli/error's bare {error}
+    # objects).  The staleness signal must not vanish exactly when a command
+    # fails on a possibly-stale view, so injection keys off "a JSON object is
+    # being emitted", not `version == 1`.
+
+    def test_json_no_match_error_carries_warning(self, org_dir):
+        """A --json `show` no-match {error, hint} object (the find-task arm)
+        carries the `sync-conflict` entry when the marker is present; the
+        error payload and exit code are unchanged."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json(
+            "show", "zzqq_no_such_task_zzqq", org_dir=org_dir)
+        assert rc == 1
+        assert 'No task found matching "zzqq_no_such_task_zzqq"' in data["error"]
+        assert "hint" in data
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+
+    def test_json_by_id_no_match_error_carries_warning(self, org_dir):
+        """Same for the find-task-by-id no-match arm (`--id <bogus>`)."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json(
+            "show", "--id", "no-such-id-zzqq", org_dir=org_dir)
+        assert rc == 1
+        assert 'No task found with id "no-such-id-zzqq"' in data["error"]
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+
+    def test_json_direct_error_emitter_carries_warning(self, org_dir):
+        """The `org-gtd-cli/error' json branch (bare {error} objects, probed
+        via body-text validation) routes through the same injection choke
+        point, so those error objects carry the warning too."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json(
+            "add-task", "Sneaky body task",
+            "--body", "Some text\n* Sneaky heading", org_dir=org_dir)
+        assert rc == 1
+        assert "body text contains org headings" in data["error"]
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+        # The rejected task still was not created (error semantics unchanged).
+        assert "Sneaky body task" not in (org_dir / "tasks.org").read_text()
+
+    def test_json_error_marker_absent_byte_identical(self, org_dir):
+        """Marker absent: JSON error objects keep exactly their pre-#35 shape
+        — {error, hint} / {error}, no `warnings` key added on any account."""
+        data, _stderr, rc = run_cli_json(
+            "show", "zzqq_no_such_task_zzqq", org_dir=org_dir)
+        assert rc == 1
+        assert set(data.keys()) == {"error", "hint"}
+        data2, _stderr2, rc2 = run_cli_json(
+            "add-task", "Sneaky body task",
+            "--body", "Some text\n* Sneaky heading", org_dir=org_dir)
+        assert rc2 == 1
+        assert set(data2.keys()) == {"error"}
+
+    def test_batch_failing_item_error_keeps_warning_off_item(self, org_dir):
+        """Per-item batch isolation holds on the error paths too: a failing
+        item's error result carries no `sync-conflict` entry (universal
+        warnings stay suppressed inside the delegate), while the top-level
+        batch envelope still carries it once."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_batch(
+            "set-done", ["Buy groceries", "Nonexistent task zzqq"],
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        failed = data["results"][1]
+        assert failed["success"] is False
+        assert "error" in failed
+        assert "warnings" not in failed
+        top = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert top == [SYNC_CONFLICT_ENTRY]
 
     # --- marker present, text mode ------------------------------------------
 

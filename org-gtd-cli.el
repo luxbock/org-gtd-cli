@@ -113,7 +113,10 @@ of locale, and keeps the daemon-dispatch capture (which rebinds
 ;; `warnings' is a global envelope field (ruling olli 2026-07-28, #32/#35):
 ;; typed, exit-neutral facts about pre-existing/environmental state OBSERVED
 ;; while running a command — never state changes CAUSED by a mutation (those are
-;; `side_effects').  Every `(version . 1)' JSON envelope may carry it; text mode
+;; `side_effects').  Every JSON object emitted on stdout may carry it —
+;; `(version . 1)' envelopes and the bare error/error+hint objects the JSON
+;; failure paths produce alike, so the staleness signal does not vanish exactly
+;; when a command fails on a possibly-stale view; text mode
 ;; mirrors each entry as one `Warning:' stderr line.  The vocabulary is built by
 ;; independent sources that all feed the same array: `duplicate-idless-heading'
 ;; (#32, computed per command from a duplicate scan) and `sync-conflict' (#35,
@@ -160,17 +163,17 @@ always-present `warnings: []' on the clean path).")
 
 (defun org-gtd-cli/inject-warnings (alist)
   "Return ALIST with universal environmental warnings folded into `warnings'.
-Only `(version . 1)' envelopes are touched; anything else (e.g. bare error
-objects) is returned unchanged.  When the sync-conflict marker is present,
-its entry is MERGED into an existing `warnings' vector (composing with the
-per-command vocabulary #32 already built there) or, absent that key, a new
-`warnings' vector is added.  Marker absent → ALIST is returned untouched,
-so envelopes stay byte-identical to their pre-#35 shape.  When
-`org-gtd-cli/suppress-universal-warnings' is non-nil (delegated per-item
-batch execution), ALIST is returned untouched so per-item payloads keep
-exactly their single-call shape."
-  (if (or org-gtd-cli/suppress-universal-warnings
-          (not (equal (alist-get 'version alist) 1)))
+Applies to EVERY JSON object emitted through `org-gtd-cli/output' —
+`(version . 1)' envelopes and bare error/error+hint objects alike — so JSON
+failure responses carry the staleness signal too.  When the sync-conflict
+marker is present, its entry is MERGED into an existing `warnings' vector
+(composing with the per-command vocabulary #32 already built there) or,
+absent that key, a new `warnings' vector is added.  Marker absent → ALIST is
+returned untouched, so envelopes stay byte-identical to their pre-#35 shape.
+When `org-gtd-cli/suppress-universal-warnings' is non-nil (delegated
+per-item batch execution), ALIST is returned untouched so per-item payloads
+— successes and errors alike — keep exactly their single-call shape."
+  (if org-gtd-cli/suppress-universal-warnings
       alist
     (let ((extra (delq nil (list (org-gtd-cli/sync-conflict-warning)))))
       (if (null extra)
@@ -194,8 +197,8 @@ In JSON mode, serializes ALIST with `org-gtd-cli/json-encode' and prints to
 stdout.  In text mode, this is a no-op — callers handle their own text output.
 Universal environmental warnings (the `sync-conflict' marker) are folded into
 the envelope's `warnings' array here, at the single JSON emission choke point,
-so every read, mutation, dry-run, and batch envelope carries them uniformly
-and composes with any `warnings' the command already built."
+so every read, mutation, dry-run, batch envelope, and error object carries
+them uniformly and composes with any `warnings' the command already built."
   (when org-gtd-cli/json-mode
     (princ (org-gtd-cli/json-encode (org-gtd-cli/inject-warnings alist)))
     (princ "\n")))
@@ -563,9 +566,9 @@ ambiguous-matches — while stderr carries only opaque Emacs diagnostics.
 In text mode, the message goes to stderr.
 Use this for errors, warnings, and hints — never for command output data."
   (if org-gtd-cli/json-mode
-      (let ((msg (apply #'format fmt args)))
-        (princ (org-gtd-cli/json-encode `((error . ,msg))))
-        (princ "\n"))
+      ;; Route through `org-gtd-cli/output' so bare error objects pass the
+      ;; universal-warnings choke point like every other JSON emission.
+      (org-gtd-cli/output `((error . ,(apply #'format fmt args))))
     (apply #'message fmt args)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════

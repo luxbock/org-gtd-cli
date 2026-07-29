@@ -199,9 +199,12 @@ test** (no git, no parsing) and, when present, surfaces a warning:
   daemon mode the marker is re-read on every dispatch (`org-directory` is reset
   per call), so a marker that appears while a long-lived daemon is running is
   seen by the very next command; it is never cached at daemon start.
-- **On every command** — reads and mutations. A mutation with the marker present
-  still executes and persists normally; the warning never changes an exit code
-  and never aborts a command (warn-only).
+- **On every command** — reads and mutations, success and failure alike: a JSON
+  error response (an `{"error": ...}` object) carries the `warnings` array too,
+  so the staleness signal survives exactly when a lookup fails on a possibly
+  stale view. A mutation with the marker present still executes and persists
+  normally; the warning never changes an exit code and never aborts a command
+  (warn-only).
 - **The CLI is a pure consumer.** It never creates, clears, moves, or otherwise
   writes `.sync-conflict` — the external sync units own that marker entirely.
 - In **text mode**, the marker surfaces as one line on **stderr** for the whole
