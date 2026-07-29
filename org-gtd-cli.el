@@ -121,16 +121,236 @@ stdout.  In text mode, this is a no-op — callers handle their own text output.
 ;; Daemon mode support
 ;; ══════════════════════════════════════════════════════════════════════════════
 
+(defsubst org-gtd-cli/guarded-org-file-p (f)
+  "Non-nil when F is a file the daemon conflict guard must track.
+Matches `.org' sources AND `.org_archive' destinations:
+`org-archive-subtree' writes the archive file inside the same dispatch
+(it saves the archive buffer itself, through the shadowed
+`save-buffer'), so archive files participate in preflight, revert,
+discard-and-reload, and `saved_files' bookkeeping exactly like `.org'
+files — otherwise the destination write escapes the guard and the
+envelope under-reports what hit disk."
+  (and f (string-match-p "\\.org\\(_archive\\)?\\'" f)))
+
 (defun org-gtd-cli/revert-org-buffers ()
   "Revert org buffers whose files have changed on disk.
-Called before each daemon-dispatch to ensure fresh file contents."
+Called before each daemon-dispatch to ensure fresh file contents.
+Skips buffers whose visited file is gone (a rotated or deleted
+`.org_archive', say): `revert-buffer' would signal \"file no longer
+exists\" OUTSIDE the dispatch's condition-case, escape to emacsclient
+as a non-zero exit, and make the Python wrapper kill and restart the
+daemon.  Any residual revert error is likewise swallowed — a stale
+buffer is harmless here; the mid-dispatch conflict guard still
+protects every save."
   (dolist (buf (buffer-list))
-    (when (and (buffer-file-name buf)
-               (string-suffix-p ".org" (buffer-file-name buf))
-               (or (buffer-modified-p buf)
-                   (not (verify-visited-file-modtime buf))))
+    (let ((f (buffer-file-name buf)))
+      (when (and (org-gtd-cli/guarded-org-file-p f)
+                 (file-exists-p f)
+                 (or (buffer-modified-p buf)
+                     (not (verify-visited-file-modtime buf))))
+        (with-current-buffer buf
+          (condition-case _
+              (revert-buffer t t t)
+            (error nil)))))))
+
+;; --- Optimistic mid-dispatch conflict detection ------------------------------
+;;
+;; Between the dispatch-start `org-gtd-cli/revert-org-buffers' and the mutation's
+;; save, an external writer (batch-mode CLI, second daemon identity, org
+;; sync/auto-commit, human editor) can still touch the .org file.  The previous
+;; implementation shadowed `verify-visited-file-modtime' to always return t
+;; around BODY, so `basic-save-buffer' blindly wrote the (now-stale) buffer over
+;; the external bytes — the incident of 2026-07-11 that motivated Forgejo #27.
+;;
+;; The guard below replaces that unconditional bypass with an explicit,
+;; noninteractive conflict signal.  Every daemon-mode save routes through
+;; `org-gtd-cli/save-buffer-with-conflict-check', which:
+;;   1. Preflights peer buffers (so a conflict in a refile/archive destination
+;;      is detected BEFORE an avoidable source-buffer save).
+;;   2. Runs an immediate `verify-visited-file-modtime' check on the current
+;;      buffer.
+;;   3. Delegates to `basic-save-buffer' with `verify-visited-file-modtime'
+;;      shadowed to `t' just for its own inline supersession check — the guard
+;;      already verified the answer this instant.
+;;
+;; A conflict signals `org-gtd-cli/file-conflict', which bypasses batch item
+;; error isolation and aborts the whole dispatch.  The handler discards unsaved
+;; changes, reloads from disk, and emits the JSON/text conflict envelope.
+
+(define-error 'org-gtd-cli/file-conflict
+  "File changed on disk during daemon dispatch"
+  'file-error)
+
+(defvar org-gtd-cli/dispatch-saved-files nil
+  "Relative paths successfully saved during the current daemon dispatch.
+Appended by `org-gtd-cli/save-buffer-with-conflict-check' in save order
+and used by the conflict handler to report `partial'/`saved_files'.")
+
+(defvar org-gtd-cli/dispatch--real-verify-visited-file-modtime nil
+  "Reference to the real `verify-visited-file-modtime' function.
+`org-gtd-cli/daemon-dispatch' captures the function value BEFORE
+shadowing it around BODY-FN.  The guard's preflight and pre-save check
+call through this reference so they see the real on-disk state even
+while `basic-save-buffer''s inline check and Emacs's `lock-file' /
+`find-file-noselect' paths inside BODY-FN see the shadowed `t' — which
+keeps those paths from opening a yes-or-no prompt (a headless daemon
+would hang) or from spuriously flagging a modification-time race.
+The centralized guard is where a conflict is detected, and the sole
+place it must never be shadowed.")
+
+(defvar org-gtd-cli/dispatch--before-save-hook nil
+  "Internal daemon-only test hook.
+When non-nil, called with the visited file path just before each guarded
+save inside a dispatch.  Reserved for the isolated test daemon to inject
+a mid-dispatch external writer via `emacsclient --eval'; there is no
+user-facing environment backdoor.")
+
+(defsubst org-gtd-cli/--real-modtime-ok-p (buf)
+  "Call the saved real `verify-visited-file-modtime' on BUF.
+Falls back to the current binding when no dispatch is active (batch
+mode)."
+  (funcall (or org-gtd-cli/dispatch--real-verify-visited-file-modtime
+               (symbol-function 'verify-visited-file-modtime))
+           buf))
+
+(defun org-gtd-cli/preflight-org-buffers (&optional exclude)
+  "Signal `org-gtd-cli/file-conflict' on the first stale Org buffer.
+Skips EXCLUDE (a buffer) so the caller can preflight peers before
+saving itself.  Checks staleness on every guarded Org buffer, MODIFIED
+OR NOT: a multi-file mutation (refile, archive) may dirty and save a
+still-clean peer later in the same dispatch — most acutely the archive
+case, where `org-archive-subtree' writes the destination before the
+source is even modified.  A stale unmodified peer means an external
+writer landed mid-dispatch, and no further byte of this dispatch may
+hit disk ahead of that doomed save.  All buffers were reverted fresh
+at dispatch start, so this cannot misfire on pre-dispatch changes.
+Uses the saved real modtime check (`org-gtd-cli/--real-modtime-ok-p')
+so the answer is not distorted by the outer shadow that keeps BODY-FN
+from prompting."
+  (dolist (buf (buffer-list))
+    (unless (eq buf exclude)
+      (let ((f (buffer-file-name buf)))
+        (when (and (org-gtd-cli/guarded-org-file-p f)
+                   (file-exists-p f)
+                   (not (org-gtd-cli/--real-modtime-ok-p buf)))
+          (signal 'org-gtd-cli/file-conflict (list f)))))))
+
+(defun org-gtd-cli/really-save-buffer ()
+  "Save the current buffer without re-running the conflict guard.
+Delegates to `basic-save-buffer'; `verify-visited-file-modtime' is
+already shadowed by the outer daemon-dispatch letf so
+`basic-save-buffer''s inline supersession check does not spuriously
+prompt (it would hang the headless daemon on `yes-or-no-p')."
+  (basic-save-buffer))
+
+(defun org-gtd-cli/save-buffer-with-conflict-check ()
+  "Guarded replacement for `save-buffer' during a daemon dispatch.
+Preflights every peer modified Org buffer, then re-verifies the current
+buffer's visited file against disk (through the saved real
+`verify-visited-file-modtime'), then saves.  Signals
+`org-gtd-cli/file-conflict' on the first stale existing Org buffer,
+BEFORE any bytes hit disk."
+  (let* ((this (current-buffer))
+         (f (buffer-file-name this))
+         (is-org (org-gtd-cli/guarded-org-file-p f)))
+    ;; Test hook: exercised only when the isolated test daemon sets it.
+    (when (and org-gtd-cli/dispatch--before-save-hook f)
+      (funcall org-gtd-cli/dispatch--before-save-hook f))
+    ;; Preflight peers first: a conflict in ANY file of a multi-file mutation
+    ;; must abort BEFORE this save lands (spec §Required conflict policy —
+    ;; "preflight every modified existing Org buffer visible to that command
+    ;; before the first save"; we check unmodified peers too, since a
+    ;; still-clean peer may be dirtied and saved later in this same dispatch).
+    (org-gtd-cli/preflight-org-buffers this)
+    ;; Immediate final check on the buffer we are about to save.
+    (when (and is-org (file-exists-p f)
+               (not (org-gtd-cli/--real-modtime-ok-p this)))
+      (signal 'org-gtd-cli/file-conflict (list f)))
+    ;; Record the file as saved only when the save actually wrote bytes:
+    ;; `basic-save-buffer' is a no-op on an unmodified buffer (e.g. an
+    ;; unguarded `save-buffer' after clearing a SCHEDULED that was never
+    ;; there), and a conflict envelope's `saved_files' must list only
+    ;; files whose bytes really landed on disk.
+    (let ((was-modified (buffer-modified-p)))
+      (org-gtd-cli/really-save-buffer)
+      (when (and is-org was-modified)
+        (let ((rel (org-gtd-cli/relative-filename f)))
+          (unless (member rel org-gtd-cli/dispatch-saved-files)
+            (setq org-gtd-cli/dispatch-saved-files
+                  (append org-gtd-cli/dispatch-saved-files (list rel)))))))
+    t))
+
+(defun org-gtd-cli/discard-and-reload-org-buffers ()
+  "Discard unsaved changes and reload every touched Org buffer from disk.
+Called by the daemon-dispatch conflict handler so the external writer's
+bytes remain byte-for-byte authoritative on all still-dirty buffers.
+Runs with `ask-user-about-supersession-threat' shadowed to return nil so
+`revert-buffer' never recursively signals `org-gtd-cli/file-conflict'
+into its own cleanup — an external writer still hammering the file's
+mtime would otherwise wedge the handler in an infinite signal loop.
+Detects staleness via the saved real `verify-visited-file-modtime' so
+the outer body-time shadow (returning constant `t') does not hide it."
+  (cl-letf (((symbol-function 'ask-user-about-supersession-threat)
+             (lambda (_filename) nil)))
+    (dolist (buf (buffer-list))
       (with-current-buffer buf
-        (revert-buffer t t t)))))
+        (let ((f (buffer-file-name)))
+          (when (org-gtd-cli/guarded-org-file-p f)
+            (cond
+             ((not (file-exists-p f))
+              ;; Never-written destination (e.g. a fresh .org_archive whose
+              ;; save the abort preempted): nothing on disk to reload — kill
+              ;; the buffer so a later dispatch cannot find-file-noselect it
+              ;; and save its stale unsaved contents alongside new ones.
+              (when (buffer-modified-p)
+                (set-buffer-modified-p nil)
+                (kill-buffer buf)))
+             ((or (buffer-modified-p)
+                  (not (org-gtd-cli/--real-modtime-ok-p buf)))
+              (set-buffer-modified-p nil)
+              (condition-case _
+                  (revert-buffer t t t)
+                (error nil))))))))))
+
+(defun org-gtd-cli/handle-file-conflict (err json-mode-p)
+  "Emit the conflict output for ERR and reload touched buffers.
+Uses `org-gtd-cli/dispatch-saved-files' to fill `partial'/`saved_files'
+so a batch or multi-file mutation reports its true partial state."
+  (let* ((file (car (cdr err)))
+         (rel (if file (org-gtd-cli/relative-filename file) ""))
+         (saved (sort (delete-dups (copy-sequence
+                                    org-gtd-cli/dispatch-saved-files))
+                      #'string<))
+         (partial (not (null saved)))
+         (partial-note
+          (if partial
+              (concat "; earlier saves in this dispatch completed for: "
+                      (mapconcat #'identity saved ", "))
+            ""))
+         (message-text
+          (format
+           (concat "File %s changed during daemon dispatch. "
+                   "The conflicting file was not overwritten%s. "
+                   "Inspect the file and retry after the other writer finishes.")
+           rel partial-note))
+         (hint-text
+          "Concurrent external write detected. No retry is attempted; rerun the command after the other writer stops."))
+    ;; Discard dirty edits first so the next call sees the on-disk state.
+    (org-gtd-cli/discard-and-reload-org-buffers)
+    (if json-mode-p
+        (progn
+          (princ
+           (org-gtd-cli/json-encode
+            `((error . ,message-text)
+              (hint . ,hint-text)
+              (file . ,rel)
+              (exit_code . 1)
+              (partial . ,(if partial t :false))
+              (saved_files . ,(apply #'vector saved)))))
+          (princ "\n"))
+      ;; Text mode: diagnostic on stderr via the outer `message' shadow.
+      (message "Error: %s" message-text)
+      (message "Hint: %s" hint-text))))
 
 (defun org-gtd-cli/daemon-dispatch (body-fn json-mode-p full-mode-p org-dir stdout-file stderr-file exit-file)
   "Evaluate BODY-FN with output captured to temp files.
@@ -140,7 +360,15 @@ JSON-MODE-P sets `org-gtd-cli/json-mode' for this call.
 FULL-MODE-P sets `org-gtd-cli/full-mode' for this call.
 ORG-DIR sets `org-directory' and `org-agenda-files' for this call.
 STDOUT-FILE receives princ output, STDERR-FILE receives message output,
-EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
+EXIT-FILE receives the numeric exit code (from kill-emacs calls).
+
+Guards against mid-dispatch save clobbers: `save-buffer' is shadowed by
+`org-gtd-cli/save-buffer-with-conflict-check', and any change detected
+during the body (via `ask-user-about-supersession-threat' or the
+inline modtime check) becomes a `org-gtd-cli/file-conflict' signal.
+On conflict the dispatch is aborted, unsaved edits are discarded, the
+buffers are reloaded from disk, and a JSON/text conflict envelope with
+`file'/`partial'/`saved_files' is returned with exit code 1."
   ;; Update org-directory per call (may differ between invocations)
   (setq org-directory org-dir)
   (unless (string-suffix-p "/" org-directory)
@@ -149,40 +377,71 @@ EXIT-FILE receives the numeric exit code (from kill-emacs calls)."
   (setq org-gtd-cli/json-mode json-mode-p)
   (setq org-gtd-cli/full-mode full-mode-p)
   (let ((org-gtd-cli--exit-code 0)
-        (stderr-msgs '()))
-    ;; If a file's mtime changes while a call is in flight (Doom auto-save or
-    ;; an external process editing files under the daemon), Emacs raises interactive
-    ;; supersession prompts — minibuffer reads that block the headless daemon
-    ;; forever, queueing every later emacsclient call behind them.  The revert
-    ;; below makes the buffer authoritative, so suppress the prompts and let
-    ;; saves overwrite the file.  The C-level buffer-modification check
-    ;; (`lock-file', reached from `prepare_to_modify_buffer' — including
-    ;; during the revert itself) calls this function; return nil instead of
-    ;; prompting or signaling `file-supersession' so the edit proceeds.
+        (stderr-msgs '())
+        (org-gtd-cli/dispatch-saved-files nil)
+        ;; Capture the real `verify-visited-file-modtime' BEFORE any letf
+        ;; shadow of it, so the guard can still perform an authentic check
+        ;; while BODY-FN sees the shadowed constant `t' (see below).
+        (org-gtd-cli/dispatch--real-verify-visited-file-modtime
+         (symbol-function 'verify-visited-file-modtime)))
+    ;; Dispatch-start refresh: an external change that landed BEFORE the
+    ;; command begins is loaded normally and must not be misclassified as a
+    ;; mid-dispatch conflict.  The C-level supersession probe (via `lock-file'
+    ;; reached from `prepare_to_modify_buffer', including during the revert
+    ;; itself) still calls `ask-user-about-supersession-threat' — return nil so
+    ;; the revert proceeds silently instead of prompting or signaling
+    ;; `file-supersession'.
     (cl-letf (((symbol-function 'ask-user-about-supersession-threat)
                (lambda (_filename) nil)))
-      (org-gtd-cli/revert-org-buffers)
-      (with-temp-file stdout-file
-        (let ((standard-output (current-buffer)))
-          (cl-letf (((symbol-function 'kill-emacs)
-                     (lambda (&optional code)
-                       (setq org-gtd-cli--exit-code (or code 0))
-                       (throw 'org-gtd-cli-exit nil)))
-                    ((symbol-function 'message)
-                     (lambda (fmt &rest args)
-                       (when fmt
-                         (push (apply #'format fmt args) stderr-msgs))))
-                    ;; Second supersession path: `basic-save-buffer' has its
-                    ;; own inline "has changed since visited or saved.  Save
-                    ;; anyway?" `yes-or-no-p' (as does `find-file-noselect'),
-                    ;; gated on this predicate.  Claiming the buffer is in
-                    ;; sync skips those prompts too.  Only shadowed around
-                    ;; BODY-FN — the revert above needs the real predicate to
-                    ;; detect stale buffers.
-                    ((symbol-function 'verify-visited-file-modtime)
-                     (lambda (&optional _buf) t)))
-            (catch 'org-gtd-cli-exit
-              (funcall body-fn))))))
+      (org-gtd-cli/revert-org-buffers))
+    (with-temp-file stdout-file
+      (let ((standard-output (current-buffer)))
+        (cl-letf (((symbol-function 'kill-emacs)
+                   (lambda (&optional code)
+                     (setq org-gtd-cli--exit-code (or code 0))
+                     (throw 'org-gtd-cli-exit nil)))
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (when fmt
+                       (push (apply #'format fmt args) stderr-msgs))))
+                  ;; Convert any supersession probe that fires inside BODY-FN
+                  ;; (e.g. a path that bypasses the modtime shadow below and
+                  ;; still ends up calling `ask-user-about-supersession-threat')
+                  ;; into the one noninteractive conflict signal — no path may
+                  ;; open a minibuffer or wait indefinitely.
+                  ((symbol-function 'ask-user-about-supersession-threat)
+                   (lambda (filename)
+                     (signal 'org-gtd-cli/file-conflict (list filename))))
+                  ;; Shadow `verify-visited-file-modtime' to `t' inside
+                  ;; BODY-FN.  Two paths depend on it:
+                  ;;   (1) The C `lock-file' probe reached from
+                  ;;       `prepare_to_modify_buffer' skips
+                  ;;       `ask-user-about-supersession-threat' entirely
+                  ;;       when this returns `t', so a hammered mtime cannot
+                  ;;       fire a rush of signals per modification.
+                  ;;   (2) `basic-save-buffer''s inline supersession check —
+                  ;;       and `find-file-noselect''s revisit check — see `t'
+                  ;;       instead of hitting `yes-or-no-p' (which would hang
+                  ;;       a headless daemon).
+                  ;; The centralized guard (`org-gtd-cli/save-buffer-with-
+                  ;; conflict-check') still performs an authentic modtime
+                  ;; check via the saved reference above, so the shadow does
+                  ;; NOT bypass the actual detection at save time.
+                  ((symbol-function 'verify-visited-file-modtime)
+                   (lambda (&optional _b) t))
+                  ;; Route every `save-buffer' — single-file, multi-file,
+                  ;; refile, archive, and delegated batch item — through the
+                  ;; centralized guard, so they share the same conflict
+                  ;; semantics.
+                  ((symbol-function 'save-buffer)
+                   (lambda (&optional _arg)
+                     (org-gtd-cli/save-buffer-with-conflict-check))))
+          (catch 'org-gtd-cli-exit
+            (condition-case err
+                (funcall body-fn)
+              (org-gtd-cli/file-conflict
+               (org-gtd-cli/handle-file-conflict err json-mode-p)
+               (setq org-gtd-cli--exit-code 1)))))))
     (with-temp-file stderr-file
       (dolist (msg (nreverse stderr-msgs))
         (insert msg "\n")))
@@ -3369,8 +3628,12 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                  (org-gtd-cli/refile-repair-invariants
                   target-buf (marker-position target-marker) heading)
                  (set-marker target-marker nil))
-               (save-buffer)
+               ;; Save destination BEFORE source: if a conflict aborts between
+               ;; the two saves, the subtree is left duplicated on disk
+               ;; (recoverable) instead of deleted from both files — the source
+               ;; save is the one that removes it, so it must land last.
                (with-current-buffer target-buf (save-buffer))
+               (save-buffer)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
                     `((version . 1) (command . "refile")
@@ -3383,7 +3646,8 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
     (kill-emacs 0)))
 
 (defun org-gtd-cli/refile-repair-invariants (target-buf target-pos moved-heading)
-  "Restore GTD invariants after refiling MOVED-HEADING under TARGET-POS in TARGET-BUF.
+  "Restore GTD invariants after refiling MOVED-HEADING.
+TARGET-POS is a position in TARGET-BUF pointing at the destination parent.
 Demotes the moved subtree to TODO when it is a NEXT that would be freestanding
 or a duplicate NEXT sibling in its new home; demotes a NEXT parent that has just
 become a project because a child was refiled under it; and reorders destination
@@ -4623,6 +4887,14 @@ error result alists.  Returns (RESULT . SUCCESS-P)."
               ;; that batch-one delegates (the delegate shim intercepts
               ;; kill-emacs), but keep as a success fallback.
               (cons `((index . ,idx) (success . t)) t))))
+        ;; A daemon-mode file conflict is FATAL to the enclosing dispatch and
+        ;; must bypass per-item error isolation — the spec requires the batch
+        ;; abort with no later item running or persisting stale state.
+        ;; Re-signal so `org-gtd-cli/daemon-dispatch's outer handler catches
+        ;; it and emits the conflict envelope with the true `partial' /
+        ;; `saved_files' seen through the guarded saves.
+        (org-gtd-cli/file-conflict
+         (signal (car err) (cdr err)))
         ;; A delegated command that failed with a {error, hint} payload —
         ;; carry the hint through so batch results keep the per-item hint
         ;; single commands return (see `org-gtd-cli/batch--delegate').
