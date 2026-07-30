@@ -2043,6 +2043,59 @@ KIND is \"org-id\", \"entry-id\", or \"locator\".  Never writes."
                (digest (md5 (format "%s\0%s\0%d" file key idx))))
           (cons (concat "loc:" digest) "locator"))))))
 
+(defun org-gtd-cli/duplicate-idless-warnings (file)
+  "Return duplicate id-less heading warnings for FILE as a list of alists.
+Read-only scan of FILE's widened buffer.  Groups headings by their bare
+heading text (`org-get-heading' t t t t — the same value emitted as the
+node/row `heading' field), counting only headings that resolve to the
+`locator' read-id tier — i.e. carrying neither an Org `:ID:' nor an
+org-gcal `:entry-id:' (mirroring `org-gtd-cli/read-identity-at-point').
+Each group with two or more such headings yields one alist
+  ((type . \"duplicate-idless-heading\") (file . REL) (heading . TEXT)
+   (count . N))
+where N is the number of colliding id-less headings and REL is FILE
+relative to `org-directory'.  Groups are emitted in first-seen document
+order.  Never modifies the buffer."
+  (with-current-buffer (find-file-noselect file)
+    (org-with-wide-buffer
+     (let ((counts (make-hash-table :test 'equal))
+           (order '())
+           (rel (org-gtd-cli/relative-filename (or (buffer-file-name) file))))
+       (goto-char (point-min))
+       (while (re-search-forward org-heading-regexp nil t)
+         (goto-char (line-beginning-position))
+         (when (and (not (org-entry-get nil "ID"))
+                    (not (org-entry-get nil "entry-id")))
+           (let* ((heading (org-get-heading t t t t))
+                  (prior (gethash heading counts)))
+             (unless prior
+               (push heading order))
+             (puthash heading (1+ (or prior 0)) counts)))
+         (forward-line 1))
+       (delq nil
+             (mapcar
+              (lambda (heading)
+                (let ((count (gethash heading counts)))
+                  (when (>= count 2)
+                    `((type . "duplicate-idless-heading")
+                      (file . ,rel)
+                      (heading . ,heading)
+                      (count . ,count)))))
+              (nreverse order)))))))
+
+(defun org-gtd-cli/warnings-vector (warnings)
+  "Return WARNINGS (a list of warning alists) as a JSON vector."
+  (apply #'vector warnings))
+
+(defun org-gtd-cli/print-warnings-text (warnings)
+  "Print one `Warning:' line per entry in WARNINGS to stderr.
+In batch Emacs `message' writes to stderr; stdout output is untouched."
+  (dolist (w warnings)
+    (message "Warning: %d id-less headings share the heading \"%s\" in %s (add an :ID:/:entry-id: or dedupe)"
+             (alist-get 'count w)
+             (alist-get 'heading w)
+             (alist-get 'file w))))
+
 ;; --- outline ---
 
 (defun org-gtd-cli/outline-node-at-point ()
@@ -2166,14 +2219,17 @@ mode, prints a minimal indented heading tree."
     (unless (file-exists-p file)
       (org-gtd-cli/error "File not found: %s" target)
       (kill-emacs 1))
-    (let ((nodes (org-gtd-cli/outline-tree file)))
+    (let ((nodes (org-gtd-cli/outline-tree file))
+          (warnings (org-gtd-cli/duplicate-idless-warnings file)))
       (if org-gtd-cli/json-mode
           (org-gtd-cli/output
            `((version . 1)
              (command . "outline")
              (file . ,(org-gtd-cli/relative-filename file))
-             (nodes . ,nodes)))
-        (org-gtd-cli/outline-print-text nodes))))
+             (nodes . ,nodes)
+             (warnings . ,(org-gtd-cli/warnings-vector warnings))))
+        (org-gtd-cli/outline-print-text nodes)
+        (org-gtd-cli/print-warnings-text warnings))))
   (kill-emacs 0))
 
 (defun org-gtd-cli/outline-print-text (nodes)
@@ -4750,6 +4806,31 @@ parent, is_project, properties), plus `body' when `--full' is set."
                                              :null))))))
          task)))))
 
+(defun org-gtd-cli/agenda-contributing-files ()
+  "Return the distinct source files of task rows in the current agenda buffer.
+Walks `org-agenda-buffer' for heading markers and collects each row's
+source file, deduped, in first-seen order.  Read-only."
+  (let ((files '()))
+    (with-current-buffer org-agenda-buffer
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let* ((marker (or (get-text-property (point) 'org-hd-marker)
+                           (get-text-property (point) 'org-marker)))
+               (src-buf (and marker (marker-buffer marker)))
+               (src-file (and src-buf (buffer-file-name src-buf))))
+          (when (and src-file (not (member src-file files)))
+            (push src-file files)))
+        (forward-line 1)))
+    (nreverse files)))
+
+(defun org-gtd-cli/agenda-warnings ()
+  "Return duplicate id-less heading warnings across the current agenda view.
+Computed over the set of files that contributed task rows (deduped by
+file); each entry names the file the duplicate lives in.  Read-only."
+  (apply #'append
+         (mapcar #'org-gtd-cli/duplicate-idless-warnings
+                 (org-gtd-cli/agenda-contributing-files))))
+
 (defun org-gtd-cli/agenda-view-json (cmd-key)
   "Emit the agenda view for CMD-KEY as JSON, grouped into blocks.
 Each block carries its overriding header name and the task entries beneath
@@ -4791,7 +4872,8 @@ accumulate under a block named \"Agenda\"."
      `((version . 1)
        (command . "agenda-view")
        (key . ,cmd-key)
-       (blocks . ,(apply #'vector (nreverse blocks)))))))
+       (blocks . ,(apply #'vector (nreverse blocks)))
+       (warnings . ,(org-gtd-cli/warnings-vector (org-gtd-cli/agenda-warnings)))))))
 
 (defun org-gtd-cli/agenda-view (&optional key date)
   "Run an org-agenda custom command in batch mode.
@@ -4830,7 +4912,8 @@ In JSON mode, emits structured blocks via `org-gtd-cli/agenda-view-json'."
                                      (org-gtd-cli/relative-filename src-file)
                                    "?"))))
               (princ (format "%s\n" line-text))))
-          (forward-line 1))))
+          (forward-line 1)))
+      (org-gtd-cli/print-warnings-text (org-gtd-cli/agenda-warnings)))
     (kill-emacs 0)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════

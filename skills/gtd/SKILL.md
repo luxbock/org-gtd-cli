@@ -69,7 +69,7 @@ JSON returns structured data with a `version` field and command-specific fields.
 - Use the `heading` field directly as SUBSTR input to follow-up commands
 - Modifying commands return confirmation with old/new values and `side_effects` (e.g., auto-progression after `set-done`)
 
-**Exceptions:** `agenda-view` and `org-timestamp` do not support `--json`.
+**Exception:** `org-timestamp` does not support `--json` (it prints a bare timestamp string). `agenda-view` *does* support `--json` — it emits an envelope with `version`/`command`/`key`/`blocks`, plus a top-level `warnings` array (see the README `warnings` note).
 
 ## Substring matching
 

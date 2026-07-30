@@ -8947,6 +8947,146 @@ class TestReadIdentity:
         assert work["read_id"] == "test-id-work"
         assert work["read_id_kind"] == "org-id"
 
+    # --- warnings: duplicate id-less headings (issue #32) ---
+    #
+    # The `warnings` array is the CLI's first top-level envelope warning
+    # channel: warn-only (exit code unaffected), read-only, one entry per
+    # duplicated `(file, heading)` group with count >= 2, grouped by bare
+    # heading text (NOT the #29 locator digest), warning only for headings
+    # in the locator tier (no :ID: and no :entry-id:).  Surface is exactly
+    # the two read commands (outline, agenda-view).
+
+    def test_outline_warns_on_duplicate_idless_heading(self, org_dir):
+        """outline JSON envelope carries one warning for the two id-less
+        `Recurring Chore` headings, with count 2 and the documented shape."""
+        _install_read_id_fixture(org_dir)
+        data, stderr, rc = run_cli_json(
+            "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["warnings"] == [{
+            "type": "duplicate-idless-heading",
+            "file": "entries.org",
+            "heading": "Recurring Chore",
+            "count": 2,
+        }]
+
+    def test_agenda_view_warns_on_duplicate_idless_heading(self, tmp_path):
+        """agenda-view HAS a --json envelope; it carries the same one warning
+        for the fixture's two id-less `Recurring Chore` headings.  Uses an
+        org directory containing only the read-id fixture so the agenda spans
+        just that file — agenda-view computes warnings over the set of files
+        that contributed task rows (here, only `entries.org`)."""
+        solo = tmp_path / "solo"
+        solo.mkdir()
+        _install_read_id_fixture(solo)
+        data, stderr, rc = run_cli_json("agenda-view", "w", org_dir=solo)
+        assert rc == 0, stderr
+        assert data["warnings"] == [{
+            "type": "duplicate-idless-heading",
+            "file": "entries.org",
+            "heading": "Recurring Chore",
+            "count": 2,
+        }]
+
+    def test_id_and_entry_id_suppress_warning(self, org_dir):
+        """Only `Recurring Chore` warns: `Distinct Chore` (:ID:) and the two
+        `Book Club` headings (:entry-id:) produce no warning entry."""
+        _install_read_id_fixture(org_dir)
+        data, _, rc = run_cli_json(
+            "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0
+        headings = {w["heading"] for w in data["warnings"]}
+        assert headings == {"Recurring Chore"}
+        assert "Distinct Chore" not in headings
+        assert "Book Club" not in headings
+
+    def test_warnings_present_and_empty_when_clean(self, tmp_path):
+        """A file/view with no id-less duplicates has `warnings` present as []
+        in both commands — the key is always present, `[]` when clean, and
+        there is no warning noise.  Uses a purpose-built clean org directory
+        (the shared `tasks.org` fixture deliberately carries two id-less
+        `Tools` category headings, so it is *not* a clean case)."""
+        clean = tmp_path / "clean"
+        clean.mkdir()
+        (clean / "tasks.org").write_text(
+            "#+title: Clean\n\n"
+            "* NEXT Solo next task\n"
+            "* WAITING Solo waiting task\n")
+        (clean / "tasks.org").chmod(0o644)
+        out_data, _, out_rc = run_cli_json(
+            "outline", "--file", "tasks.org", org_dir=clean)
+        assert out_rc == 0
+        assert out_data["warnings"] == []
+        ag_data, _, ag_rc = run_cli_json("agenda-view", "n", org_dir=clean)
+        assert ag_rc == 0
+        assert ag_data["warnings"] == []
+
+    def test_warnings_are_warn_only_exit_zero(self, org_dir):
+        """A duplicate id-less heading is warn-only: exit code stays 0 with
+        warnings present."""
+        _install_read_id_fixture(org_dir)
+        data, _, rc = run_cli_json(
+            "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0
+        assert data["warnings"], "expected a warning on the fixture"
+
+    def test_text_mode_warning_goes_to_stderr(self, org_dir):
+        """In text mode each duplicated group yields exactly one `Warning:`
+        line on stderr; stdout carries only the outline tree, no `Warning:`."""
+        _install_read_id_fixture(org_dir)
+        stdout, stderr, rc = run_cli(
+            "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0
+        warning_lines = [ln for ln in stderr.splitlines()
+                         if ln.startswith("Warning:")]
+        assert len(warning_lines) == 1
+        assert "Recurring Chore" in warning_lines[0]
+        assert "entries.org" in warning_lines[0]
+        assert "Warning:" not in stdout
+        assert "Recurring Chore" in stdout  # the tree itself is unchanged
+
+    def test_agenda_text_mode_warning_goes_to_stderr(self, tmp_path):
+        """agenda-view text mode also routes the warning to stderr, leaving
+        stdout (the agenda listing) free of any `Warning:` line.  Uses a solo
+        org directory so only the fixture's `Recurring Chore` group warns."""
+        solo = tmp_path / "solo"
+        solo.mkdir()
+        _install_read_id_fixture(solo)
+        stdout, stderr, rc = run_cli("agenda-view", "w", org_dir=solo)
+        assert rc == 0
+        warning_lines = [ln for ln in stderr.splitlines()
+                         if ln.startswith("Warning:")]
+        assert len(warning_lines) == 1
+        assert "Recurring Chore" in warning_lines[0]
+        assert "Warning:" not in stdout
+
+    def test_warning_is_per_group_not_per_occurrence(self, org_dir):
+        """N colliding id-less headings yield ONE entry with count N, not N
+        entries."""
+        _install_read_id_fixture(org_dir)
+        data, _, rc = run_cli_json(
+            "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0
+        chore_entries = [w for w in data["warnings"]
+                         if w["heading"] == "Recurring Chore"]
+        assert len(chore_entries) == 1
+        assert chore_entries[0]["count"] == 2
+
+    def test_warning_read_is_non_mutating(self, org_dir):
+        """Emitting a warning does not write :ID:/:entry-id: or otherwise
+        touch the source file — it stays byte-identical."""
+        dest = _install_read_id_fixture(org_dir)
+        before = dest.read_bytes()
+        run_cli_json("outline", "--file", "entries.org", org_dir=org_dir)
+        run_cli_json("agenda-view", "w", org_dir=org_dir)
+        after = dest.read_bytes()
+        # Byte-identity is the full read-only guarantee: no :ID:/:entry-id:
+        # was written (the fixture's single pre-existing :ID: on Distinct
+        # Chore is preserved, not added), and nothing else changed either.
+        assert after == before
+        assert after.count(b":ID:") == 1
+        assert after.count(b":entry-id:") == 2
+
 
 # ===========================================================================
 # render-file command: shared org->HTML render helper + path containment
