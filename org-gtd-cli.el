@@ -470,6 +470,18 @@ so a batch or multi-file mutation reports its true partial state."
 Set once (idempotently) by `org-gtd-cli/daemon-record-startup'. Reported
 as `age' by `daemon status' and unaffected by later TTL changes.")
 
+(defvar org-gtd-cli/daemon--socket-inode nil
+  "Inode of this daemon's own listening socket, recorded at startup.
+
+Guards the recursive delete in `org-gtd-cli/daemon-ttl-expire'. A daemon
+can be ORPHANED from its socket path while still running: any elisp error
+other than `org-gtd-cli/file-conflict' escapes the dispatch to emacsclient
+as a non-zero exit, and the Python wrapper responds by unlinking the
+socket and retrying, which spawns a successor into the same identity
+directory. Without this check the orphan's TTL timer would later delete
+that directory — now holding its SUCCESSOR's live socket — orphaning the
+successor in turn and leaking a daemon per cycle.")
+
 (defvar org-gtd-cli/daemon-ttl-seconds nil
   "Current idle TTL for this daemon in seconds.
 `nil' — the daemon predates any TTL request in this session (only
@@ -482,10 +494,32 @@ completed dispatch. Reported by `daemon status'.")
   "Active idle-TTL timer, or nil when disarmed.
 Cancelled at every dispatch start and re-armed at every dispatch end.")
 
+(defun org-gtd-cli/daemon-socket-inode ()
+  "Inode number of the socket this daemon is meant to be listening on.
+Nil when `server-name' is unset or nothing exists at that path."
+  (let ((socket (and (boundp 'server-name) server-name)))
+    (when (stringp socket)
+      (let ((attrs (file-attributes (expand-file-name socket))))
+        (and attrs (file-attribute-inode-number attrs))))))
+
+(defun org-gtd-cli/daemon-owns-socket-p ()
+  "Non-nil when the socket at `server-name' is still THIS daemon's.
+
+Compares the live inode against the one recorded at startup. A successor
+daemon that bound a fresh socket at the same path has a different inode,
+so an orphan answers nil here and must not delete the directory."
+  (let ((recorded org-gtd-cli/daemon--socket-inode)
+        (current (org-gtd-cli/daemon-socket-inode)))
+    (and recorded current (equal recorded current))))
+
 (defun org-gtd-cli/daemon-record-startup ()
-  "Record the inception timestamp on the first dispatch this daemon serves."
+  "Record the inception timestamp on the first dispatch this daemon serves.
+Also records the identity of our own socket, so TTL expiry can refuse to
+delete a directory that now belongs to a successor."
   (unless org-gtd-cli/daemon-inception-ts
-    (setq org-gtd-cli/daemon-inception-ts (float-time))))
+    (setq org-gtd-cli/daemon-inception-ts (float-time)))
+  (unless org-gtd-cli/daemon--socket-inode
+    (setq org-gtd-cli/daemon--socket-inode (org-gtd-cli/daemon-socket-inode))))
 
 (defun org-gtd-cli/daemon-cancel-ttl ()
   "Cancel a pending TTL timer so it cannot terminate Emacs mid-command."
@@ -514,7 +548,13 @@ arms the timer, `0' leaves it disarmed (immortal)."
   (let* ((socket (and (boundp 'server-name) server-name))
          (dir (and (stringp socket)
                    (file-name-directory (expand-file-name socket)))))
-    (when (and dir (file-directory-p dir))
+    ;; Only reclaim the directory if the socket in it is still OURS. An
+    ;; orphaned daemon (see `org-gtd-cli/daemon--socket-inode') shares this
+    ;; path with a live successor, and deleting here would take out the
+    ;; successor's socket and `emacs.d' — leaking a daemon per expiry. When
+    ;; we do not own it we just exit; `daemon gc' reclaims stale dirs safely,
+    ;; with the ownership and path-escape guards the Python side applies.
+    (when (and dir (file-directory-p dir) (org-gtd-cli/daemon-owns-socket-p))
       (condition-case _
           ;; `delete-directory' as this user; foreign files would error out.
           ;; The socket dir is `_DAEMON_BASE/<identity>' — removing it also

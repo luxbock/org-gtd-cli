@@ -7287,6 +7287,65 @@ class TestDaemonManagementCommands:
         assert not mod._org_path_is_provable("")
         assert mod._org_path_is_provable("/tmp")
 
+    @staticmethod
+    def _run_ttl_expire_elisp(tmpdir, replace_socket):
+        """Drive `daemon-ttl-expire' in batch emacs against a fake identity dir.
+
+        REPLACE-SOCKET simulates the orphan case: the socket at `server-name'
+        is swapped for a different file (new inode) after startup, as happens
+        when the Python wrapper unlinks it and a successor daemon binds a fresh
+        one at the same path.
+        """
+        id_dir = Path(tmpdir) / ("f" * 32)
+        id_dir.mkdir(parents=True, exist_ok=True)
+        sock = id_dir / "server"
+        sock.write_text("")
+        (id_dir / "emacs.d").mkdir(exist_ok=True)
+        swap = "(progn (delete-file server-name) (write-region \"\" nil server-name))" \
+            if replace_socket else "nil"
+        # `--eval' evaluates exactly ONE form, so everything goes in a progn.
+        # `user-emacs-directory' must be set BEFORE the load, exactly as
+        # `_ensure_daemon' does when spawning: loading the elisp ensures that
+        # directory exists, and in a sealed nix build HOME is /homeless-shelter
+        # so the default `~/.emacs.d/' is not creatable.
+        program = f"""(progn
+  (setq server-name "{sock}")
+  (setq user-emacs-directory "{id_dir}/emacs.d/")
+  (load "{ELISP_FILE}" nil t)
+  (org-gtd-cli/daemon-record-startup)
+  {swap}
+  (cl-letf (((symbol-function 'kill-emacs) (lambda (&optional _c) nil)))
+    (org-gtd-cli/daemon-ttl-expire))
+  (princ (if (file-directory-p "{id_dir}") "DIR-KEPT" "DIR-DELETED")))"""
+        proc = subprocess.run(
+            ["emacs", "-Q", "--batch", "--eval", program],
+            capture_output=True, text=True, timeout=120,
+        )
+        return proc.stdout.strip(), proc.stderr, id_dir
+
+    def test_ttl_expiry_does_not_delete_a_successors_directory(self, tmp_path):
+        """An ORPHANED daemon's TTL timer must not delete the identity dir once
+        a successor owns the socket there.
+
+        Reachable route (review-bot on PR #53): any non-`file-conflict' elisp
+        error escapes the dispatch, `_run_daemon' unlinks the socket and
+        retries, `_ensure_daemon' spawns a successor into the same dir, and the
+        orphan's re-armed timer later rmtree's it — orphaning the successor and
+        leaking a daemon per cycle."""
+        if shutil.which("emacs") is None:
+            pytest.skip("emacs not on PATH")
+        out, err, id_dir = self._run_ttl_expire_elisp(tmp_path, replace_socket=True)
+        assert out == "DIR-KEPT", f"stdout={out!r} stderr={err}"
+        assert (id_dir / "emacs.d").exists(), "successor's emacs.d was destroyed"
+
+    def test_ttl_expiry_still_reclaims_its_own_directory(self, tmp_path):
+        """The guard must not break the normal case: a daemon that still owns
+        its socket reclaims its own identity dir on expiry."""
+        if shutil.which("emacs") is None:
+            pytest.skip("emacs not on PATH")
+        out, err, _ = self._run_ttl_expire_elisp(tmp_path, replace_socket=False)
+        assert out == "DIR-DELETED", f"stdout={out!r} stderr={err}"
+
     def test_probe_env_drops_alternate_editor(self):
         """`ALTERNATE_EDITOR=""' makes emacsclient spawn `emacs --daemon' on a
         failed connect, so a liveness probe would CREATE the daemon it is
