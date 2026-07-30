@@ -121,6 +121,8 @@ Make claude's access to the Wayland more secure
 
 Number tasks sequentially across all sections (don't restart numbering per section) so the user can reference them by number (e.g., "work on #3", "tell me more about 5"). Use ordered markdown lists (`1.`, `2.`, etc.) to keep numbering stable.
 
+**IDs are machine-only:** when talking to the human, refer to tasks by their heading (plus category/project when disambiguation is needed) — never by `:ID:`, `read_id`, `entry-id`, or other identifier values. Identifiers belong in tool invocations (`--id` flags, JSON fields) and inter-agent handoffs only.
+
 If the result set is large (>15 items), summarize or suggest a narrower filter. If the result set is empty, say so clearly and suggest what the user might try instead.
 
 End with a brief one-line observation if something stands out — e.g. "You have 3 overdue items" or "All NEXT actions are computer tasks." Don't force an observation if nothing is noteworthy.

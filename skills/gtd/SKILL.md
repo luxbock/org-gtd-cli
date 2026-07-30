@@ -367,6 +367,8 @@ Two forms execute multiple operations in one call (one Emacs process).
 
 Task-addressing items take `heading` (substring) **or** `id` (org `:ID:`, matching each command's `--id` flag; `id` wins when both are given). New-item commands (`add-task`/`add-event`) take `title`; `add-subtask` takes `parent` + `title`.
 
+**IDs are machine-only:** when talking to the human, refer to tasks by their heading (plus category/project when disambiguation is needed) — never by `:ID:`, `read_id`, `entry-id`, or other identifier values. Identifiers belong in tool invocations (`--id` flags, JSON fields) and inter-agent handoffs only.
+
 **Mixed commands** — the `batch` subcommand reads a JSON array of `{"command", "args"}` objects from stdin:
 
 ```bash
