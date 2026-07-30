@@ -7152,6 +7152,75 @@ class TestDaemonManagementCommands:
         finally:
             self._kill_daemon(daemon_tmp)
 
+    def test_daemon_gc_reclaims_legacy_emacs_d_leftover(self, org_dir):
+        """`emacs.d' is this tool's OWN pre-scoping artifact, not a stranger's
+        directory: `gc' must remove it and exit 0, rather than reporting it as
+        a malformed identity forever (review-bot on PR #53)."""
+        daemon_tmp = self._make_daemon_tmp()
+        base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+        base.mkdir(parents=True)
+        legacy = base / "emacs.d"
+        legacy.mkdir()
+        (legacy / "bookmarks").write_text(";; leftover\n")
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["errors"] == []
+            assert str(legacy) in data["stale_dirs_removed"]
+            assert not legacy.exists()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_status_ignores_legacy_emacs_d_leftover(self, org_dir):
+        """`status' must stay silent and exit 0 with only the legacy leftover
+        present — the README's "no live daemons -> empty successful result"
+        contract (review-bot on PR #53)."""
+        daemon_tmp = self._make_daemon_tmp()
+        base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+        base.mkdir(parents=True)
+        (base / "emacs.d").mkdir()
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["daemons"] == []
+            assert data["errors"] == []
+            # status must not delete anything — only `gc' reclaims.
+            assert (base / "emacs.d").exists()
+        finally:
+            self._kill_daemon(daemon_tmp)
+
+    def test_daemon_gc_still_refuses_unknown_malformed_names(self, org_dir):
+        """The legacy allowlist is exact: a name this tool never created keeps
+        the old refuse-and-report behaviour, even with no `server' socket in
+        it (review-bot on PR #53)."""
+        daemon_tmp = self._make_daemon_tmp()
+        base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+        base.mkdir(parents=True)
+        stranger = base / "emacs.d.bak"
+        stranger.mkdir()
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "gc",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 1, stdout
+            data = json.loads(stdout)
+            assert stranger.exists()
+            assert str(stranger) in [e.get("path") for e in data["errors"]]
+        finally:
+            self._kill_daemon(daemon_tmp)
+
     def test_daemon_status_never_calls_ensure_daemon(self, tmp_path):
         """`daemon status` must not spawn a daemon."""
         daemon_tmp = self._make_daemon_tmp()

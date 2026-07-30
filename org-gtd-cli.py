@@ -432,6 +432,18 @@ _DAEMON_ALIVE_ELISP = "(emacs-pid)"
 # `_daemon_identity_hash'). Anything else is rejected as malformed.
 _IDENTITY_HASH_RE = re.compile(r"\A[0-9a-f]{32}\Z")
 
+# Names this tool ITSELF created under `_DAEMON_BASE' in earlier versions,
+# before daemon sockets were scoped under a per-identity directory. They are
+# reclaimable by `gc' (through the same ownership / path-escape guards as any
+# identity dir) and invisible to `status', rather than being reported as
+# malformed intruders that nothing can ever clear.
+#
+# Deliberately an exact-name allowlist, NOT a heuristic like "any owned child
+# without a `server' socket": that broader rule would also match an identity
+# dir caught mid-creation before its socket appears, turning refuse-and-report
+# into a silent delete of another process's state.
+_LEGACY_ENTRY_NAMES = frozenset({"emacs.d"})
+
 
 def _current_uid() -> int:
     return os.getuid()
@@ -456,19 +468,21 @@ def _list_identity_dirs():
     """Yield (identity_hash, dir_path) for every direct child of `_DAEMON_BASE'
     that looks like an owned identity directory.
 
-    Foreign-owned or malformed entries are surfaced separately by the caller
-    (they never yield successfully) — this helper returns only safe candidates
-    plus a list of error descriptors."""
+    Returns (candidates, legacy, errors). Foreign-owned or malformed entries
+    are surfaced separately by the caller (they never yield successfully) —
+    this helper returns only safe candidates, plus this tool's own reclaimable
+    historical artifacts, plus a list of error descriptors."""
     candidates = []
+    legacy = []
     errors = []
     try:
         entries = os.listdir(_DAEMON_BASE)
     except FileNotFoundError:
-        return candidates, errors
+        return candidates, legacy, errors
     except OSError as exc:
         errors.append({"path": _DAEMON_BASE,
                        "error": f"cannot list daemon base: {exc}"})
-        return candidates, errors
+        return candidates, legacy, errors
     for name in sorted(entries):
         path = os.path.join(_DAEMON_BASE, name)
         try:
@@ -486,12 +500,21 @@ def _list_identity_dirs():
                                      f"{st.st_uid}); refusing to inspect")})
             continue
         if not _IDENTITY_HASH_RE.match(name):
+            if name in _LEGACY_ENTRY_NAMES:
+                # This tool's OWN historical artifact, not a stranger's data:
+                # before the socket-identity scoping fix the base held
+                # `emacs.d' directly. Refuse-and-report exists to protect
+                # entries we never created; applying it here would make `gc'
+                # — the command whose job is cleaning stale daemon state —
+                # exit non-zero forever with no way to clear the entry.
+                legacy.append((name, path))
+                continue
             errors.append({"path": path,
                            "error": (f"malformed identity component {name!r}; "
                                      "refusing to inspect")})
             continue
         candidates.append((name, path))
-    return candidates, errors
+    return candidates, legacy, errors
 
 
 def _socket_for_identity_dir(dir_path):
@@ -699,9 +722,11 @@ def _safe_remove_identity_dir(dir_path, identity):
     """Recursively remove an owned identity directory, with belt-and-braces.
 
     Rejects paths that escape `_DAEMON_BASE', foreign-owned directories, or
-    an identity component that does not match the sha-256 hash pattern.
+    an identity component that is neither a sha-256 hash nor one of this
+    tool's own legacy entry names (`_LEGACY_ENTRY_NAMES').
     Returns (ok, error_message)."""
-    if not _IDENTITY_HASH_RE.match(identity):
+    if not (_IDENTITY_HASH_RE.match(identity)
+            or identity in _LEGACY_ENTRY_NAMES):
         return False, f"malformed identity {identity!r}; refusing to remove"
     if not _resolved_beneath(dir_path, _DAEMON_BASE):
         return False, (f"resolved path {os.path.realpath(dir_path)!r} escapes "
@@ -793,7 +818,9 @@ def cmd_daemon_status(args):
         else:
             print(f"Error: {msg}", file=sys.stderr)
         return 1
-    candidates, errors = _list_identity_dirs()
+    # Legacy entries are ignored outright here: `status' reports live daemons,
+    # and a leftover from an older layout is neither a daemon nor an error.
+    candidates, _legacy, errors = _list_identity_dirs()
     daemons = []
     for identity, dir_path in candidates:
         socket_path = _socket_for_identity_dir(dir_path)
@@ -884,10 +911,19 @@ def cmd_daemon_gc(args):
         else:
             print(f"Error: {msg}", file=sys.stderr)
         return 1
-    candidates, errors = _list_identity_dirs()
+    candidates, legacy, errors = _list_identity_dirs()
     reaped = []
     kept = []
     stale_dirs_removed = []
+    # Reclaim this tool's own pre-scoping leftovers first. No daemon ever
+    # listens inside one, so there is nothing to probe or stop — but every
+    # ownership / descendant / path-escape guard still applies.
+    for name, dir_path in legacy:
+        ok, err = _safe_remove_identity_dir(dir_path, name)
+        if ok:
+            stale_dirs_removed.append(dir_path)
+        else:
+            errors.append({"path": dir_path, "error": err})
     for identity, dir_path in candidates:
         socket_path = _socket_for_identity_dir(dir_path)
         info, probe_err = _probe_daemon(socket_path)

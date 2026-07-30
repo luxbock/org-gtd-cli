@@ -393,6 +393,16 @@ A socket file left behind by an uncleanly killed daemon (nothing
 listening) is a quiet dead identity: `status` skips it with exit 0 and
 `gc` removes its directory.
 
+That recognition covers daemons that live under an identity directory. A
+daemon old enough to predate socket-identity scoping listened on
+`<daemon base>/server` directly, with no identity directory at all — these
+commands only walk the base's child *directories*, so such a daemon is
+neither listed nor reaped, and its leftover socket file is ignored. Stop it
+by PID. Its sibling artifact, the `emacs.d` directory from the same era, is
+recognized as this tool's own leftover: `status` ignores it and `gc` removes
+it under the same ownership and path-escape guards applied to any identity
+directory. Entries the tool never created are still refused and reported.
+
 ## Development
 
 ```sh
