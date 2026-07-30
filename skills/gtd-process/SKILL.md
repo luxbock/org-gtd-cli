@@ -10,6 +10,8 @@ effort: high
 
 Process inbox items and/or agent tasks. This is the GTD "clarify and organize" step.
 
+**IDs are machine-only:** when talking to the human, refer to tasks by their heading (plus category/project when disambiguation is needed) — never by `:ID:`, `read_id`, `entry-id`, or other identifier values. Identifiers belong in tool invocations (`--id` flags, JSON fields) and inter-agent handoffs only.
+
 Before processing tags, read `gtd/references/tags.md` from the shared GTD skill if it is available in your skill loader.
 
 ## What to process
