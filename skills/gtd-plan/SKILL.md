@@ -131,3 +131,5 @@ Tell the user what you did:
 - Any decisions you made and why
 - What the next action is (the NEXT subtask, or what the user should do next)
 - Anything you couldn't resolve that the user needs to decide
+
+**IDs are machine-only:** when talking to the human, refer to tasks by their heading (plus category/project when disambiguation is needed) — never by `:ID:`, `read_id`, `entry-id`, or other identifier values. Identifiers belong in tool invocations (`--id` flags, JSON fields) and inter-agent handoffs only.

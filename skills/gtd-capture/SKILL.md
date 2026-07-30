@@ -51,6 +51,8 @@ Body: [body, if any]
 
 Then ask for confirmation. You MUST NOT file without user confirmation.
 
+**IDs are machine-only:** when talking to the human, refer to tasks by their heading (plus category/project when disambiguation is needed) — never by `:ID:`, `read_id`, `entry-id`, or other identifier values. Identifiers belong in tool invocations (`--id` flags, JSON fields) and inter-agent handoffs only.
+
 ## Filing
 
 Before creating a new task, you SHOULD check whether it belongs to an existing project using `org-gtd-cli --json search`. If it does, use `add-subtask` instead of `add-task`. Note: `add-subtask`'s parent MUST be a task heading (one with a TODO keyword). To file under a category heading (a plain heading like `Computers/NixOS`), use `add-task --category "Full/Path"` instead — paths come from `categories` output.

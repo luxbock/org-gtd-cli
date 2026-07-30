@@ -55,6 +55,8 @@ Follow `[[file:...]]` links, `[[*Heading]]` references, or linked notes in `agen
    - If it's a project, summarize the current state (what's done, what's next, what's blocked)
    - Flag anything unclear or missing — ask the user rather than guessing
 
+**IDs are machine-only:** when talking to the human, refer to tasks by their heading (plus category/project when disambiguation is needed) — never by `:ID:`, `read_id`, `entry-id`, or other identifier values. Identifiers belong in tool invocations (`--id` flags, JSON fields) and inter-agent handoffs only.
+
 ## Working on tasks
 
 ### Before starting
