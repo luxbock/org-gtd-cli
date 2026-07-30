@@ -7,6 +7,7 @@ and asserts on stdout, stderr, exit code, and file contents.
 Port of the 3148-line bash test suite (46 sections, 744+ assertions).
 """
 
+import argparse
 import datetime
 import hashlib
 import json
@@ -7220,6 +7221,70 @@ class TestDaemonManagementCommands:
             assert str(stranger) in [e.get("path") for e in data["errors"]]
         finally:
             self._kill_daemon(daemon_tmp)
+
+    def test_daemon_no_subcommand_prints_the_daemon_help(self, org_dir):
+        """`daemon' with no subcommand must print the DAEMON parser's help.
+
+        The fallback used a late-binding closure over `p', which
+        `build_parser' reassigns for every later subcommand, so it printed
+        `org-timestamp''s usage instead (review-bot on PR #53)."""
+        stdout, stderr, rc = run_cli("daemon", org_dir=org_dir)
+        out = stdout + stderr
+        assert rc == 1, out
+        assert "{status,stop,gc}" in out, out
+        assert "org-timestamp" not in out, out
+
+    def test_daemon_gc_keeps_daemon_reporting_a_relative_org_dir(
+            self, tmp_path, monkeypatch, capsys):
+        """A relative reported ORG_DIRECTORY names a path relative to the
+        CALLER's cwd, not gc's. Resolving it here answers about the wrong
+        directory, so gc must KEEP the daemon rather than reap a healthy one
+        (review-bot on PR #53).
+
+        Driven at the decision level: a real daemon started with a relative
+        ORG_DIRECTORY cannot be provoked through `run_cli', which always
+        passes an absolute org dir."""
+        mod = _load_cli_module()
+        identity = "a" * 32
+        dir_path = str(tmp_path / identity)
+        stopped = []
+
+        monkeypatch.setattr(mod, "_daemon_base_ok", lambda: True)
+        monkeypatch.setattr(mod, "_list_identity_dirs",
+                            lambda: ([(identity, dir_path)], [], []))
+        # A LIVE daemon reporting a relative org dir that does not exist
+        # relative to gc's own cwd.
+        monkeypatch.setattr(mod, "_probe_daemon",
+                            lambda *a, **k: ({"org": "./org/", "pid": 4242,
+                                              "ttl": 7200, "now": 0.0,
+                                              "inception": 0.0}, None))
+        monkeypatch.setattr(mod, "_stop_daemon_via_socket",
+                            lambda *a, **k: (stopped.append(a) or
+                                             (None, True, None)))
+        monkeypatch.setattr(mod, "_safe_remove_identity_dir",
+                            lambda *a, **k: (True, None))
+
+        args = argparse.Namespace(json=True)
+        rc = mod.cmd_daemon_gc(args)
+        payload = json.loads(capsys.readouterr().out)
+
+        assert rc == 0, payload
+        assert stopped == [], "gc stopped a live daemon on an unprovable path"
+        assert payload["reaped"] == [], payload
+        assert len(payload["kept"]) == 1, payload
+        # And the reported path is passed through, not resolved into a lie.
+        assert payload["kept"][0]["org_directory"] == "./org/", payload
+
+    def test_canonical_org_directory_does_not_fabricate_absolute_paths(self):
+        """A non-absolute report is returned unchanged rather than resolved
+        against this process's cwd — `status' must not print a path the
+        daemon never meant (review-bot on PR #53)."""
+        mod = _load_cli_module()
+        assert mod._canonical_org_directory("./org/") == "./org/"
+        assert mod._canonical_org_directory("") == ""
+        assert not mod._org_path_is_provable("./org")
+        assert not mod._org_path_is_provable("")
+        assert mod._org_path_is_provable("/tmp")
 
     def test_daemon_status_never_calls_ensure_daemon(self, tmp_path):
         """`daemon status` must not spawn a daemon."""

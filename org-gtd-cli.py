@@ -766,12 +766,30 @@ def _relative_socket(socket_path):
     return socket_path
 
 
+def _org_path_is_provable(path):
+    """True when a daemon-reported ORG_DIRECTORY can be checked from here.
+
+    `daemon-dispatch' stores the caller's raw `ORG_DIRECTORY' string, so a
+    daemon started with a relative value reports a relative value. Resolving
+    that in *this* process would silently reinterpret it against a different
+    working directory — see `_canonical_org_directory'."""
+    return bool(path) and os.path.isabs(os.path.expanduser(path))
+
+
 def _canonical_org_directory(path):
     """Return a canonical form of a reported ORG_DIRECTORY string.
     Trailing slashes are normalised; missing files are still fine (an
-    identity's org dir may have been deleted — that's the gc target)."""
+    identity's org dir may have been deleted — that's the gc target).
+
+    A non-absolute report is returned UNCHANGED rather than resolved: the
+    daemon stored whatever string its caller passed, and that string was
+    relative to the *caller's* cwd, not ours. `abspath'-ing it here would
+    fabricate a path that names a different directory than the daemon meant,
+    which `status' would then print as fact."""
     if not path:
         return ""
+    if not _org_path_is_provable(path):
+        return path
     canonical = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
     return canonical
 
@@ -951,6 +969,14 @@ def cmd_daemon_gc(args):
             # `daemon-info', so its ORG_DIRECTORY is unknown. We cannot
             # prove the org dir is gone — keep it running (spec: legacy
             # daemons stay visible and are never reaped by gc).
+            kept.append(record)
+            continue
+        if not _org_path_is_provable(info.get("org", "")):
+            # The daemon reported a relative (or empty) ORG_DIRECTORY, so it
+            # names a directory relative to a working directory we do not
+            # know. `os.path.isdir' here would answer about OUR cwd and reap
+            # a healthy daemon. Same rule as the legacy branch above: reaping
+            # requires proving the org dir is gone, not failing to find it.
             kept.append(record)
             continue
         if org and os.path.isdir(org):
@@ -1975,7 +2001,11 @@ Subcommands:
         help="Reap daemons whose ORG_DIRECTORY is gone; clean owned stale dirs")
     q.set_defaults(func=cmd_daemon_gc)
     # Fallback: `daemon` with no subcommand prints help and exits 1.
-    p.set_defaults(func=lambda args: (p.print_help(sys.stderr) or 1))
+    # `_p=p' binds the daemon parser at definition time. A bare `p' would be a
+    # late-binding closure over the local, which `build_parser' reassigns for
+    # every later subcommand — so the help printed here would be whichever
+    # parser happened to be built last (org-timestamp's).
+    p.set_defaults(func=lambda args, _p=p: (_p.print_help(sys.stderr) or 1))
 
     # --- Batch ---
 
