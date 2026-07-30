@@ -9089,6 +9089,392 @@ class TestReadIdentity:
 
 
 # ===========================================================================
+# sync-conflict warning (issue #35): the universal `warnings` envelope field
+# ===========================================================================
+#
+# Every invocation checks `${ORG_DIRECTORY}/.sync-conflict` by plain file
+# existence (external sync units own the marker; the CLI is a pure consumer
+# that never writes it). Present -> every JSON object on stdout (versioned
+# envelopes AND bare error objects) gains one `sync-conflict` entry in the
+# top-level `warnings` array (composing with #32's duplicate warnings into
+# ONE array) and text mode emits one stderr `Warning:` line.
+# Warn-only: exit codes and payloads are unchanged, mutations still persist.
+# Absent -> output is byte-identical to pre-#35 (no `warnings` key added by
+# this feature). See the choke-point injection in `org-gtd-cli/output`.
+
+SYNC_CONFLICT_ENTRY = {
+    "type": "sync-conflict",
+    "detail": "org sync conflict pending — local view may be stale",
+}
+SYNC_CONFLICT_TEXT_LINE = (
+    "Warning: org sync conflict pending — local view may be stale/diverged"
+)
+
+
+def _drop_sync_marker(org_dir):
+    """Create the `.sync-conflict` marker at the org-dir root and return it."""
+    marker = org_dir / ".sync-conflict"
+    marker.write_text("")
+    return marker
+
+
+class TestSyncConflictWarning:
+    """The `sync-conflict` environmental warning surfaced at the output
+    choke point on every command, in both output modes, in batch mode."""
+
+    # --- marker present, JSON mode ------------------------------------------
+
+    def test_read_json_carries_sync_conflict_warning(self, org_dir):
+        """A read (`show`) with the marker present carries exactly one
+        `sync-conflict` entry in the top-level `warnings` array; payload and
+        exit code are unchanged."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+        # payload intact (show emits a flat task envelope)
+        assert data["command"] == "show"
+        assert data["heading"] == "Buy groceries"
+
+    def test_mutation_json_carries_warning_and_still_persists(self, org_dir):
+        """A mutation (`set-done`) with the marker present: exit code 0, the
+        change persists, AND the envelope carries the `sync-conflict` warning.
+        Warn-only never aborts the mutation."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json(
+            "set-done", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+        # the mutation actually landed
+        assert (org_dir / "inbox.org").read_text().count("DONE Buy groceries") == 1
+
+    def test_marker_absent_no_sync_warning_key(self, org_dir):
+        """Marker absent: a command with no other warnings emits NO `warnings`
+        key at all (byte-identity with pre-#35 — this feature adds nothing)."""
+        data, stderr, rc = run_cli_json("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "warnings" not in data
+
+    # --- JSON error paths carry the warning too (review-bot on PR #51) ------
+    # JSON failure emitters produce objects WITHOUT a `version` key (the
+    # {error, hint} no-match arms and `org-gtd-cli/error's bare {error}
+    # objects).  The staleness signal must not vanish exactly when a command
+    # fails on a possibly-stale view, so injection keys off "a JSON object is
+    # being emitted", not `version == 1`.
+
+    def test_json_no_match_error_carries_warning(self, org_dir):
+        """A --json `show` no-match {error, hint} object (the find-task arm)
+        carries the `sync-conflict` entry when the marker is present; the
+        error payload and exit code are unchanged."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json(
+            "show", "zzqq_no_such_task_zzqq", org_dir=org_dir)
+        assert rc == 1
+        assert 'No task found matching "zzqq_no_such_task_zzqq"' in data["error"]
+        assert "hint" in data
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+
+    def test_json_by_id_no_match_error_carries_warning(self, org_dir):
+        """Same for the find-task-by-id no-match arm (`--id <bogus>`)."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json(
+            "show", "--id", "no-such-id-zzqq", org_dir=org_dir)
+        assert rc == 1
+        assert 'No task found with id "no-such-id-zzqq"' in data["error"]
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+
+    def test_json_direct_error_emitter_carries_warning(self, org_dir):
+        """The `org-gtd-cli/error' json branch (bare {error} objects, probed
+        via body-text validation) routes through the same injection choke
+        point, so those error objects carry the warning too."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_cli_json(
+            "add-task", "Sneaky body task",
+            "--body", "Some text\n* Sneaky heading", org_dir=org_dir)
+        assert rc == 1
+        assert "body text contains org headings" in data["error"]
+        sync = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert sync == [SYNC_CONFLICT_ENTRY]
+        # The rejected task still was not created (error semantics unchanged).
+        assert "Sneaky body task" not in (org_dir / "tasks.org").read_text()
+
+    def test_json_error_marker_absent_byte_identical(self, org_dir):
+        """Marker absent: JSON error objects keep exactly their pre-#35 shape
+        — {error, hint} / {error}, no `warnings` key added on any account."""
+        data, _stderr, rc = run_cli_json(
+            "show", "zzqq_no_such_task_zzqq", org_dir=org_dir)
+        assert rc == 1
+        assert set(data.keys()) == {"error", "hint"}
+        data2, _stderr2, rc2 = run_cli_json(
+            "add-task", "Sneaky body task",
+            "--body", "Some text\n* Sneaky heading", org_dir=org_dir)
+        assert rc2 == 1
+        assert set(data2.keys()) == {"error"}
+
+    def test_batch_failing_item_error_keeps_warning_off_item(self, org_dir):
+        """Per-item batch isolation holds on the error paths too: a failing
+        item's error result carries no `sync-conflict` entry (universal
+        warnings stay suppressed inside the delegate), while the top-level
+        batch envelope still carries it once."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_batch(
+            "set-done", ["Buy groceries", "Nonexistent task zzqq"],
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        failed = data["results"][1]
+        assert failed["success"] is False
+        assert "error" in failed
+        assert "warnings" not in failed
+        top = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert top == [SYNC_CONFLICT_ENTRY]
+
+    # --- marker present, text mode ------------------------------------------
+
+    def test_text_mode_emits_one_stderr_line(self, org_dir):
+        """Text mode: exactly one `sync-conflict` stderr line, stdout unchanged,
+        the line never appears on stdout."""
+        _drop_sync_marker(org_dir)
+        stdout, stderr, rc = run_cli("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        sync_lines = [ln for ln in stderr.splitlines()
+                      if ln == SYNC_CONFLICT_TEXT_LINE]
+        assert len(sync_lines) == 1
+        assert SYNC_CONFLICT_TEXT_LINE not in stdout
+        assert "Buy groceries" in stdout  # the show output itself is intact
+
+    def test_text_mode_absent_no_line(self, org_dir):
+        """Marker absent: no `sync-conflict` stderr line at all."""
+        stdout, stderr, rc = run_cli("show", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "sync conflict" not in stderr.lower()
+
+    # --- batch: warning rides the top-level envelope ONCE -------------------
+
+    def test_batch_envelope_carries_warning_once_top_level(self, org_dir):
+        """The batch envelope carries the `sync-conflict` warning ONCE at the
+        top level (in `warnings`), not once per `results` item; per-item
+        results are unchanged and none of them carry the warning."""
+        _drop_sync_marker(org_dir)
+        data, stderr, rc = run_batch(
+            "set-done", ["Buy groceries", "Write quarterly report"],
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["batch"] is True
+        top = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert top == [SYNC_CONFLICT_ENTRY], "warning must ride top-level once"
+        # No per-item result carries a warnings array.
+        for item in data["results"]:
+            assert "warnings" not in item
+
+    def test_batch_is_json_only_no_stderr_line(self, org_dir):
+        """The `--batch` form always emits a JSON envelope (Python forces
+        `json_mode=True`), so the warning rides the top-level `warnings` array
+        and there is NO text-mode `sync-conflict` stderr line for a batch — the
+        `emit-text-sync-conflict-warning' prefix is a no-op in JSON mode."""
+        _drop_sync_marker(org_dir)
+        # Drive `--batch` without --json to confirm it is JSON-only regardless.
+        env = os.environ.copy()
+        env["ORG_GTD_CLI_DAEMON"] = "0"
+        env["ORG_DIRECTORY"] = str(org_dir) + "/"
+        env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
+        env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+        result = subprocess.run(
+            ["python3", str(CLI_SCRIPT), "--batch", "set-done"],
+            input=json.dumps(["Buy groceries", "Write quarterly report"]),
+            capture_output=True, text=True, env=env, timeout=30)
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)  # JSON even without --json
+        assert data["batch"] is True
+        assert SYNC_CONFLICT_TEXT_LINE not in result.stderr
+
+    def test_batch_mixed_outline_keeps_per_item_duplicate_warnings(self, org_dir):
+        """Regression (review-bot on PR #51): a mixed-batch `outline` item
+        KEEPS its own per-item `warnings` — #32's `duplicate-idless-heading`
+        groups are computed per item's file and must survive batch delegation
+        exactly as a single CLI call reports them.  The invocation-level
+        `sync-conflict` entry rides the top-level batch envelope exactly once
+        and never leaks onto per-item results.  The shared tasks.org fixture
+        deliberately carries two id-less `Tools` headings, so the item's
+        array is non-empty."""
+        _drop_sync_marker(org_dir)
+        items = [{"command": "outline", "args": {"file": "tasks.org"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0, stderr
+        item = data["results"][0]
+        assert "warnings" in item, "per-item outline warnings must survive batch"
+        item_types = [w["type"] for w in item["warnings"]]
+        assert {
+            "type": "duplicate-idless-heading",
+            "file": "tasks.org",
+            "heading": "Tools",
+            "count": 2,
+        } in item["warnings"]
+        # The invocation-level warning stays off per-item results ...
+        assert "sync-conflict" not in item_types
+        # ... and rides the top-level envelope exactly once.
+        top = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert top == [SYNC_CONFLICT_ENTRY]
+
+    def test_batch_mixed_outline_clean_file_keeps_empty_warnings(self, org_dir):
+        """The clean path keeps its pre-#35 per-item shape too: a mixed-batch
+        `outline` item over a file with no id-less duplicates carries
+        `warnings: []` (the #32 contract — always present, `[]` when there is
+        nothing to report), even with the sync-conflict marker present."""
+        (org_dir / "clean.org").write_text(
+            "#+title: Clean\n\n"
+            "* NEXT Solo next task\n"
+            "* WAITING Solo waiting task\n")
+        (org_dir / "clean.org").chmod(0o644)
+        _drop_sync_marker(org_dir)
+        items = [{"command": "outline", "args": {"file": "clean.org"}}]
+        data, stderr, rc = run_batch_mixed(items, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["results"][0]["warnings"] == []
+        top = [w for w in data.get("warnings", []) if w["type"] == "sync-conflict"]
+        assert top == [SYNC_CONFLICT_ENTRY]
+
+    # --- composition with #32's duplicate warnings in one envelope ----------
+
+    def test_composes_with_duplicate_warnings_one_array(self, org_dir):
+        """An outline over a file with id-less duplicates AND the marker present
+        yields ONE `warnings` array holding BOTH vocabularies' entries (the
+        duplicate entries first, then the single `sync-conflict` entry) — never
+        two `warnings` keys."""
+        _install_read_id_fixture(org_dir)
+        _drop_sync_marker(org_dir)
+        stdout, stderr, rc = run_cli(
+            "--json", "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        # Exactly one JSON object, exactly one `warnings` key.
+        assert stdout.count('"warnings"') == 1
+        data = json.loads(stdout)
+        types = [w["type"] for w in data["warnings"]]
+        assert "duplicate-idless-heading" in types
+        assert "sync-conflict" in types
+        # duplicate entries first, then the single sync-conflict entry last.
+        assert types[-1] == "sync-conflict"
+        assert types.count("sync-conflict") == 1
+        # the #32 entry is byte-for-byte the same as before composition.
+        assert data["warnings"][0] == {
+            "type": "duplicate-idless-heading",
+            "file": "entries.org",
+            "heading": "Recurring Chore",
+            "count": 2,
+        }
+
+    def test_composition_text_mode_both_lines_once(self, org_dir):
+        """Text mode with both sources: one duplicate `Warning:` line and one
+        `sync-conflict` line, each exactly once."""
+        _install_read_id_fixture(org_dir)
+        _drop_sync_marker(org_dir)
+        stdout, stderr, rc = run_cli(
+            "outline", "--file", "entries.org", org_dir=org_dir)
+        assert rc == 0, stderr
+        lines = stderr.splitlines()
+        assert sum(1 for ln in lines if ln == SYNC_CONFLICT_TEXT_LINE) == 1
+        assert sum(1 for ln in lines
+                   if ln.startswith("Warning:") and "Recurring Chore" in ln) == 1
+
+    # --- warn-only / read-only contract -------------------------------------
+
+    def test_cli_never_writes_the_marker(self, org_dir):
+        """The CLI never creates the marker: after a full read with no marker
+        present, `.sync-conflict` still does not exist."""
+        run_cli_json("outline", org_dir=org_dir)
+        assert not (org_dir / ".sync-conflict").exists()
+
+    def test_cli_never_clears_the_marker(self, org_dir):
+        """The CLI never removes the marker: after a mutation with the marker
+        present, `.sync-conflict` still exists."""
+        _drop_sync_marker(org_dir)
+        _data, _stderr, rc = run_cli_json(
+            "set-done", "Buy groceries", org_dir=org_dir)
+        assert rc == 0
+        assert (org_dir / ".sync-conflict").exists()
+
+    def test_json_stays_single_object_both_marker_states(self, org_dir):
+        """`json.loads(stdout)` succeeds on a --json command in both marker
+        states (the exactly-one-object contract is preserved)."""
+        data_absent, _, rc0 = run_cli_json("outline", org_dir=org_dir)
+        assert rc0 == 0 and isinstance(data_absent, dict)
+        _drop_sync_marker(org_dir)
+        data_present, _, rc1 = run_cli_json("outline", org_dir=org_dir)
+        assert rc1 == 0 and isinstance(data_present, dict)
+
+
+class TestSyncConflictWarningDaemon:
+    """Daemon-mode freshness: the marker check re-reads `org-directory` on every
+    dispatch, so a marker appearing/disappearing while a long-lived daemon runs
+    is seen on the very next call — never cached at daemon start. Reuses the
+    isolated-daemon pattern (own TMPDIR, XDG_RUNTIME_DIR='', torn down)."""
+
+    @staticmethod
+    def _make_daemon_tmp():
+        return tempfile.mkdtemp(prefix="ogc-sync-",
+                                dir=os.environ.get("TMPDIR", "/tmp"))
+
+    @staticmethod
+    def _json(org_dir, env, *args):
+        """Run a --json command through the daemon and return parsed stdout."""
+        stdout, stderr, rc = run_cli("--json", *args,
+                                     org_dir=org_dir, env_overrides=env)
+        return (json.loads(stdout) if stdout.strip() else None), stderr, rc
+
+    def test_daemon_sync_conflict_freshness(self, org_dir):
+        """Marker absent at first call -> no warning; create it and a second
+        call through the SAME daemon warns; remove it and a third call stops
+        warning. Proves the check is per-dispatch, not cached at start."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        marker = org_dir / ".sync-conflict"
+        try:
+            # (1) absent -> no sync warning
+            data1, err1, rc1 = self._json(org_dir, env, "outline")
+            assert rc1 == 0, err1
+            assert not any(w["type"] == "sync-conflict"
+                           for w in data1.get("warnings", []))
+            # (2) appears mid-daemon-life -> next call warns
+            marker.write_text("")
+            data2, err2, rc2 = self._json(org_dir, env, "outline")
+            assert rc2 == 0, err2
+            sync = [w for w in data2.get("warnings", [])
+                    if w["type"] == "sync-conflict"]
+            assert sync == [SYNC_CONFLICT_ENTRY]
+            # (3) removed -> warning disappears again
+            marker.unlink()
+            data3, err3, rc3 = self._json(org_dir, env, "outline")
+            assert rc3 == 0, err3
+            assert not any(w["type"] == "sync-conflict"
+                           for w in data3.get("warnings", []))
+        finally:
+            kill_test_daemons(daemon_tmp)
+
+    def test_daemon_text_mode_freshness(self, org_dir):
+        """Same freshness contract in text mode: the `sync-conflict` stderr line
+        appears only on the dispatch made while the marker exists."""
+        daemon_tmp = self._make_daemon_tmp()
+        env = {"ORG_GTD_CLI_DAEMON": "1", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": ""}
+        marker = org_dir / ".sync-conflict"
+        try:
+            _o1, e1, rc1 = run_cli("outline", org_dir=org_dir, env_overrides=env)
+            assert rc1 == 0, e1
+            assert SYNC_CONFLICT_TEXT_LINE not in e1
+            marker.write_text("")
+            _o2, e2, rc2 = run_cli("outline", org_dir=org_dir, env_overrides=env)
+            assert rc2 == 0, e2
+            assert sum(1 for ln in e2.splitlines()
+                       if ln == SYNC_CONFLICT_TEXT_LINE) == 1
+        finally:
+            kill_test_daemons(daemon_tmp)
+
+
+# ===========================================================================
 # render-file command: shared org->HTML render helper + path containment
 # ===========================================================================
 
