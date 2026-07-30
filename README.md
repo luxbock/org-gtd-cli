@@ -381,6 +381,21 @@ path-escaping candidates are left untouched and reported as errors
 `gc.reaped` / `gc.kept`. Every `emacsclient` probe and stop is time-bounded
 so a wedged daemon cannot hang the command indefinitely.
 
+The probe bound is 3 seconds, and Emacs is single-threaded: a daemon that is
+**busy** serving a long dispatch (a large `batch`, or `outline` over a big org
+dir) does not answer until that dispatch finishes, so it trips the same bound
+as a wedged one. `status` then reports it under `errors` as `probe-timeout`,
+omits it from `daemons`, and exits 1; `gc` likewise reports and — deliberately
+— removes nothing, because a probe timeout is not proof that anything is
+stale. The condition is transient: re-run once the daemon is idle. Neither
+command ever destroys state on a timeout.
+
+The probe also runs with `ALTERNATE_EDITOR` removed from its environment.
+With `ALTERNATE_EDITOR=""` set, `emacsclient` responds to a failed connect by
+spawning `emacs --daemon=<socket>` — which would make a liveness probe create
+the very daemon it is asking about, without this tool's elisp and without a
+TTL. These commands never create a daemon.
+
 A live **pre-upgrade daemon** (started before these commands existed, so it
 cannot answer the info probe) is still recognized as running via a
 `(emacs-pid)` fallback probe: `status` lists it with `ttl: null` and an

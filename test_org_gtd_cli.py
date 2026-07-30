@@ -15,6 +15,7 @@ import os
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -7285,6 +7286,59 @@ class TestDaemonManagementCommands:
         assert not mod._org_path_is_provable("./org")
         assert not mod._org_path_is_provable("")
         assert mod._org_path_is_provable("/tmp")
+
+    def test_probe_env_drops_alternate_editor(self):
+        """`ALTERNATE_EDITOR=""' makes emacsclient spawn `emacs --daemon' on a
+        failed connect, so a liveness probe would CREATE the daemon it is
+        asking about. Verified against Emacs 30.2 before fixing: a stale socket
+        in a 0700 dir yielded a live pid (review-bot on PR #53)."""
+        mod = _load_cli_module()
+        os.environ["ALTERNATE_EDITOR"] = ""
+        try:
+            env = mod._emacsclient_env()
+            assert "ALTERNATE_EDITOR" not in env
+            # The rest of the environment must survive.
+            assert env.get("PATH") == os.environ.get("PATH")
+        finally:
+            os.environ.pop("ALTERNATE_EDITOR", None)
+
+    def test_daemon_status_does_not_spawn_under_alternate_editor(self, org_dir):
+        """End-to-end: with ALTERNATE_EDITOR='' and a stale socket, `status'
+        must not create a daemon and must stay quiet about it
+        (review-bot on PR #53)."""
+        # AF_UNIX paths are capped near 108 bytes, so keep the base short.
+        daemon_tmp = tempfile.mkdtemp(prefix="ogc-ae-", dir="/tmp")
+        base = Path(daemon_tmp) / f"org-gtd-cli-{os.getuid()}"
+        identity = "e" * 32
+        id_dir = base / identity
+        id_dir.mkdir(parents=True)
+        for d in (Path(daemon_tmp), base, id_dir):
+            d.chmod(0o700)   # server-ensure-safe-dir refuses anything looser
+        sock = id_dir / "server"
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(str(sock))
+        s.close()            # leftover socket, nothing listening
+        env = {"ORG_GTD_CLI_DAEMON": "0", "TMPDIR": daemon_tmp,
+               "XDG_RUNTIME_DIR": "", "ALTERNATE_EDITOR": ""}
+        try:
+            stdout, _, rc = run_cli(
+                "--json", "daemon", "status",
+                org_dir=org_dir, env_overrides=env)
+            assert rc == 0, stdout
+            data = json.loads(stdout)
+            assert data["daemons"] == [], data
+            # Nothing may be listening on that socket afterwards.
+            probe = socket.socket(socket.AF_UNIX)
+            try:
+                probe.connect(str(sock))
+                raise AssertionError("status spawned a daemon on the socket")
+            except (ConnectionRefusedError, FileNotFoundError):
+                pass
+            finally:
+                probe.close()
+        finally:
+            kill_test_daemons(daemon_tmp)
+            shutil.rmtree(daemon_tmp, ignore_errors=True)
 
     def test_daemon_status_never_calls_ensure_daemon(self, tmp_path):
         """`daemon status` must not spawn a daemon."""

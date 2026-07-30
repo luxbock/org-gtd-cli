@@ -27,6 +27,28 @@ EMACS_BIN = "emacs"
 EMACSCLIENT_BIN = "emacsclient"
 
 
+def _emacsclient_env():
+    """Environment for every `emacsclient' call.
+
+    `ALTERNATE_EDITOR=""' — a common user setting — makes emacsclient, on a
+    failed connect, exec `emacs --daemon=<socket-name>' and retry instead of
+    failing. Verified against Emacs 30.2: a stale socket in a 0700 dir turns
+    a bare liveness PROBE into a daemon spawn that then answers `(emacs-pid)'.
+
+    That daemon is started WITHOUT this tool's elisp (no `-l' of the core or
+    command files) and without an idle TTL, so `daemon status' would list a
+    phantom it just created and `gc' would keep it as a legacy daemon instead
+    of clearing the stale directory — breaking the documented promise that
+    these commands never create a daemon. It would also give `_run_daemon' a
+    server with none of the org-gtd functions defined.
+
+    Dropping the variable makes a failed connect fail, which is the answer
+    every caller here actually wants."""
+    env = os.environ.copy()
+    env.pop("ALTERNATE_EDITOR", None)
+    return env
+
+
 def _canonical_path(path: str) -> str:
     """Return a stable absolute path for daemon identity inputs."""
     return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
@@ -355,6 +377,7 @@ def _run_daemon(
         result = subprocess.run(
             [EMACSCLIENT_BIN, "--socket-name", SOCKET_PATH, "--eval", wrapped],
             capture_output=True, text=True, check=False,
+            env=_emacsclient_env(),
         )
 
         if result.returncode != 0 and not _retried:
@@ -545,6 +568,7 @@ def _probe_daemon(socket_path, timeout=3):
             [EMACSCLIENT_BIN, "--socket-name", socket_path,
              "--eval", _DAEMON_PROBE_ELISP],
             capture_output=True, text=True, timeout=timeout, check=False,
+            env=_emacsclient_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "probe-timeout"
@@ -560,6 +584,7 @@ def _probe_daemon(socket_path, timeout=3):
                 [EMACSCLIENT_BIN, "--socket-name", socket_path,
                  "--eval", _DAEMON_ALIVE_ELISP],
                 capture_output=True, text=True, timeout=timeout, check=False,
+                env=_emacsclient_env(),
             )
         except subprocess.TimeoutExpired:
             return None, "probe-timeout"
@@ -683,6 +708,7 @@ def _stop_daemon_via_socket(socket_path, timeout=5):
             [EMACSCLIENT_BIN, "--socket-name", socket_path,
              "--eval", "(kill-emacs 0)"],
             capture_output=True, text=True, timeout=timeout, check=False,
+            env=_emacsclient_env(),
         )
     except subprocess.TimeoutExpired:
         return pid, False, "stop-timeout"
