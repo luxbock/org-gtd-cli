@@ -340,6 +340,84 @@ refreshed on-disk state and succeeds when no further writer races it. No
 automatic retry or merge is attempted; inspect the file and retry after the
 other writer stops.
 
+### Daemon lifecycle
+
+Opt-in daemon mode is bounded by an **idle TTL** and three management
+subcommands. Daemon state is disposable and the next ordinary call
+transparently recreates whatever it needs.
+
+- **`ORG_GTD_CLI_DAEMON_TTL`** (seconds, base-10)
+  - unset or empty → default `7200` (two hours)
+  - `0` → immortal (no idle timer)
+  - positive → self-terminate after that many idle seconds
+  - negative or non-integer → error; no daemon is started
+  - the timer is cancelled at every dispatch start and re-armed at the end
+    (including error exits), so it can never terminate Emacs mid-command;
+    each dispatch applies the caller's current TTL value, so changing the
+    environment affects an already-running identity on its next call
+- **`org-gtd-cli daemon status`** — list live daemons owned by this UID
+  under the active socket root, each with identity hash, socket path,
+  canonical `ORG_DIRECTORY`, PID, non-negative age (seconds), and current
+  TTL. Deterministically ordered by identity/socket. No live daemons →
+  empty successful result. `--json` returns
+  `{"version":1,"command":"daemon status","daemons":[…],"errors":[…]}`.
+- **`org-gtd-cli daemon stop`** — stop only the current identity's daemon
+  and remove its owned identity directory. Idempotent: absent daemon
+  returns `stopped=false` with exit 0. Works even when the current
+  `ORG_DIRECTORY` no longer exists. `--json` returns
+  `{"version":1,"command":"daemon stop","identity":…,"stopped":true|false,"pid":…}`.
+- **`org-gtd-cli daemon gc`** — stop every live daemon whose reported
+  `ORG_DIRECTORY` is missing, remove owned stale identity dirs with no
+  live daemon, and leave every daemon with an existing org directory
+  running. Works even when the caller's own `ORG_DIRECTORY` is missing.
+  `--json` returns
+  `{"version":1,"command":"daemon gc","reaped":[…],"kept":[…],"stale_dirs_removed":[…],"errors":[…]}`.
+
+All three commands run regardless of `ORG_GTD_CLI_DAEMON`, never call
+`_ensure_daemon()`, never create a daemon, and are not available through
+homogeneous or mixed batch modes. Foreign-owned, malformed, or
+path-escaping candidates are left untouched and reported as errors
+(non-zero exit); safe live results still appear in `status` /
+`gc.reaped` / `gc.kept`. Every `emacsclient` probe and stop is time-bounded
+so a wedged daemon cannot hang the command indefinitely.
+
+The probe bound is 3 seconds, and Emacs is single-threaded: a daemon that is
+**busy** serving a long dispatch (a large `batch`, or `outline` over a big org
+dir) does not answer until that dispatch finishes, so it trips the same bound
+as a wedged one. `status` then reports it under `errors` as `probe-timeout`,
+omits it from `daemons`, and exits 1; `gc` likewise reports and — deliberately
+— removes nothing, because a probe timeout is not proof that anything is
+stale. The condition is transient: re-run once the daemon is idle. Neither
+command ever destroys state on a timeout.
+
+The probe also runs with `ALTERNATE_EDITOR` removed from its environment.
+With `ALTERNATE_EDITOR=""` set, `emacsclient` responds to a failed connect by
+spawning `emacs --daemon=<socket>` — which would make a liveness probe create
+the very daemon it is asking about, without this tool's elisp and without a
+TTL. These commands never create a daemon.
+
+A live **pre-upgrade daemon** (started before these commands existed, so it
+cannot answer the info probe) is still recognized as running via a
+`(emacs-pid)` fallback probe: `status` lists it with `ttl: null` and an
+empty `org_directory`, and `gc` keeps it (its org directory cannot be
+proven gone). Such a daemon necessarily loaded older elisp and therefore
+lives under a *different* identity hash, so `daemon stop` — which targets
+only the current identity — will not reach it; it also has no idle TTL, so
+nothing reaps it automatically. Stop it via the PID that `status` reports.
+A socket file left behind by an uncleanly killed daemon (nothing
+listening) is a quiet dead identity: `status` skips it with exit 0 and
+`gc` removes its directory.
+
+That recognition covers daemons that live under an identity directory. A
+daemon old enough to predate socket-identity scoping listened on
+`<daemon base>/server` directly, with no identity directory at all — these
+commands only walk the base's child *directories*, so such a daemon is
+neither listed nor reaped, and its leftover socket file is ignored. Stop it
+by PID. Its sibling artifact, the `emacs.d` directory from the same era, is
+recognized as this tool's own leftover: `status` ignores it and `gc` removes
+it under the same ownership and path-escape guards applied to any identity
+directory. Entries the tool never created are still refused and reported.
+
 ## Development
 
 ```sh
