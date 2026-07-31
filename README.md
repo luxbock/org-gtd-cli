@@ -448,10 +448,22 @@ on issue #45):
   `Divergences` flag, and the xfail marker retire together.
 
 Hypothesis profiles: `fast` (default) keeps the whole run quick;
-`ORG_GTD_TEST_PROFILE=thorough` is the deep opt-in run. The example
-database is committed at `.hypothesis-examples/` so interesting cases
-replay deterministically everywhere, including the sandboxed
-`nix flake check`.
+`ORG_GTD_TEST_PROFILE=thorough` is the deep opt-in run.
+
+**The Hypothesis example database is a local cache, not part of the
+repo.** When a property test finds a failing (or otherwise interesting)
+input, Hypothesis saves it under `.hypothesis-examples/` (configured in
+`conftest.py`) and replays saved entries first on later runs. That
+directory is gitignored: Hypothesis documents checking it into version
+control as an option, but the entries are opaque version-sensitive
+binary blobs — unreviewable in diffs and dead weight after a Hypothesis
+upgrade — so cold runs (CI, `nix flake check`, fresh checkouts) simply
+regenerate examples from scratch. The rule instead: any discovered
+input worth keeping permanently is pinned in the test code itself, as a
+plain regression test or an
+[`@example(...)`](https://hypothesis.readthedocs.io/en/latest/reference/api.html#hypothesis.example)
+decorator on the property, where it is reviewable and survives cache
+loss and version bumps.
 
 The `render-file` src-highlighting test asserts `htmlize`'s `org-*` CSS face
 classes, so it needs an Emacs with `htmlize` on its load-path (the Nix package

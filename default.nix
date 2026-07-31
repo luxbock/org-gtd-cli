@@ -101,7 +101,6 @@ symlinkJoin {
           cp ${./gtd_reference_model.py} gtd_reference_model.py
           cp ${./test_gtd_model_properties.py} test_gtd_model_properties.py
           cp ${./test_gtd_conformance.py} test_gtd_conformance.py
-          cp -r ${./.hypothesis-examples} .hypothesis-examples
           cp -r ${./fixtures} fixtures
           # Sandbox runs the fast profile; `nix develop` +
           # ORG_GTD_TEST_PROFILE=thorough is the deep run.

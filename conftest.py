@@ -5,9 +5,10 @@ Two Hypothesis profiles (§45 design point 3):
 - ``fast`` — the default; keeps the whole default `pytest` run quick.
 - ``thorough`` — opt-in deep run: ``ORG_GTD_TEST_PROFILE=thorough pytest``.
 
-The example database is committed at ``.hypothesis-examples/`` so every
-checkout (and the sandboxed `nix flake check`) replays known-interesting
-cases first, deterministically.
+The example database at ``.hypothesis-examples/`` is a purely local,
+gitignored cache: it speeds up replay of previously found cases on this
+machine, but nothing may depend on it. Any discovered input worth keeping
+is pinned in the test code itself (a regression test or ``@example``).
 """
 
 import os
