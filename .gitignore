@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Hypothesis scratch state (the COMMITTED example DB lives in
+# .hypothesis-examples/, configured in conftest.py)
+.hypothesis/
+
 # Byte-compiled elisp
 *.elc
 
