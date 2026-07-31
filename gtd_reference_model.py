@@ -337,9 +337,23 @@ class Model:
                    and zone_of(group[index].keyword) != ZONE_DEFER):
                 index += 1
         else:
-            # TODO/WAITING have no boundary; only an *arrival* from
-            # another zone (reopen, DEFER→TODO, refile) is placed — at
-            # the end of the active zone.
+            # TODO/WAITING have no boundary of their own (§4.1).
+            if old_keyword == "NEXT":
+                # Demotion within the active zone: the minimal
+                # I5-preserving move — just past the remaining NEXT
+                # prefix, i.e. in place unless a NEXT sibling would end
+                # up below it.
+                index = 0
+                while (index < len(group)
+                       and zone_of(group[index].keyword) == ZONE_COMPLETED):
+                    index += 1
+                while index < len(group) and group[index].keyword == "NEXT":
+                    index += 1
+                group.insert(index, changed)
+                return
+            # True arrivals (old_keyword None: add/refile) and
+            # cross-zone reopens are placed at the end of the active
+            # zone.
             group.insert(self._active_zone_end(group), changed)
             return
         group.insert(index, changed)

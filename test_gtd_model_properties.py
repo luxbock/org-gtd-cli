@@ -459,6 +459,26 @@ def test_same_boundary_class_transition_never_moves_anyone(model_and_ops):
                 f"{node.heading} moved a sibling")
 
 
+def test_next_demotion_moves_minimally():
+    """§4.1 (review-bot on PR #55, round 2): a NEXT demoted to TODO
+    keeps its position unless a NEXT sibling would end up below it —
+    then it drops just past the remaining NEXT prefix, never to the end
+    of the active zone."""
+    model = Model([Node("p", "TODO", children=[
+        Node("a", "NEXT"), Node("b", "TODO"), Node("c", "TODO"),
+    ])], Divergences.normative())
+    model.set_state("a", "TODO")
+    group = model.roots[0].children
+    assert [n.heading for n in group] == ["a", "b", "c"]
+
+    model = Model([Node("p", "TODO", children=[
+        Node("n1", "NEXT"), Node("a", "NEXT"), Node("b", "TODO"),
+    ])], Divergences.normative())
+    model.set_state("n1", "TODO")
+    group = model.roots[0].children
+    assert [n.heading for n in group] == ["a", "n1", "b"]
+
+
 @given(models_and_ops())
 def test_mixed_groups_are_never_reordered(model_and_ops):
     """§2: a group with any keyword-less sibling gets no machine movement."""
