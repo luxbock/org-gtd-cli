@@ -40,14 +40,30 @@ mixed group.
 Heading kinds:
 
 - **Category heading** — no TODO keyword. Pure structure; may appear
-  anywhere, including inside projects.
+  anywhere, including inside tasks.
 - **Task** — a heading with a TODO keyword.
-- **Project** — a task with at least one task among its descendants. A
-  **subproject** is a project that itself has a task ancestor.
-- **Leaf task** — a task with no task descendants. A **project child**
-  is a task whose nearest ancestor task exists; a **lone task** is a
-  leaf task with no task ancestor (top-level or under category headings
-  only). A **bucket** is a category heading gathering lone tasks.
+
+**Task descent (severing).** Task structure follows *immediate* task
+parentage: a task's **parent task** is its immediate parent heading iff
+that heading is itself a task. A category heading **severs** the chain —
+tasks below a category heading have no task ancestor above it, wherever
+that heading sits. A category heading inside a task scopes that task's
+*information*; tasks beneath it form an independent task world of their
+own (bucket semantics — they are not subtasks, dependencies, or
+descendants of the enclosing task, even if that information later grows
+a task tree). **Task descendants** = the transitive closure of direct
+task children; nothing below a category heading is ever a task
+descendant of anything above it.
+
+- **Project** — a task with at least one direct task child (its task
+  descendants are the project's content). A **subproject** is a project
+  whose immediate parent heading is a task.
+- **Leaf task** — a task with no direct task children (a task whose
+  only children are category headings is a leaf). A **project child**
+  is a task whose immediate parent heading is a task; a **lone task**
+  is a leaf task with no parent task (top-level, or directly under a
+  category heading — wherever that category heading sits). A **bucket**
+  is a category heading gathering lone tasks.
 
 **Zones.** A uniform sibling group has three zones — the **completed
 block** (DONE/CANCELLED) at the top; the **DEFER block** at the bottom;
@@ -98,58 +114,107 @@ sibling order, never cookies.
 
 Every mutating operation addresses its target by case-insensitive
 substring match on heading text (or org `:ID:`). An ambiguous or failed
-match mutates nothing (I12) and reports the candidates. Every state
-change is stamped in the task's LOGBOOK drawer (I10). Mutations report
-the resulting task state, plus a `side_effects` list naming every
-machine-made change beyond the addressed heading (promotions,
-demotions, `project-needs-review`). `--dry-run`, where offered, must
+match mutates nothing (I12) and reports the candidates. **Scope
+exception (the only one):** `set-done`/`set-cancelled` address **open**
+tasks only — an already-closed match reports not-found; no other
+command filters its addressing by state. **Destination addressing:**
+`refile --to` resolves its destination by case-insensitive **exact**
+heading match over headings of any kind (category headings included),
+unique-or-error — I12 applies to destinations exactly as to targets.
+
+Every state change is stamped in the task's LOGBOOK drawer (I10).
+Mutations report the resulting task state, plus a `side_effects` list
+naming every machine-made change beyond the addressed heading
+(promotions, demotions, reopenings, `project-needs-review`) — every
+command emits the same vocabulary for the same repair, `refile`
+included. Placement moves (§4.1) are **never** side effects: placement
+is presentation, not a state change. `--dry-run`, where offered, must
 predict the real outcome — including failure.
+
+**Closure repair (the reopen cascade).** Any operation that places or
+reveals an *open* task in the task descent of a *closed* ancestor
+reopens that ancestor chain: each closed ancestor task becomes TODO,
+each reported as a `state-change` side effect — I4 stays a hard
+invariant, arrival makes the record live again. Triggers: `add-subtask`
+under a closed heading, `set-state` reopening a task below closed
+ancestors, `refile` of an open subtree into a closed destination, and
+`set-next` on a closed leaf (§4.7).
+
+**Keyword outgrown by structure (demotion repairs).** A leaf gaining
+its first direct task child can invalidate its own keyword (§3: NEXT
+and WAITING live on leaves/project children only). The repair runs in
+the same mutation, whatever caused the growth (`add-subtask` or
+`refile`): a NEXT parent demotes to TODO (state-change side effect); a
+WAITING parent demotes to TODO (state-change side effect, the WAITING
+reason surviving in the LOGBOOK) **and** additionally emits
+`project-needs-review` for itself — the demotion disarmed a blocked
+marker, and whether the blocker now lives on a child is a human call.
 
 ### 4.1 The reorder primitive
 
 After state-affecting operations the target's sibling group is
 re-sorted: **minimal move** — the changed task moves to its zone
 boundary (closed → bottom of the completed block, NEXT → top of the
-active zone, DEFER → top of the DEFER block); nothing else moves; a
-task entering WAITING keeps its position. Mixed groups: never
-reordered. *Divergence: today the primitive is a full stable sort by
-rank closed(0) < NEXT(1) < TODO(2) < WAITING(3) < DEFER(4), which
-clusters WAITING below TODO, destroying user interleaving whenever it
-runs — #34. One mitigation is in place: `set-state` skips the sort when
-a task enters WAITING from TODO/NEXT.*
+active zone, DEFER → top of the DEFER block); nothing else moves. A
+task **leaving NEXT** while remaining in the active zone (NEXT→TODO,
+including the demotion repairs of §4.0, or NEXT→WAITING) moves
+minimally to immediately **below the NEXT prefix**; a task entering
+WAITING **from TODO** keeps its position. Mixed groups: never
+reordered.
+
+**Arrivals.** A task arriving in a group — `add-task`, `add-subtask`,
+`refile` — is placed by the same primitive, never blindly appended: it
+enters at the **end of its zone** (a new NEXT: the end of the NEXT
+prefix; a new TODO/WAITING: the end of the active zone; closed: the
+bottom of the completed block; DEFER: the end of the DEFER block).
+Nothing else moves.
+
+*Divergence: today the primitive is a full stable sort by rank
+closed(0) < NEXT(1) < TODO(2) < WAITING(3) < DEFER(4), which clusters
+WAITING below TODO, destroying user interleaving whenever it runs —
+#34. The `set-state` skip-sort mitigation makes a NEXT entering WAITING
+keep its position — above the remaining NEXT prefix, violating I5 —
+and `add-task`/`add-subtask` append last with no zone placement — #34.*
 
 ### 4.2 add-task
 
 Files a freestanding task: to inbox.org (default), a named file, or
 under a category heading in tasks.org. Pre: target category resolves
 uniquely; state ≠ NEXT (a freestanding task is never NEXT — I3;
-rejected at entry). Post: task appended as last child of the target
-(end of file, or end of the category's subtree); body/tags/schedule/
-deadline/priority as given.
+rejected at entry). Post: task placed in the target group per §4.1's
+arrival rule (end of its zone; in an all-open inbox this coincides
+with append-last); body/tags/schedule/deadline/priority as given.
 
 ### 4.3 add-subtask
 
 Adds a child task under an existing task heading. Pre: parent is a
-task (category headings never match). Post: child appended as last
-direct child; if the parent was NEXT it is demoted to TODO with a
-`state-change` side effect (a project heading is never NEXT — I3); if
-the created state ranks above TODO (NEXT or closed) the new group is
-reordered. `--state NEXT` here is a legal *hand-declared* parallel
-front (§3): the machine never mints a second front (I6), but the user
-may.
+task (category headings never match). Post: child placed per §4.1's
+arrival rule (end of its zone); the §4.0 repairs run as needed — a
+closed parent chain reopens (closure repair, the child being an open
+arrival), a NEXT or WAITING parent gaining its first task child is
+demoted (keyword-outgrown repair; the WAITING case also emits
+`project-needs-review`). `--state NEXT` here is a legal
+*hand-declared* parallel front (§3): the machine never mints a second
+front (I6), but the user may.
 
 ### 4.4 set-done / set-cancelled
 
 Close a task. Pre: target is a task; if the target is a project
-heading, every descendant task must already be closed (I4) — a blocked
+heading, every task descendant must already be closed (I4) — a blocked
 closure is a reported error, dry-run predicts it, and nothing changes.
-Post: keyword set, CLOSED timestamp added, LOGBOOK stamped, any
-priority cookie stripped (§3; the removal is visible in the reported
-task state); the promotion rule (4.5) runs from the closed task; the
-sibling group is reordered (closed task joins the completed block).
-These two commands (plus #39 auto-unblock, when it lands) are the
-*only* promotion triggers (I9). *Divergence: strip-on-close not yet
-implemented — #41.*
+Tasks below the target's *category* headings are not task descendants
+(§2 severing) and never block closure; when open ones exist, the close
+succeeds and **observes** them with a `warnings` entry (an
+environmental fact, not an effect of the mutation — they are left
+untouched). Post: keyword set, CLOSED timestamp added, LOGBOOK
+stamped, any priority cookie stripped (§3; the removal is visible in
+the reported task state); the promotion rule (4.5) runs from the
+closed task; the sibling group is reordered (closed task joins the
+completed block). These two commands (plus #39 auto-unblock, when it
+lands) are the *only* promotion triggers (I9). *Divergences:
+strip-on-close not yet implemented — #41; the closure guard pierces
+category headings and the severed-task warning does not exist — row
+13.*
 
 ### 4.5 The promotion rule
 
@@ -188,37 +253,49 @@ per the §3 matrix — NEXT requires a project child (lone tasks and
 project/subproject headings rejected); WAITING requires a leaf (project
 headings rejected); DONE/CANCELLED on a project heading require all
 descendants closed, and a blocked attempt is a *reported error*, never
-a silent no-op. Post: keyword set; the group is reordered unless the
-task entered WAITING from TODO/NEXT (it keeps its position — §2 zones).
+a silent no-op. Post: keyword set; the group is reordered per §4.1 (a
+NEXT-exit moves below the NEXT prefix; WAITING entered from TODO keeps
+its position); reopening a task below closed ancestors runs the §4.0
+closure repair (the ancestor chain reopens, with side effects).
 *Divergences (#46): today the NEXT guard admits subproject headings,
 WAITING is accepted on project headings, and a blocked DONE/CANCELLED
-silently no-ops while reporting success.* *(#39 will additionally
+silently no-ops while reporting success. Reopening below closed
+ancestors runs no closure repair — row 10.* *(#39 will additionally
 require a reason or blocker link at WAITING entry, and add
 auto-unblock: WAITING→TODO + a promotion-rule run.)*
 
 ### 4.7 set-next
 
 Convenience front-setter. On a leaf: same guard as `set-state NEXT`;
-already-NEXT is an idempotent success. On a project heading: if a
+already-NEXT is an idempotent success; a **closed** leaf (project
+child) is accepted — it reopens straight to NEXT via the §4.0 closure
+repair, cascading up its closed ancestors (a closed *lone* task stays
+rejected — I3). On a project heading: if a
 direct child is already NEXT, report it and change nothing; otherwise
 promote the project's first eligible TODO child — same candidate rule
 as the promotion scan's drill (first TODO *non-project* direct child);
 subproject headings are never promoted (I3). On a subproject heading
-target: rejected. *Divergence (#46): today the project path promotes
-the first TODO direct child even when that child is a subproject
-heading — minting NEXT on a subproject.*
+target: rejected. *Divergences: today the project path promotes the
+first TODO direct child even when that child is a subproject heading —
+minting NEXT on a subproject (#46); a closed leaf is rejected instead
+of reopened — row 10.*
 
 ### 4.8 refile
 
 Moves a subtree under a new parent (`--category`: category headings
-only; `--to`: exact heading match, self-nesting excluded). Post: the
-subtree is appended as the target's last child, then invariants are
-repaired at the destination: a moved NEXT that would be freestanding
-or would duplicate an existing NEXT sibling is demoted to TODO (with
-side effect); a NEXT target parent that just became a project is
-demoted to TODO; the destination group is reordered (a surviving NEXT
-takes the top of the active zone). *Divergence: the NEXT-at-top
-placement on refile is not yet enforced — #34.*
+only; `--to`: per §4.0 destination addressing — exact match, any
+heading kind, unique-or-error, self-nesting excluded). Post: the
+subtree enters the destination group per §4.1's arrival rule (end of
+its zone), then invariants are repaired: a moved NEXT that would be
+freestanding or would duplicate an existing NEXT sibling is demoted to
+TODO; a NEXT or WAITING target parent gaining its first task child is
+demoted (§4.0 keyword-outgrown repair, the WAITING case emitting
+`project-needs-review`); an open subtree arriving under a closed
+destination chain runs the §4.0 closure repair. Every repair is
+reported as a side effect — refile uses the same vocabulary as the
+primitive commands. *Divergences: `--to` resolves first-hit and the
+repairs are unreported (row 12); the closure and WAITING-parent
+repairs do not run (rows 10, 11).*
 
 ### 4.9 move
 
@@ -284,10 +361,12 @@ For a project heading `p` (per §2):
   (CANCELLED counts as closed: progress measures settledness, not
   success).
 
-*Divergence (#40): two view predicates still read legacy tags instead
+*Divergences: two view predicates still read legacy tags instead
 of states — the stuck screen treats a `:WAITING:`-tagged NEXT as
 blocking, and the deferred screen reads DEFER-ness from a tag rather
-than the project's own (or an ancestor's) DEFER state.*
+than the project's own (or an ancestor's) DEFER state (#40); the
+predicates pierce category headings, counting severed tasks as
+descendants — row 13.*
 
 ### 5.3 agenda — the flat query
 
@@ -341,8 +420,7 @@ structural definitions.
 - **I5** Zone invariant: completed block on top, DEFER block at bottom,
   active zone between; **NEXT entries form the top of the active
   zone**; the rest of the active zone's relative order is never
-  machine-changed. Mixed groups: no machine movement at all. *(Known
-  divergence: refile of a NEXT task into an existing project — #34.)*
+  machine-changed. Mixed groups: no machine movement at all.
 - **I6** Promotion never mints a second front: if any sibling is NEXT
   or WAITING (any position), no promotion occurs.
 - **I7** Promotion is always TODO→NEXT, on a leaf task, chosen as the
@@ -356,9 +434,10 @@ structural definitions.
   promotion; parking (→WAITING/→DEFER) and plain `set-state` never do.
 - **I10** Every state change leaves a LOGBOOK record.
 - **I11** Stuck = an open, non-DEFER project with no NEXT and no
-  WAITING anywhere in its subtree — deliberately including open
-  projects whose children are all closed (the persistent surface for
-  the closure decision).
+  WAITING anywhere in its task descent (§2 — tasks below category
+  headings do not count) — deliberately including open projects whose
+  children are all closed (the persistent surface for the closure
+  decision).
 - **I12** A failed or ambiguous match mutates nothing.
 
 ## 7. Known divergences
@@ -374,8 +453,8 @@ the issue that closes the gap (strictly doc → tests → implementation).
 
 | # | Current behavior (divergent) | Normative | Issue |
 |---|---|---|---|
-| 1 | Reorder is a full stable state-sort; clusters WAITING below TODO, destroying active-zone interleaving whenever it runs | §2, §4.1 (minimal move) | #34 |
-| 2 | A NEXT refiled into a project is not placed at the top of the active zone | §2, §4.8 | #34 |
+| 1 | Reorder is a full stable state-sort; clusters WAITING below TODO, destroying active-zone interleaving whenever it runs; `add-task`/`add-subtask` append last with no zone placement; the skip-sort mitigation leaves a NEXT-entering-WAITING above the NEXT prefix | §2, §4.1 (minimal move + arrivals + NEXT-exit) | #34 |
+| 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
 | 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
 | 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
 | 5 | WAITING entry requires no reason/blocker; no auto-unblock (WAITING→TODO + promotion run) exists | §4.6 | #39 |
@@ -383,3 +462,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
 | 9 | `move` performs cross-zone reorders unguarded | §4.9 | #37 (completed-block boundary, interim) then #47 (full zone guard) |
+| 10 | No closure repair: `add-subtask`, `set-state` (reopening), and `refile` place an open task below a closed heading with no reopen cascade; `set-next` rejects closed leaves outright | §4.0 (closure repair), §4.7 | #56 |
+| 11 | A WAITING leaf gaining its first task child keeps WAITING on what is now a subproject heading; no demotion, no `project-needs-review` | §4.0 (keyword-outgrown repair), §4.3, §4.8 | #56 |
+| 12 | `refile --to` resolves by first match in document order (silent on duplicates); refile reports none of its repairs as side effects | §4.0, §4.8 | #57 |
+| 13 | Task traversal pierces category headings: the closure guard (I4), activity/stuckness predicates, and project detection treat tasks below category headings as task descendants; closing over open severed tasks emits no warning | §2 (severing), §4.4, §5.2 | #58 |
