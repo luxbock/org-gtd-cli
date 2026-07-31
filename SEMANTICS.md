@@ -159,8 +159,12 @@ active zone, DEFER → top of the DEFER block); nothing else moves. A
 task **leaving NEXT** while remaining in the active zone (NEXT→TODO,
 including the demotion repairs of §4.0, or NEXT→WAITING) moves
 minimally to immediately **below the NEXT prefix**; a task entering
-WAITING **from TODO** keeps its position. Mixed groups: never
-reordered.
+WAITING **from TODO** keeps its position. A task **reopening out of
+the completed block** — or leaving the DEFER block — into the active
+zone lands at the **end of the active zone**, matching the arrival
+rule below; the closure-repair cascade (§4.0) applies this per
+reopened ancestor, in that ancestor's own sibling group. Mixed groups:
+never reordered.
 
 **Arrivals.** A task arriving in a group — `add-task`, `add-subtask`,
 `refile` — is placed by the same primitive, never blindly appended: it
@@ -325,14 +329,21 @@ promotion. *Divergence: set-priority validation not yet implemented —
 
 Retires a finished record. Pre: the task is closed (DONE/CANCELLED)
 AND was created over a month ago. Post: the subtree moves to the
-archive file; the history is preserved there. Never triggers
-promotion: it relocates a record, it doesn't close work.
+archive file; the history is preserved there. Open tasks below the
+subtree's category headings do not block archiving (§2 severing), but
+the archive **observes** them with the same `warnings` entry as §4.4 —
+open severed work is never silently relocated into the archive. Never
+triggers promotion: it relocates a record, it doesn't close work.
 
 ### 4.12 delete
 
 Permanently removes a record. Pre: exact full-heading match (stricter
-than substring — a destructive op gets no fuzzy matching); projects
-rejected (close or empty them first). Post: the subtree is gone
+than substring — a destructive op gets no fuzzy matching); the target
+must have **no child heading at all** — task or category alike. The
+guard is deliberately structural, not semantic: §2's severing never
+widens what delete may destroy, and content the semantics ignore
+(severed task worlds, information headings) is still content. Close or
+empty the subtree first. Post: the subtree is gone
 without trace — for work decided against, CANCELLED is the
 record-keeping alternative. Never triggers promotion.
 
@@ -465,4 +476,4 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 10 | No closure repair: `add-subtask`, `set-state` (reopening), and `refile` place an open task below a closed heading with no reopen cascade; `set-next` rejects closed leaves outright | §4.0 (closure repair), §4.7 | #56 |
 | 11 | A WAITING leaf gaining its first task child keeps WAITING on what is now a subproject heading; no demotion, no `project-needs-review` | §4.0 (keyword-outgrown repair), §4.3, §4.8 | #56 |
 | 12 | `refile --to` resolves by first match in document order (silent on duplicates); refile reports none of its repairs as side effects | §4.0, §4.8 | #57 |
-| 13 | Task traversal pierces category headings: the closure guard (I4), activity/stuckness predicates, and project detection treat tasks below category headings as task descendants; closing over open severed tasks emits no warning | §2 (severing), §4.4, §5.2 | #58 |
+| 13 | Task traversal pierces category headings: the closure guard (I4), activity/stuckness predicates, and project detection treat tasks below category headings as task descendants; closing or archiving over open severed tasks emits no warning | §2 (severing), §4.4, §4.11, §5.2 | #58 |
