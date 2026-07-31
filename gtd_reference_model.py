@@ -414,6 +414,10 @@ class Model:
             if self.active(candidate):
                 # Subproject with an active descendant → skip it.
                 continue
+            # PARKED: direct children here vs descendants in active()
+            # above — with a category heading inside the subproject, an
+            # all-done-but-open subproject is passed silently. §4.5 does
+            # not pin the scope; awaiting olli's ruling.
             subproject_tasks = [c for c in candidate.children
                                 if self.is_task(c)]
             if subproject_tasks and all(c.keyword in CLOSED_STATES

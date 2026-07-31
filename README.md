@@ -442,10 +442,14 @@ on issue #45):
   conformance: generated sequences run through the real CLI and the
   model in *current* mode (every §7 divergence flag on) and must match
   exactly (exit class, file skeleton, `side_effects`; `warnings` is
-  never compared). Each §7 row also has a minimal witness test against
+  never compared). Most §7 rows also have a minimal witness test against
   the *normative* model, marked `xfail(strict=True)` with its closing
   issue — a stage-2c fix flips its witness green, and the row, its
-  `Divergences` flag, and the xfail marker retire together.
+  `Divergences` flag, and the xfail marker retire together. Two rows are
+  exceptions: row 2's recorded divergence does not reproduce on master,
+  so it is pinned by a plain regression test with no flag (flagged to
+  olli for re-examination), and row 6 (view predicates) is not modeled
+  in part 1, so it has neither witness nor flag yet.
 
 Hypothesis profiles: `fast` (default) keeps the whole run quick;
 `ORG_GTD_TEST_PROFILE=thorough` is the deep opt-in run.

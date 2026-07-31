@@ -201,6 +201,16 @@ def hits_parked_spec_gap(model, op, args, kwargs):
 
     Until ruled, the preservation property routes around these cases;
     the xfail test below keeps them visible.
+
+    One further parked question needs NO routing (no property depends
+    on it) but awaits the same ruling batch:
+
+    - **§4.5 step-3 scope**: the all-done-but-open-subproject test
+      scans *direct* task children while the activity test above it
+      scans *descendants*; a category heading inside a subproject makes
+      an all-done subproject pass silently with no review emitted
+      (gtd_reference_model.py, promotion scan). §4.5's prose does not
+      pin the scope.
     """
     if op == "add_task":
         _, state = args
