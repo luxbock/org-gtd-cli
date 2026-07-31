@@ -180,15 +180,24 @@ def hits_parked_spec_gap(model, op, args, kwargs):
     - **I4 outside closure**: §4.3 add-subtask, §4.6 set-state
       (reopening), and §4.8 refile can place an open task under a closed
       heading — a closed project with open descendants.
-    - **Leaf→project keyword survival**: §4.3/§4.8 only repair a NEXT
-      parent that becomes a project; a WAITING leaf gaining its first
-      task child keeps WAITING on what is now a project heading (§3
-      allows WAITING on leaves only).
+    - **Leaf→project repairs are incomplete**: §4.3/§4.8 only repair a
+      NEXT parent that becomes a project; a WAITING leaf gaining its
+      first task child keeps WAITING on what is now a project heading
+      (§3 allows WAITING on leaves only). And the NEXT repair itself
+      only demotes: the demoted parent is not re-placed in its own
+      sibling group, so a NEXT sibling below it now violates I5's
+      NEXT-prefix rule (the CLI's repair likewise runs no reorder
+      there).
     - **Append-last vs I5**: §4.2/§4.3 append the new task as last
       child, but that spot can violate zone order — a DONE filed into a
       bucket of open tasks lands below the active zone, a TODO filed
       into a group with a DEFER block lands below it. §4.3 reorders only
       when the created state ranks above TODO; §4.2 never reorders.
+    - **WAITING-keeps-position vs the NEXT prefix**: a NEXT entering
+      WAITING keeps its position (§4.6/§4.1) — at the top of the active
+      zone; if another (hand-declared) NEXT sits below, the group now
+      has WAITING above NEXT, breaking I5's NEXT-prefix rule. The CLI's
+      skip-sort mitigation produces the same state.
 
     Until ruled, the preservation property routes around these cases;
     the xfail test below keeps them visible.
@@ -205,17 +214,31 @@ def hits_parked_spec_gap(model, op, args, kwargs):
         appended_out_of_zone = (
             state not in CLOSED_STATES and state != "NEXT"
             and _append_breaks_zone_order(node.children, state))
+        # §4.3's NEXT-parent demotion never re-places the demoted parent
+        # in its own group (same repair gap as refile's — docstring).
+        demotes_unplaced = (
+            node.keyword == "NEXT"
+            and any(s is not node and s.keyword == "NEXT"
+                    for s in model.sibling_group(node)))
         return ((state not in CLOSED_STATES
                  and _in_closed_subtree(model, node))
                 or (node.keyword == "WAITING"
                     and model.is_leaf_task(node))
-                or appended_out_of_zone)
+                or appended_out_of_zone
+                or demotes_unplaced)
     if op == "set_state":
         target, state = args
         node, _ = model.find(target)
-        return (node is not None and state not in CLOSED_STATES
+        if node is None:
+            return False
+        if (state not in CLOSED_STATES
                 and any(n.keyword in CLOSED_STATES
-                        for n in model.task_ancestors(node)))
+                        for n in model.task_ancestors(node))):
+            return True
+        # WAITING-keeps-position vs NEXT prefix (see docstring).
+        return (state == "WAITING" and node.keyword == "NEXT"
+                and any(s is not node and s.keyword == "NEXT"
+                        for s in model.sibling_group(node)))
     if op == "set_next":
         # Same I4 family: set-next can reopen (promote) inside a closed
         # subtree — directly, or via the project path's child promotion.
@@ -225,17 +248,33 @@ def hits_parked_spec_gap(model, op, args, kwargs):
                         for n in model.task_ancestors(node)))
     if op == "refile":
         node, _ = model.find(args[0])
-        target, _ = model.find(kwargs.get("to") or kwargs.get("category"))
+        # Resolve the target the way refile itself does: --to is an
+        # exact any-heading-type match (categories included), --category
+        # is category-scoped. A task-scoped find() here would let
+        # category-heading targets bypass the guard.
+        if "to" in kwargs:
+            target = next(
+                (n for n in model.all_nodes()
+                 if n.heading.lower() == kwargs["to"].lower()), None)
+        else:
+            target, _ = model.find_category(kwargs["category"])
         if node is None or target is None:
             return False
         subtree_open = (node.keyword not in CLOSED_STATES
                         or any(n.keyword not in CLOSED_STATES
                                for n in model.task_descendants(node)))
-        makes_waiting_project = (node.keyword is not None
+        subtree_has_task = (node.keyword is not None
+                            or bool(model.task_descendants(node)))
+        makes_waiting_project = (subtree_has_task
                                  and target.keyword == "WAITING"
                                  and model.is_leaf_task(target))
+        # NEXT-leaf target: becoming a project demotes it (§4.8), but
+        # the demoted parent is never re-placed in its own group.
+        demotes_unplaced = (subtree_has_task
+                            and target.keyword == "NEXT"
+                            and model.is_leaf_task(target))
         return ((subtree_open and _in_closed_subtree(model, target))
-                or makes_waiting_project)
+                or makes_waiting_project or demotes_unplaced)
     return False
 
 
@@ -397,6 +436,27 @@ def test_minimal_move_preserves_active_interleaving(model_and_ops):
             f"§4.1: closing {node.heading} reordered bystanders "
             f"{others_before} -> {others_after}")
         return
+
+
+@given(models_and_ops())
+def test_same_boundary_class_transition_never_moves_anyone(model_and_ops):
+    """§4.1/§2 (review-bot on PR #55, finding 1): a set-state that stays
+    within one boundary class — a no-op re-set, TODO↔WAITING, NEXT→NEXT
+    — moves nothing at all, the changed task included."""
+    model, _ = model_and_ops
+    same_class = {"TODO": "WAITING", "WAITING": "TODO", "NEXT": "NEXT",
+                  "DONE": "CANCELLED", "CANCELLED": "DONE"}
+    for node in list(model.all_nodes()):
+        if node.keyword not in same_class:
+            continue
+        group = model.sibling_group(node)
+        order_before = [id(n) for n in group]
+        result = model.set_state(
+            node.heading, same_class[node.keyword], reason="r")
+        if result.ok:
+            assert [id(n) for n in group] == order_before, (
+                f"{node.keyword}→{same_class[node.keyword]} on "
+                f"{node.heading} moved a sibling")
 
 
 @given(models_and_ops())

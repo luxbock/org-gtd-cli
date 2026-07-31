@@ -56,9 +56,13 @@ def zone_of(keyword):
     return ZONE_ACTIVE  # TODO / NEXT / WAITING
 
 
-@dataclass
+@dataclass(eq=False)
 class Node:
-    """One heading (§2). ``keyword is None`` = category heading (I1)."""
+    """One heading (§2). ``keyword is None`` = category heading (I1).
+
+    ``eq=False``: nodes have identity, not structural equality — list
+    membership and removal must never confuse two same-shaped siblings
+    (skeletons are compared as tuples instead)."""
 
     heading: str
     keyword: str | None = None
@@ -278,17 +282,38 @@ class Model:
 
     # ── §4.1 the reorder primitive ────────────────────────────────────
 
-    def _reorder(self, group, changed):
+    @staticmethod
+    def _boundary_class(keyword):
+        """The §4.1 boundary a keyword belongs to: closed block, NEXT
+        prefix, DEFER block, or the free interior of the active zone."""
+        if keyword in CLOSED_STATES:
+            return "closed"
+        if keyword in ("NEXT", "DEFER"):
+            return keyword
+        return "active-rest"  # TODO / WAITING — no boundary of their own
+
+    def _reorder(self, group, changed, old_keyword=None):
         """§4.1: re-sort the changed task's sibling group.
 
         Normative: minimal move — the changed task moves to its zone
-        boundary; nothing else moves. Current (§7 row 1): full stable
-        sort by CURRENT_SORT_RANK. Mixed groups: never reordered (§2).
+        boundary; nothing else moves, and a task whose boundary class
+        did not change keeps its position (§2: sibling order is user
+        data). OLD_KEYWORD is the keyword before the change; None means
+        the task newly arrived in this group (add/refile) and is placed
+        regardless. Current (§7 row 1): full stable sort by
+        CURRENT_SORT_RANK. Mixed groups: never reordered (§2).
         """
         if not self.is_uniform(group):
             return
         if self.div.d1_full_sort:
             group.sort(key=lambda n: CURRENT_SORT_RANK[n.keyword])
+            return
+        if (old_keyword is not None
+                and self._boundary_class(old_keyword)
+                == self._boundary_class(changed.keyword)):
+            # No boundary crossed (TODO↔WAITING, NEXT→NEXT, no-op
+            # re-set, DONE↔CANCELLED): nothing moves — the relative
+            # order is user data (§2, I5).
             return
         # Minimal move: remove, then reinsert at the zone boundary.
         group.remove(changed)
@@ -312,9 +337,9 @@ class Model:
                    and zone_of(group[index].keyword) != ZONE_DEFER):
                 index += 1
         else:
-            # TODO/WAITING have no boundary to move to; §4.1 callers skip
-            # the reorder for a task entering WAITING. A TODO placed by
-            # another rule keeps its position.
+            # TODO/WAITING have no boundary; only an *arrival* from
+            # another zone (reopen, DEFER→TODO, refile) is placed — at
+            # the end of the active zone.
             group.insert(self._active_zone_end(group), changed)
             return
         group.insert(index, changed)
@@ -370,7 +395,7 @@ class Model:
                 candidate.logbook += 1
                 effects.append(SideEffect(
                     "state-change", candidate.heading, "TODO", "NEXT"))
-                self._reorder(group, candidate)
+                self._reorder(group, candidate, old_keyword="TODO")
                 return effects
             if self.active(candidate):
                 # Subproject with an active descendant → skip it.
@@ -400,7 +425,8 @@ class Model:
                     # §2: a task entering NEXT takes the top of the
                     # active zone. Today's CLI never re-sorts the drilled
                     # subproject's group (row-1 reorder discipline).
-                    self._reorder(candidate.children, promoted)
+                    self._reorder(candidate.children, promoted,
+                                  old_keyword="TODO")
                 return effects
         return effects
 
@@ -488,7 +514,8 @@ class Model:
         if not self.div.d7_no_priority_rules:
             node.priority = None  # §4.4: strip cookie on close (§7 row 7)
         effects = self._promotion_rule(node)
-        self._reorder(self.sibling_group(node), node)
+        self._reorder(self.sibling_group(node), node,
+                      old_keyword=old_state)
         return Result(True, old_state=old_state, new_state=new_state,
                       side_effects=effects)
 
@@ -540,7 +567,8 @@ class Model:
         # §4.6/§4.1: reorder unless the task entered WAITING from
         # TODO/NEXT (it keeps its position — §2 zones).
         if not (new_state == "WAITING" and old_state in ("TODO", "NEXT")):
-            self._reorder(self.sibling_group(node), node)
+            self._reorder(self.sibling_group(node), node,
+                          old_keyword=old_state)
         return Result(True, old_state=old_state, new_state=new_state)
 
     # ── §4.7 set-next ─────────────────────────────────────────────────
@@ -571,7 +599,7 @@ class Model:
                     continue
                 child.keyword = "NEXT"
                 child.logbook += 1
-                self._reorder(node.children, child)
+                self._reorder(node.children, child, old_keyword="TODO")
                 return Result(
                     True, old_state=node.keyword, new_state=node.keyword,
                     side_effects=[SideEffect(
@@ -595,7 +623,8 @@ class Model:
         if not self.div.d1_full_sort:
             # §2: entering NEXT takes the top of the active zone; the
             # CLI's leaf set-next never reorders (row-1 discipline).
-            self._reorder(self.sibling_group(node), node)
+            self._reorder(self.sibling_group(node), node,
+                          old_keyword=old_state)
         return Result(True, old_state=old_state, new_state="NEXT")
 
     # ── §4.8 refile ───────────────────────────────────────────────────
