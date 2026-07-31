@@ -1,0 +1,4 @@
+# Hypothesis example-DB entries are raw choice sequences: binary data
+# that happens to contain no NUL bytes, so git would otherwise diff
+# them as (invalid-UTF-8) text.
+.hypothesis-examples/** binary
