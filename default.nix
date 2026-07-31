@@ -59,6 +59,9 @@ let
     exec ${python3}/bin/python3 ${pythonScript} "$@"
   '';
 
+  # The complete dev/test environment. Kept exhaustive on purpose: a
+  # factory VM worker gets everything the suite needs from `nix develop`
+  # alone (2026-07-31 ruling on #45) — no host-provided extras.
   testInputs = [
     emacsWithHtmlize
     coreutils
@@ -66,6 +69,7 @@ let
     python3
     python3Packages.pytest
     python3Packages.pytest-xdist
+    python3Packages.hypothesis
   ];
 
 in
@@ -93,8 +97,14 @@ symlinkJoin {
           cp ${./test_org_gtd_cli.py} test_org_gtd_cli.py
           cp ${coreFile} +gtd-core.el
           cp ${elispFile} org-gtd-cli.el
+          cp ${./conftest.py} conftest.py
+          cp ${./gtd_reference_model.py} gtd_reference_model.py
+          cp ${./test_gtd_model_properties.py} test_gtd_model_properties.py
+          cp ${./test_gtd_conformance.py} test_gtd_conformance.py
           cp -r ${./fixtures} fixtures
-          python3 -m pytest test_org_gtd_cli.py -q -n 4
+          # Sandbox runs the fast profile; `nix develop` +
+          # ORG_GTD_TEST_PROFILE=thorough is the deep run.
+          python3 -m pytest -q -n 4
           touch $out
         '';
   };

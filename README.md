@@ -423,8 +423,51 @@ directory. Entries the tool never created are still refused and reported.
 ```sh
 nix flake check          # runs the pytest suite
 # or directly:
-nix develop --command python3 -m pytest test_org_gtd_cli.py -q -n 4
+nix develop --command python3 -m pytest -q -n 4
 ```
+
+The dev shell is the *complete* environment: a factory VM worker (or any
+fresh checkout) needs nothing beyond `nix develop` to run every test.
+
+### Semantics tests: reference model + two tiers (#45)
+
+`SEMANTICS.md` is executable: `gtd_reference_model.py` implements it as a
+pure-Python model, and two test tiers derive from that (design + rulings
+on issue #45):
+
+- **Tier 1** (`test_gtd_model_properties.py`) — Hypothesis properties
+  against the model alone in *normative* mode. Emacs-free, runs in
+  seconds, asserts the §6 invariants over generated operation sequences.
+- **Tier 2** (`test_gtd_conformance.py`) — bounded, daemon-backed
+  conformance: generated sequences run through the real CLI and the
+  model in *current* mode (every §7 divergence flag on) and must match
+  exactly (exit class, file skeleton, `side_effects`; `warnings` is
+  never compared). Most §7 rows also have a minimal witness test against
+  the *normative* model, marked `xfail(strict=True)` with its closing
+  issue — a stage-2c fix flips its witness green, and the row, its
+  `Divergences` flag, and the xfail marker retire together. Two rows are
+  exceptions: row 2's recorded divergence does not reproduce on master,
+  so it is pinned by a plain regression test with no flag (flagged to
+  olli for re-examination), and row 6 (view predicates) is not modeled
+  in part 1, so it has neither witness nor flag yet.
+
+Hypothesis profiles: `fast` (default) keeps the whole run quick;
+`ORG_GTD_TEST_PROFILE=thorough` is the deep opt-in run.
+
+**The Hypothesis example database is a local cache, not part of the
+repo.** When a property test finds a failing (or otherwise interesting)
+input, Hypothesis saves it under `.hypothesis-examples/` (configured in
+`conftest.py`) and replays saved entries first on later runs. That
+directory is gitignored: Hypothesis documents checking it into version
+control as an option, but the entries are opaque version-sensitive
+binary blobs — unreviewable in diffs and dead weight after a Hypothesis
+upgrade — so cold runs (CI, `nix flake check`, fresh checkouts) simply
+regenerate examples from scratch. The rule instead: any discovered
+input worth keeping permanently is pinned in the test code itself, as a
+plain regression test or an
+[`@example(...)`](https://hypothesis.readthedocs.io/en/latest/reference/api.html#hypothesis.example)
+decorator on the property, where it is reviewable and survives cache
+loss and version bumps.
 
 The `render-file` src-highlighting test asserts `htmlize`'s `org-*` CSS face
 classes, so it needs an Emacs with `htmlize` on its load-path (the Nix package
