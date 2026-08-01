@@ -468,8 +468,12 @@ conformance property is budgeted (see `tier2_max_examples()` in
   expectation), or DROP (subsumed
   by tier-1 invariant properties or tier-2 CLI conformance; DROPs name
   the subsuming coverage in the manifest entry). The uniform pointer
-  format retires the earlier PARKED slug convention — nothing is
-  parked post-#59.
+  format retires the earlier PARKED slug convention in the migrated
+  tests — the ten formerly-PARKED questions were ruled 2026-08-01 and
+  encoded as SEMANTICS.md §7 rows (PR #59). The tier-1/tier-2 files and
+  the reference model still carry pre-ruling PARKED wording in their
+  routing comments; those are re-pointed by the stage-2c issues
+  (#56–#58, #34) that flip them, not by the migration.
 
 **The Hypothesis example database is a local cache, not part of the
 repo.** When a property test finds a failing (or otherwise interesting)

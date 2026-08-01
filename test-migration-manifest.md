@@ -121,7 +121,7 @@ View layer.
 `test_process_agent_tasks_removed` — asserts the deprecated command is
 gone. Legacy-surface pin.
 
-### TestDone (18 tests) — KEEP all; one KEEP+ANNOTATE row 3 (#38)
+### TestDone (18 tests) — KEEP all
 Almost every test asserts on stdout text ("Auto-progressed", "project
 left open for review", "in subproject"), JSON envelope, or `--dry-run`
 preview text — CLI surface tier-2 does not compare. KEEP unchanged:
