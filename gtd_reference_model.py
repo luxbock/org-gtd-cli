@@ -118,6 +118,7 @@ class Divergences:
     d7_no_priority_rules: bool = False  # §7 row 7 → #41
     d8_lax_state_guards: bool = False   # §7 row 8 → #46
     d9_move_unguarded: bool = False     # §7 row 9 → #37/#47
+    d14_no_toplevel_reorder: bool = False   # §7 row 14 → #34
     # Observed divergence with no §7 row yet (PARKED for ruling
     # 2026-07-31): set-next on a *closed* leaf is rejected by the CLI,
     # while §4.7 ("same guard as set-state NEXT") implies acceptance.
@@ -133,6 +134,7 @@ class Divergences:
                    d3_scan_from_closed=True, d4_no_subproject_review=True,
                    d5_no_waiting_reason=True, d7_no_priority_rules=True,
                    d8_lax_state_guards=True, d9_move_unguarded=True,
+                   d14_no_toplevel_reorder=True,
                    dx_setnext_rejects_closed_leaf=True)
 
 
@@ -304,6 +306,13 @@ class Model:
         CURRENT_SORT_RANK. Mixed groups: never reordered (§2).
         """
         if not self.is_uniform(group):
+            return
+        if self.div.d14_no_toplevel_reorder and group is self.roots:
+            # §7 row 14 (#34): the CLI's reorder guards with
+            # `(when (> (org-current-level) 1))` and so never runs on
+            # top-level siblings. Ruled an accident (2026-08-02, #62):
+            # normatively a uniform top-level group sorts like an
+            # implicit category bucket.
             return
         if self.div.d1_full_sort:
             group.sort(key=lambda n: CURRENT_SORT_RANK[n.keyword])
