@@ -1470,6 +1470,7 @@ class TestDone:
 
 class TestSetState:
     def test_changes_state(self, org_dir):
+        # pins §7 row 5 (#39)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         assert rc == 0
         assert "NEXT -> WAITING (tasks.org)" in stdout
@@ -1512,6 +1513,7 @@ class TestSetState:
         assert "\\\\" not in drawer
 
     def test_waiting_adds_tag(self, org_dir):
+        # pins §7 row 5 (#39)
         # pins §7 row 6 (#40)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         assert rc == 0
@@ -1529,6 +1531,7 @@ class TestSetState:
         assert "NEXT Book a rental car" in (org_dir / "tasks.org").read_text()
 
     def test_preserves_priority_cookie(self, org_dir):
+        # pins §7 row 5 (#39)
         # WAITING (not NEXT): "Pay quarterly taxes" is a standalone task, and
         # NEXT is now rejected on non-project tasks. Priority-cookie handling
         # is identical across state changes.
@@ -1543,6 +1546,7 @@ class TestSetState:
         assert "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" in stderr
 
     def test_defer_to_waiting_cleans_defer_tag(self, org_dir):
+        # pins §7 row 5 (#39)
         # pins §7 row 6 (#40)
         # Multi-step: DEFER then WAITING
         run_cli("set-state", "Book a rental car", "DEFER", org_dir=org_dir)
@@ -1553,6 +1557,8 @@ class TestSetState:
         assert ":DEFER:" not in text
 
     def test_waiting_to_todo_cleans_waiting_tag(self, org_dir):
+        # anchor §7 row 5 (#39) — non-flipping: only the unasserted WAITING
+        # setup call changes under #39; the TODO assertions stay green
         # Multi-step: WAITING then TODO
         run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "TODO", org_dir=org_dir)
@@ -3251,6 +3257,7 @@ class TestSiblingReordering:
 
     def test_next_to_waiting_preserves_sibling_position(self, org_dir):
         # pins §7 row 1 (#34)
+        # pins §7 row 5 (#39)
         self._write_reorder_org(org_dir, """\
 * TODO Project H
 ** TODO Alpha
@@ -5169,6 +5176,7 @@ class TestJsonMutations:
         )
 
     def test_set_state_json(self, org_dir):
+        # pins §7 row 5 (#39)
         data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", org_dir=org_dir)
         assert rc == 0
         assert data["command"] == "set-state"
@@ -5176,6 +5184,7 @@ class TestJsonMutations:
         assert data["new_state"] == "WAITING"
 
     def test_set_state_dry_run_json(self, org_dir):
+        # pins §7 row 5 (#39) — dry-run must predict the #39 failure
         data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", "--dry-run", org_dir=org_dir)
         assert rc == 0
         assert data["dry_run"] is True
@@ -8270,6 +8279,7 @@ class TestBatchExtendedCommands:
 
     def test_batch_set_state(self, org_dir):
         """--batch set-state changes TODO state per item."""
+        # pins §7 row 5 (#39)
         data, stderr, rc = run_batch(
             "set-state",
             # NEXT is rejected on freestanding tasks, so use DEFER for the
@@ -9092,6 +9102,7 @@ class TestStableIdAddressing:
 
     def test_lazy_create_on_substring_mutation(self, org_dir):
         """A substring mutation on an id-less task lazily creates a stable :ID:."""
+        # pins §7 row 5 (#39)
         inbox = org_dir / "inbox.org"
         assert _id_under(inbox, "Buy groceries") is None
         # WAITING, not NEXT: Buy groceries is a freestanding inbox task and NEXT
@@ -9106,6 +9117,7 @@ class TestStableIdAddressing:
 
     def test_lazy_id_round_trips(self, org_dir):
         """A freshly lazy-created id is immediately resolvable by --id."""
+        # pins §7 row 5 (#39)
         inbox = org_dir / "inbox.org"
         rc = run_cli("set-state", "Buy groceries", "WAITING", org_dir=org_dir)[2]
         assert rc == 0
@@ -9118,6 +9130,7 @@ class TestStableIdAddressing:
 
     def test_dry_run_does_not_create_id(self, org_dir):
         """--dry-run on an id-less task must NOT create an :ID:."""
+        # pins §7 row 5 (#39) — dry-run must predict the #39 failure
         inbox = org_dir / "inbox.org"
         before = inbox.read_bytes()
         stdout, stderr, rc = run_cli(

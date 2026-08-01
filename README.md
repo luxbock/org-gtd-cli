@@ -463,7 +463,7 @@ conformance property is budgeted (see `tier2_max_examples()` in
   `test_org_gtd_cli.py` as KEEP (CLI surface tiers 1/2 cannot see),
   KEEP+ANNOTATE (pins a §7-divergent behavior; carries a
   `# pins §7 row N (#NN)` pointer comment — or `# anchor §7 row N (#NN)`
-  for the two non-flipping code-path anchors — on the test body so each
+  for the three non-flipping code-path anchors — on the test body so each
   stage-2c fix can `grep` its regression anchors with the right
   expectation), or DROP (subsumed
   by tier-1 invariant properties or tier-2 CLI conformance; DROPs name

@@ -16,11 +16,13 @@ entry below. Spot-check:
   batch mode, view rendering, etc.).
 - **KEEP+ANNOTATE row N (#NN)** — pins CURRENT (§7-divergent) behavior.
   Most carry a `# pins §7 row N (#NN)` comment: the closing issue's
-  stage-2c fix must flip that assertion. Two carry
+  stage-2c fix must flip that assertion. Three carry
   `# anchor §7 row N (#NN)` instead — non-flipping regression anchors
   whose fixture (or unasserted setup) sits on the issue's code path but
   whose assertions stay green when it lands; the marker distinction is
   what tells a grep-driven stage-2c worker which expectation to hold.
+  A test that flips under more than one row carries one marker line per
+  row (three tests do), so every row's grep is complete on its own.
 - **DROP** — subsumed by tier-1 (`test_gtd_model_properties.py`
   invariant properties on the normative reference model) or tier-2
   (`test_gtd_conformance.py` daemon-backed CLI-vs-current-mode-model
@@ -31,7 +33,7 @@ entry below. Spot-check:
 **Classification bias:** when a test could plausibly pin divergent
 behavior OR only stress CLI surface, KEEP (per the BRIEF's "when in
 doubt, KEEP" rule). Every `pins`-marked KEEP+ANNOTATE call-out below is a test whose
-assertion flips after the closing issue lands; the two `anchor`-marked
+assertion flips after the closing issue lands; the three `anchor`-marked
 ones do not flip (their entries say why) and exist as regression
 anchors on the issue's code path.
 
@@ -150,17 +152,17 @@ whole-group scan agree, and blocked-parent handling is normative for the
 dedicated `set-done` command (row 8 divergence lives on `set-state`).*
 
 ### TestSetState (11 tests) — MIXED
-- test_changes_state — **KEEP** (stdout arrow text + skeleton)
+- test_changes_state — **KEEP+ANNOTATE row 5 (#39)** (reasonless `set-state WAITING` asserts rc 0 + the arrow text; flips to failure under #39)
 - test_waiting_reason_adds_logbook_state_note — **KEEP** (LOGBOOK format)
 - test_defer_reason_adds_logbook_state_note — **KEEP** (LOGBOOK format)
 - test_without_reason_does_not_add_reason_note — **KEEP+ANNOTATE row 5 (#39)** (pins that WAITING is accepted without `--reason`; #39 requires reason at entry, so the plain call flips to failure)
-- test_waiting_adds_tag — **KEEP+ANNOTATE row 6 (#40)** (pins the `:WAITING:` legacy tag write; #40 retires the tag machinery)
+- test_waiting_adds_tag — **KEEP+ANNOTATE row 6 (#40) + row 5 (#39)** (pins the `:WAITING:` legacy tag write; #40 retires the tag machinery; its reasonless WAITING call also flips to failure under #39)
 - test_removing_waiting_removes_tag — **KEEP** (rc + skeleton on TODO transition; tag cleanup is a follow-through, not a flip)
 - test_dry_run — **KEEP** (`--dry-run` stdout text)
-- test_preserves_priority_cookie — **KEEP** (§4.10 annotation-op: state changes leave priority; normative)
+- test_preserves_priority_cookie — **KEEP+ANNOTATE row 5 (#39)** (the §4.10 priority-preservation claim is normative, but the reasonless WAITING call flips to failure under #39)
 - test_invalid_state_clean_error — **KEEP** (CLI error text)
-- test_defer_to_waiting_cleans_defer_tag — **KEEP+ANNOTATE row 6 (#40)** (pins the `:DEFER:` tag write/removal machinery)
-- test_waiting_to_todo_cleans_waiting_tag — **KEEP** (asserts skeleton only)
+- test_defer_to_waiting_cleans_defer_tag — **KEEP+ANNOTATE row 6 (#40) + row 5 (#39)** (pins the `:DEFER:` tag write/removal machinery; its reasonless WAITING call also flips to failure under #39)
+- test_waiting_to_todo_cleans_waiting_tag — **KEEP+ANNOTATE row 5 (#39)** (anchor, non-flipping: only the unasserted WAITING setup call changes under #39; the TODO assertions stay green)
 
 ### TestSetCancelled (8 tests) — KEEP all
 - test_cancel_by_substring — CLI envelope (arrow, file text)
@@ -374,10 +376,11 @@ random forests including all these state-transition cases.
   `test_same_boundary_class_transition_never_moves_anyone` covers
   TODO→WAITING no-move; tier-2 confirms CLI matches)
 - test_next_to_waiting_preserves_sibling_position — **KEEP+ANNOTATE
-  row 1 (#34)** (asserts that a NEXT→WAITING keeps its original position
-  when it was the only NEXT; the normative §4.1 rule sends the WAITING
-  to the top of the active zone in that shape, so #34's stage-2c fix
-  flips this)
+  row 1 (#34) + row 5 (#39)** (asserts that a NEXT→WAITING keeps its
+  original position when it was the only NEXT; the normative §4.1 rule
+  sends the WAITING to the top of the active zone in that shape, so
+  #34's stage-2c fix flips this; its reasonless WAITING call also flips
+  to failure under #39)
 - test_non_task_siblings_skip_reorder — **DROP** (tier-1
   `test_mixed_groups_are_never_reordered` covers this exactly)
 - test_top_level_task_skip_reorder — **DROP** (tier-2: `set_state`
@@ -494,13 +497,20 @@ JSON envelope for `projects`.
 `list-tags` view — with/without counts, exclusions, JSON shape. View
 layer.
 
-### TestJsonMutations (40 tests) — KEEP all
+### TestJsonMutations (40 tests) — MIXED (38 KEEP, 2 KEEP+ANNOTATE)
 JSON envelope for every mutation command: `add-task`, `add-subtask`,
 `set-done`, `set-cancelled`, `set-state`, `set-next`, `set-priority`,
 `set-property`, `refile`, `move`, `rename`, `add-note`, `add-event`,
 `append-body`, `set-body`, `archive`, `delete`, `set-schedule`,
 `set-deadline`, `set-tags`. Every test checks JSON structure/fields —
-JSON envelope shape is not part of tier-2's comparison surface. All KEEP.
+JSON envelope shape is not part of tier-2's comparison surface. All
+KEEP, except two row-5 pins:
+- test_set_state_json — **KEEP+ANNOTATE row 5 (#39)** (reasonless
+  `set-state WAITING` asserts rc 0 + `new_state`; flips to failure
+  under #39)
+- test_set_state_dry_run_json — **KEEP+ANNOTATE row 5 (#39)**
+  (reasonless WAITING `--dry-run` asserts rc 0; SEMANTICS.md's dry-run
+  rule requires the prediction to fail too, so this flips under #39)
 
 ### TestJsonNonAsciiEncoding (4 tests) — KEEP all
 UTF-8 encoding of JSON output (bare chars, escaped chars, Emacs default
@@ -559,8 +569,11 @@ Batch-mode delegates single-command semantics.
 ### TestBatchMixed (6 tests) — KEEP all
 Batch with mixed successful/failing commands.
 
-### TestBatchExtendedCommands (13 tests) — KEEP all
-Batch-mode coverage for annotation ops, view ops, etc.
+### TestBatchExtendedCommands (13 tests) — MIXED (12 KEEP, 1 KEEP+ANNOTATE)
+Batch-mode coverage for annotation ops, view ops, etc. All KEEP, except:
+- test_batch_set_state — **KEEP+ANNOTATE row 5 (#39)** (batch item sets
+  a reasonless WAITING and asserts `succeeded == 2`; that item flips to
+  a per-item failure under #39)
 
 ### TestBatchCoverageGaps (14 tests) — KEEP all
 Batch envelope for the previously-uncovered commands.
@@ -592,9 +605,19 @@ representation). JSON envelope enrichment surface.
 ### TestGetSessionIds (3 tests) — KEEP all
 `get-session-ids` reader — listing recorded session ids.
 
-### TestStableIdAddressing (7 tests) — KEEP all
+### TestStableIdAddressing (7 tests) — MIXED (4 KEEP, 3 KEEP+ANNOTATE)
 Addressing tasks by their `:ID:` property across every command. CLI
-addressing surface distinct from the model's name-based identity.
+addressing surface distinct from the model's name-based identity. All
+KEEP, except three row-5 pins whose lazy-ID vehicle is a reasonless
+`set-state WAITING`:
+- test_lazy_create_on_substring_mutation — **KEEP+ANNOTATE row 5
+  (#39)** (asserts rc 0 + the lazily created `:ID:`; flips under #39)
+- test_lazy_id_round_trips — **KEEP+ANNOTATE row 5 (#39)** (asserts
+  rc 0 and resolves the fresh id; flips under #39)
+- test_dry_run_does_not_create_id — **KEEP+ANNOTATE row 5 (#39)**
+  (reasonless WAITING `--dry-run` asserts rc 0; the dry-run prediction
+  flips to failure under #39 — the no-`:ID:`-created assertions stay
+  green)
 
 ### TestOutline (19 tests) — KEEP all
 `outline` view — the forest-skeleton projection (§5.5). Read-only
@@ -621,16 +644,27 @@ Daemon-mode variant of sync-conflict warnings.
 
 ## Summary counts
 
-- **KEEP: 745 tests** (base default; every CLI-surface test not
+- **KEEP: 736 tests** (base default; every CLI-surface test not
   otherwise classified)
-- **KEEP+ANNOTATE: 9 tests** (all §7-row pins):
+- **KEEP+ANNOTATE: 18 tests** (all §7-row pins; three tests carry two
+  row markers, so per-row mentions below sum to 21):
   - Row 1 (#34): 2 — TestSiblingReordering::test_next_to_waiting_
-    preserves_sibling_position, TestAddSubtaskStateReorder::
+    preserves_sibling_position (also row 5), TestAddSubtaskStateReorder::
     test_add_waiting_preserves_end_position
-  - Row 5 (#39): 1 — TestSetState::test_without_reason_does_not_add_
-    reason_note
+  - Row 5 (#39): 13 — TestSetState::test_changes_state,
+    test_without_reason_does_not_add_reason_note,
+    test_waiting_adds_tag (also row 6), test_preserves_priority_cookie,
+    test_defer_to_waiting_cleans_defer_tag (also row 6),
+    test_waiting_to_todo_cleans_waiting_tag (anchor);
+    TestSiblingReordering::test_next_to_waiting_preserves_sibling_
+    position (also row 1); TestJsonMutations::test_set_state_json,
+    test_set_state_dry_run_json; TestBatchExtendedCommands::
+    test_batch_set_state; TestStableIdAddressing::
+    test_lazy_create_on_substring_mutation, test_lazy_id_round_trips,
+    test_dry_run_does_not_create_id
   - Row 6 (#40): 2 — TestSetState::test_waiting_adds_tag,
-    TestSetState::test_defer_to_waiting_cleans_defer_tag
+    TestSetState::test_defer_to_waiting_cleans_defer_tag (both also
+    row 5)
   - Row 7 (#41): 4 — TestSetPriority::test_change_priority_a_to_c,
     TestSetPriority::test_clear_priority, TestSetPriority::
     test_invalid_priority, TestSetPriority::test_change_existing_
@@ -641,13 +675,13 @@ Daemon-mode variant of sync-conflict warnings.
   - TestAddSubtaskStateReorder: 8 tests (all except
     `test_add_waiting_preserves_end_position`)
 
-**Total: 745 + 9 + 17 = 771** ✓ (matches
+**Total: 736 + 18 + 17 = 771** ✓ (matches
 `grep -c "def test_" test_org_gtd_cli.py` at f63ab81)
 
 ## Post-migration coverage note
 
 The reference model (`gtd_reference_model.py`) covers SEMANTICS.md §§2-6
-state semantics only. The 745 KEEP tests carry:
+state semantics only. The 736 KEEP tests carry:
 - JSON envelope shape for every command (tier-2 does not compare)
 - Warnings-channel content (tier-2 does not compare, per the 2026-07-28
   warnings ruling)
@@ -669,6 +703,8 @@ state semantics only. The 745 KEEP tests carry:
 - Session-id, identity, sync-conflict warnings — all outside modelled
   semantics
 
-The 9 KEEP+ANNOTATE tests are anchors for stage-2c #34 / #39 / #40 /
+The 18 KEEP+ANNOTATE tests are anchors for stage-2c #34 / #39 / #40 /
 #41 work: each stage-2c PR grep-finds its `# pins §7 row N (#NN)`
-pointers, flips the assertion, and retires the pin with the row.
+pointers, flips the assertion, and retires the pin with the row
+(`# anchor` pointers stay green — the marker says which expectation to
+hold; dual-marked tests retire one marker per landing row).
