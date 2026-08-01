@@ -7301,7 +7301,15 @@ class TestDaemonManagementCommands:
         sock = id_dir / "server"
         sock.write_text("")
         (id_dir / "emacs.d").mkdir(exist_ok=True)
-        swap = "(progn (delete-file server-name) (write-region \"\" nil server-name))" \
+        # Simulate the orphan case with `rename-file' from a temp file created
+        # in a separate directory: this guarantees a genuinely different inode
+        # on filesystems (virtiofs / some overlays) where `delete-file' +
+        # `write-region' at the same path can reuse the just-freed inode and
+        # leave the guard unable to detect the swap. In production the Python
+        # wrapper unlinks the socket and a successor daemon binds a fresh one,
+        # which is likewise a distinct inode — the harness now matches that.
+        swap = ("(let ((tmp (make-temp-file \"ogc-sock-swap-\")))"
+                " (rename-file tmp server-name t))") \
             if replace_socket else "nil"
         # `--eval' evaluates exactly ONE form, so everything goes in a progn.
         # `user-emacs-directory' must be set BEFORE the load, exactly as
