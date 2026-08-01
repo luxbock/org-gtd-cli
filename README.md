@@ -462,8 +462,10 @@ conformance property is budgeted (see `tier2_max_examples()` in
   authoritative classification of every test function in
   `test_org_gtd_cli.py` as KEEP (CLI surface tiers 1/2 cannot see),
   KEEP+ANNOTATE (pins a §7-divergent behavior; carries a
-  `# pins §7 row N (#NN)` pointer comment on the test body so each
-  stage-2c fix can `grep` its regression anchors), or DROP (subsumed
+  `# pins §7 row N (#NN)` pointer comment — or `# anchor §7 row N (#NN)`
+  for the two non-flipping code-path anchors — on the test body so each
+  stage-2c fix can `grep` its regression anchors with the right
+  expectation), or DROP (subsumed
   by tier-1 invariant properties or tier-2 CLI conformance; DROPs name
   the subsuming coverage in the manifest entry). The uniform pointer
   format retires the earlier PARKED slug convention — nothing is

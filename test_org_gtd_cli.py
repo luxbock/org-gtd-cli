@@ -1666,7 +1666,8 @@ class TestSetPriority:
         assert "[#C] Buy groceries" in (org_dir / "inbox.org").read_text()
 
     def test_clear_priority(self, org_dir):
-        # pins §7 row 7 (#41)
+        # anchor §7 row 7 (#41) — non-flipping: only the unasserted 'C' setup
+        # call changes under #41; the --clear assertions stay green
         run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         run_cli("set-priority", "Buy groceries", "C", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "--clear", org_dir=org_dir)
@@ -3283,7 +3284,8 @@ class TestAddSubtaskStateReorder:
         (org_dir / "reorder.org").write_text(content)
 
     def test_add_waiting_preserves_end_position(self, org_dir):
-        # pins §7 row 1 (#34)
+        # anchor §7 row 1 (#34) — non-flipping: current and normative outputs
+        # agree in this fixture; #34's stage-2c work touches this code path
         self._write_reorder_org(org_dir, """\
 * TODO Project W1
 ** TODO Alpha

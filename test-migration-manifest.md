@@ -14,10 +14,13 @@ entry below. Spot-check:
   format, addressing edge cases, `--dry-run` text, `--index`/`--file`
   targeting, warnings channel, file I/O specifics, daemon lifecycle,
   batch mode, view rendering, etc.).
-- **KEEP+ANNOTATE row N (#NN)** — pins CURRENT (§7-divergent) behavior;
-  the closing issue's stage-2c fix must flip the assertion. A
-  `# pins §7 row N (#NN)` comment goes on the test body so a stage-2c
-  worker can mechanically find them.
+- **KEEP+ANNOTATE row N (#NN)** — pins CURRENT (§7-divergent) behavior.
+  Most carry a `# pins §7 row N (#NN)` comment: the closing issue's
+  stage-2c fix must flip that assertion. Two carry
+  `# anchor §7 row N (#NN)` instead — non-flipping regression anchors
+  whose fixture (or unasserted setup) sits on the issue's code path but
+  whose assertions stay green when it lands; the marker distinction is
+  what tells a grep-driven stage-2c worker which expectation to hold.
 - **DROP** — subsumed by tier-1 (`test_gtd_model_properties.py`
   invariant properties on the normative reference model) or tier-2
   (`test_gtd_conformance.py` daemon-backed CLI-vs-current-mode-model
@@ -27,8 +30,10 @@ entry below. Spot-check:
 
 **Classification bias:** when a test could plausibly pin divergent
 behavior OR only stress CLI surface, KEEP (per the BRIEF's "when in
-doubt, KEEP" rule). Every KEEP+ANNOTATE call-out below is a test whose
-assertion would flip after the closing issue lands.
+doubt, KEEP" rule). Every `pins`-marked KEEP+ANNOTATE call-out below is a test whose
+assertion flips after the closing issue lands; the two `anchor`-marked
+ones do not flip (their entries say why) and exist as regression
+anchors on the issue's code path.
 
 ## Per-class classifications
 
@@ -173,7 +178,7 @@ dedicated `set-done` command (row 8 divergence lives on `set-state`).*
 ### TestSetPriority (9 tests) — MIXED
 - test_set_priority_a — **KEEP** (accepts 'A'; normative)
 - test_change_priority_a_to_c — **KEEP+ANNOTATE row 7 (#41)** (accepts 'C'; #41 rejects everything but 'A')
-- test_clear_priority — **KEEP+ANNOTATE row 7 (#41)** (setup uses 'C')
+- test_clear_priority — **KEEP+ANNOTATE row 7 (#41)** (anchor, non-flipping: only the unasserted 'C' setup call changes under #41)
 - test_clear_on_no_priority — **KEEP** (clear op alone)
 - test_invalid_priority — **KEEP+ANNOTATE row 7 (#41)** (asserts "A, B, C" as the valid set; message flips to just 'A')
 - test_dry_run — **KEEP** (`--dry-run` text, priority 'A')
@@ -393,7 +398,7 @@ used).
 - test_add_done_reorders_above_next — **DROP** (tier-2)
 - test_add_cancelled_reorders_above_todo — **DROP** (tier-2)
 - test_add_waiting_preserves_end_position — **KEEP+ANNOTATE row 1
-  (#34)** (asserts that add-subtask WAITING lands AFTER existing TODO
+  (#34)** (anchor, non-flipping: asserts that add-subtask WAITING lands AFTER existing TODO
   siblings; §4.1 arrival-in-zone puts a WAITING at the end of the
   active zone — same end position in this fixture — but the assertion
   is written to pin the append-last behavior explicitly, matching the
