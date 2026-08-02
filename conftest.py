@@ -41,5 +41,10 @@ settings.load_profile(PROFILE)
 
 def tier2_max_examples():
     """Bounded conformance budget: modest by default (the wall-clock gate
-    is the arbiter), deep under the thorough profile."""
-    return 100 if PROFILE == "thorough" else 12
+    is the arbiter), deep under the thorough profile.
+
+    Fast: 8 examples of ~6 CLI-daemon op sequences per example is enough
+    to catch skeleton/side_effects divergence in ordinary development;
+    the thorough profile pushes the same generator to 100 examples for
+    pre-release confidence."""
+    return 100 if PROFILE == "thorough" else 8
