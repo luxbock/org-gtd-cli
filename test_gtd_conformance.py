@@ -335,3 +335,21 @@ def test_s7row9_move_zone_guard(cli):
     assert result.ok is False
     assert rc != 0
     assert cli.read_skeleton() == model.skeleton()
+
+
+@pytest.mark.xfail(reason="§7 row 14 (#34): reorder never runs on "
+                          "top-level sibling groups (level guard); ruled "
+                          "2026-08-02 to sort as an implicit category bucket",
+                   strict=True)
+def test_s7row14_toplevel_group_sorts_as_category_bucket(cli):
+    # Uniform flat top-level group (NEXT is illegal at top level, so
+    # the bucket's zones are TODO/WAITING -> DEFER -> closed).
+    model = Model([
+        Node("aa", "TODO"), Node("bb", "TODO"), Node("dd", "DEFER"),
+    ], Divergences.normative())
+    _, rc, result = run_normative(
+        cli, model, "set_state", ("aa", "DEFER"), {})
+    assert rc == 0 and result.ok
+    # Normative: aa sinks to the top of the DEFER block; today's CLI
+    # leaves top-level order untouched.
+    assert cli.read_skeleton() == model.skeleton()

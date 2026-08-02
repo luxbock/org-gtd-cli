@@ -479,3 +479,4 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 11 | A WAITING leaf gaining its first task child keeps WAITING on what is now a subproject heading; no demotion, no `project-needs-review` | §4.0 (keyword-outgrown repair), §4.3, §4.8 | #56 |
 | 12 | `refile --to` resolves by first match in document order (silent on duplicates); refile reports none of its repairs as side effects | §4.0, §4.8 | #57 |
 | 13 | Task traversal pierces category headings: the closure guard (I4), activity/stuckness predicates, and project detection treat tasks below category headings as task descendants; closing or archiving over open severed tasks emits no warning | §2 (severing), §4.4, §4.11, §5.2 | #58 |
+| 14 | The reorder primitive never runs on top-level sibling groups (level-1 guard): a uniform flat top-level task group keeps its order on every state change | §4.1 — top-level tasks form an implicit category bucket and sort like one (ruling 2026-08-02) | #34 |
