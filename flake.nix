@@ -37,6 +37,9 @@
 
           checks = {
             org-gtd-cli-tests = orgGtdCli.passthru.tests;
+            # Fast elisp sanity gate (paren balance + strict byte-compile of
+            # committed sources) — fails in seconds, before the pytest suite.
+            org-gtd-cli-elcheck = orgGtdCli.passthru.elispCheck;
             default = orgGtdCli.passthru.tests;
           };
 
