@@ -2329,18 +2329,54 @@ order.  Never modifies the buffer."
                       (count . ,count)))))
               (nreverse order)))))))
 
+(defun org-gtd-cli/duplicate-heading-warning (file heading)
+  "Return the `duplicate-heading' warnings list for HEADING in FILE.
+Read-only scan of FILE's widened buffer, meant to run right after a
+create (#64).  Counts ALL headings whose bare heading text
+(`org-get-heading' t t t t — TODO keyword, priority and tags stripped)
+equals HEADING — the collision key is (file, bare heading text), the
+same key `org-gtd-cli/duplicate-idless-warnings' (#32) groups by, minus
+its id-less restriction: headings collide here whether or not they carry
+an `:ID:'/`:entry-id:'.  When two or more share the key, returns a
+single-entry list
+  (((type . \"duplicate-heading\") (file . REL) (heading . HEADING)
+    (count . N)))
+where N is the total number of headings sharing the key and REL is FILE
+relative to `org-directory'; otherwise nil.  Never modifies the buffer."
+  (with-current-buffer (find-file-noselect file)
+    (org-with-wide-buffer
+     (let ((count 0)
+           (rel (org-gtd-cli/relative-filename (or (buffer-file-name) file))))
+       (goto-char (point-min))
+       (while (re-search-forward org-heading-regexp nil t)
+         (goto-char (line-beginning-position))
+         (when (equal (org-get-heading t t t t) heading)
+           (cl-incf count))
+         (forward-line 1))
+       (when (>= count 2)
+         (list `((type . "duplicate-heading")
+                 (file . ,rel)
+                 (heading . ,heading)
+                 (count . ,count))))))))
+
 (defun org-gtd-cli/warnings-vector (warnings)
   "Return WARNINGS (a list of warning alists) as a JSON vector."
   (apply #'vector warnings))
 
 (defun org-gtd-cli/print-warnings-text (warnings)
   "Print one `Warning:' line per entry in WARNINGS to stderr.
-In batch Emacs `message' writes to stderr; stdout output is untouched."
+In batch Emacs `message' writes to stderr; stdout output is untouched.
+The message text dispatches on each entry's `type'."
   (dolist (w warnings)
-    (message "Warning: %d id-less headings share the heading \"%s\" in %s (add an :ID:/:entry-id: or dedupe)"
-             (alist-get 'count w)
-             (alist-get 'heading w)
-             (alist-get 'file w))))
+    (if (equal (alist-get 'type w) "duplicate-heading")
+        (message "Warning: %d headings share the heading \"%s\" in %s"
+                 (alist-get 'count w)
+                 (alist-get 'heading w)
+                 (alist-get 'file w))
+      (message "Warning: %d id-less headings share the heading \"%s\" in %s (add an :ID:/:entry-id: or dedupe)"
+               (alist-get 'count w)
+               (alist-get 'heading w)
+               (alist-get 'file w)))))
 
 ;; --- outline ---
 
@@ -2779,7 +2815,7 @@ any state (including DONE) and plain category/note headings."
     (unless (file-exists-p target-file)
       (org-gtd-cli/error "Error: file not found: %s" target-file)
       (kill-emacs 1))
-    (let (matched-path)
+    (let (matched-path new-buf-pos warnings)
       (with-current-buffer (find-file-noselect target-file)
         (org-with-wide-buffer
          (if use-category
@@ -2833,31 +2869,58 @@ any state (including DONE) and plain category/note headings."
                  (let ((target-level (1+ (nth 1 match))))
                    (org-end-of-subtree t)
                    (unless (bolp) (insert "\n"))
-                   (insert (org-gtd-cli/build-entry
-                            target-level todo-state title
-                            priority tags-csv schedule deadline body
-                            (when schedule time-str)
-                            (when deadline time-str))
-                           "\n")
+                   (let ((new-pos (point)))
+                     (insert (org-gtd-cli/build-entry
+                              target-level todo-state title
+                              priority tags-csv schedule deadline body
+                              (when schedule time-str)
+                              (when deadline time-str))
+                             "\n")
+                     ;; Assign an org :ID: at creation (parity with
+                     ;; `add-subtask''s child-id handling, #64).
+                     (save-excursion
+                       (goto-char new-pos)
+                       (org-id-get-create))
+                     (setq new-buf-pos (cons (current-buffer) new-pos)))
                    ;; Remove orphaned blank lines at insertion point
                    (while (and (not (eobp)) (looking-at-p "\n"))
                      (delete-char 1)))))
            ;; Append to end of file
            (goto-char (point-max))
            (unless (bolp) (insert "\n"))
-           (insert "\n" (org-gtd-cli/build-entry
-                         1 todo-state title
-                         priority tags-csv schedule deadline body
-                         (when schedule time-str)
-                         (when deadline time-str)))
-           (insert "\n")))
-        (save-buffer))
+           (insert "\n")
+           (let ((new-pos (point)))
+             (insert (org-gtd-cli/build-entry
+                      1 todo-state title
+                      priority tags-csv schedule deadline body
+                      (when schedule time-str)
+                      (when deadline time-str)))
+             (insert "\n")
+             ;; Assign an org :ID: at creation (parity with `add-subtask''s
+             ;; child-id handling, #64).
+             (save-excursion
+               (goto-char new-pos)
+               (org-id-get-create))
+             (setq new-buf-pos (cons (current-buffer) new-pos)))))
+        (save-buffer)
+        ;; Warn-only duplicate detection (#64): does the created heading's
+        ;; (file, bare heading text) key collide with any pre-existing
+        ;; heading in this file?  Creation already succeeded; exit code is
+        ;; unaffected.
+        (setq warnings
+              (org-gtd-cli/duplicate-heading-warning
+               target-file
+               (org-with-wide-buffer
+                (goto-char (cdr new-buf-pos))
+                (org-get-heading t t t t)))))
       (if org-gtd-cli/json-mode
-          (org-gtd-cli/output
+          (org-gtd-cli/mutation-output
            `((version . 1) (command . "add-task")
              (heading . ,title) (state . ,todo-state)
              (file . ,(org-gtd-cli/relative-filename target-file))
-             (category . ,(or matched-path :null))))
+             (category . ,(or matched-path :null))
+             (warnings . ,(org-gtd-cli/warnings-vector warnings)))
+           new-buf-pos)
         (let ((display-target
                (if use-category
                    (format "%s/%s"
@@ -2865,7 +2928,8 @@ any state (including DONE) and plain category/note headings."
                            matched-path)
                  (org-gtd-cli/relative-filename target-file))))
           (princ (format "Added: %s -> %s (%s)\n" title display-target
-                         (org-gtd-cli/relative-filename target-file)))))))
+                         (org-gtd-cli/relative-filename target-file))))
+        (org-gtd-cli/print-warnings-text warnings))))
   (kill-emacs 0))
 
 ;; --- add-subtask ---
@@ -2912,14 +2976,16 @@ any state (including DONE) and plain category/note headings."
          (org-end-of-subtree t)
          (unless (bolp) (insert "\n"))
          (let ((child-pos (point))
-               (child-id nil))
+               (child-id nil)
+               (child-heading nil))
            (insert (org-gtd-cli/build-entry
                     child-level todo-state title
                     priority tags-csv schedule deadline body)
                    "\n")
            (save-excursion
              (goto-char child-pos)
-             (setq child-id (org-id-get-create)))
+             (setq child-id (org-id-get-create))
+             (setq child-heading (org-get-heading t t t t)))
          ;; Remove orphaned blank lines at insertion point
            (while (and (not (eobp)) (looking-at-p "\n"))
              (delete-char 1))
@@ -2932,20 +2998,28 @@ any state (including DONE) and plain category/note headings."
                (goto-char child-pos)
                (org-gtd-cli/reorder-siblings-by-state)))
            (save-buffer)
-           (if org-gtd-cli/json-mode
-               (org-gtd-cli/mutation-output
-                `((version . 1) (command . "add-subtask")
-                  (heading . ,title) (state . ,todo-state)
-                  (file . ,rel-file) (parent . ,parent-heading)
-                  (side_effects . ,(if parent-was-next
-                                       (vector `((action . "state-change")
-                                                 (heading . ,parent-heading)
-                                                 (old_state . "NEXT")
-                                                 (new_state . "TODO")))
-                                     [])))
-                (org-gtd-cli/find-task-by-id child-id))
-             (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
-                            title parent-heading rel-file))))))))
+           ;; Warn-only duplicate detection (#64): does the created child's
+           ;; (file, bare heading text) key collide with any pre-existing
+           ;; heading in this file?  Creation already succeeded; exit code
+           ;; is unaffected.
+           (let ((warnings (org-gtd-cli/duplicate-heading-warning
+                            (buffer-file-name) child-heading)))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/mutation-output
+                  `((version . 1) (command . "add-subtask")
+                    (heading . ,title) (state . ,todo-state)
+                    (file . ,rel-file) (parent . ,parent-heading)
+                    (side_effects . ,(if parent-was-next
+                                         (vector `((action . "state-change")
+                                                   (heading . ,parent-heading)
+                                                   (old_state . "NEXT")
+                                                   (new_state . "TODO")))
+                                       []))
+                    (warnings . ,(org-gtd-cli/warnings-vector warnings)))
+                  (org-gtd-cli/find-task-by-id child-id))
+               (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
+                              title parent-heading rel-file))
+               (org-gtd-cli/print-warnings-text warnings))))))))
   (kill-emacs 0))
 
 ;; --- add-event ---

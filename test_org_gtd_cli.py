@@ -5449,6 +5449,166 @@ class TestJsonMutations:
 
 
 # ===========================================================================
+# add-task creation envelope + duplicate-heading warning (#64)
+# ===========================================================================
+
+
+class TestAddTaskCreateEnvelope:
+    """add-task assigns an :ID: at creation and emits the enriched mutation
+    envelope (task field), like its twin add-subtask always did; both creates
+    now append a warn-only `duplicate-heading` entry when the created
+    heading's (file, bare heading text) key collides (#64)."""
+
+    def test_add_task_json_assigns_id_and_returns_task(self, org_dir):
+        title = "Fresh JSON task with ID"
+        data, stderr, rc = run_cli_json("add-task", title, org_dir=org_dir)
+        assert rc == 0, stderr
+        # Flat fields unchanged
+        assert data["command"] == "add-task"
+        assert data["heading"] == title
+        assert data["state"] == "TODO"
+        assert data["file"] == "inbox.org"
+        # Full task field, same schema as show --json
+        assert "task" in data
+        task = data["task"]
+        for field in [
+            "heading", "state", "priority", "tags", "id", "file",
+            "scheduled", "deadline", "parent", "is_project", "properties",
+            "body", "sessions", "subtasks", "progress",
+        ]:
+            assert field in task, f"Missing task field: {field}"
+        assert task["heading"] == title
+        assert task["id"] is not None
+        # The :ID: property is persisted in the file
+        disk_id = _id_under(org_dir / "inbox.org", title)
+        assert disk_id == task["id"]
+        assert task["properties"]["ID"] == disk_id
+        # Immediately addressable via --id
+        show, stderr, rc = run_cli_json(
+            "show", "--id", task["id"], org_dir=org_dir)
+        assert rc == 0, stderr
+        assert show["heading"] == title
+
+    def test_add_task_with_category_returns_task(self, org_dir):
+        title = "Categorized enveloped task"
+        data, stderr, rc = run_cli_json(
+            "add-task", title, "--category", "Shopping", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["category"] is not None
+        assert data["task"]["heading"] == title
+        assert data["task"]["id"] is not None
+        assert _id_under(org_dir / "tasks.org", title) == data["task"]["id"]
+
+    def test_add_task_unique_create_empty_warnings(self, org_dir):
+        data, stderr, rc = run_cli_json(
+            "add-task", "One of a kind task", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "warnings" in data
+        assert data["warnings"] == []
+
+    def test_add_task_duplicate_create_warns(self, org_dir):
+        title = "Twice created task"
+        first, stderr, rc = run_cli_json("add-task", title, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert first["warnings"] == []
+        second, stderr, rc = run_cli_json("add-task", title, org_dir=org_dir)
+        # Warn-only: creation proceeds, exit code unchanged
+        assert rc == 0, stderr
+        assert second["warnings"] == [
+            {"type": "duplicate-heading", "file": "inbox.org",
+             "heading": title, "count": 2},
+        ]
+        # Both copies exist, each with its own id
+        assert second["task"]["id"] is not None
+        assert second["task"]["id"] != first["task"]["id"]
+
+    def test_add_task_duplicate_counts_idless_colliders(self, org_dir):
+        """The collision key is (file, bare heading text) regardless of ids:
+        a pre-existing id-less heading counts too (fixture 'Buy groceries'
+        in inbox.org carries no :ID:)."""
+        assert _id_under(org_dir / "inbox.org", "Buy groceries") is None
+        data, stderr, rc = run_cli_json(
+            "add-task", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["warnings"] == [
+            {"type": "duplicate-heading", "file": "inbox.org",
+             "heading": "Buy groceries", "count": 2},
+        ]
+
+    def test_add_task_duplicate_text_mode_warns_stderr(self, org_dir):
+        title = "Text mode dup task"
+        stdout, stderr, rc = run_cli("add-task", title, org_dir=org_dir)
+        assert rc == 0
+        assert "Warning:" not in stderr
+        stdout, stderr, rc = run_cli("add-task", title, org_dir=org_dir)
+        assert rc == 0
+        assert f"Added: {title} -> inbox.org (inbox.org)" in stdout
+        assert (
+            'Warning: 2 headings share the heading "%s" in inbox.org' % title
+            in stderr
+        )
+
+    def test_add_subtask_unique_create_empty_warnings(self, org_dir):
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", "Unique sub item",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "warnings" in data
+        assert data["warnings"] == []
+
+    def test_add_subtask_duplicate_create_warns(self, org_dir):
+        """add-subtask under a parent whose file already carries the heading
+        appends the same duplicate-heading entry."""
+        title = "Twice created sub item"
+        first, stderr, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", title, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert first["warnings"] == []
+        second, stderr, rc = run_cli_json(
+            "add-subtask", "Write quarterly report", title, org_dir=org_dir)
+        assert rc == 0, stderr
+        assert second["warnings"] == [
+            {"type": "duplicate-heading", "file": "tasks.org",
+             "heading": title, "count": 2},
+        ]
+
+    def test_add_subtask_duplicate_text_mode_warns_stderr(self, org_dir):
+        title = "Text mode dup sub"
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Write quarterly report", title, org_dir=org_dir)
+        assert rc == 0
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Write quarterly report", title, org_dir=org_dir)
+        assert rc == 0
+        assert "Added subtask:" in stdout
+        assert (
+            'Warning: 2 headings share the heading "%s" in tasks.org' % title
+            in stderr
+        )
+
+    def test_batch_add_task_enrichment(self, org_dir):
+        """The batch form dispatches to the same command function, so its
+        per-item results gain the task field, the persisted :ID:, and the
+        per-item duplicate-heading warning."""
+        title = "Batch enveloped task"
+        data, stderr, rc = run_batch(
+            "add-task", [{"title": title}, {"title": title}], org_dir=org_dir)
+        assert rc == 0
+        first, second = data["results"]
+        assert first["success"] is True
+        assert first["task"]["heading"] == title
+        assert first["task"]["id"] is not None
+        assert first["warnings"] == []
+        assert second["success"] is True
+        assert second["task"]["id"] is not None
+        assert second["task"]["id"] != first["task"]["id"]
+        assert second["warnings"] == [
+            {"type": "duplicate-heading", "file": "inbox.org",
+             "heading": title, "count": 2},
+        ]
+
+
+# ===========================================================================
 # JSON: non-ASCII / locale-independent UTF-8 encoding
 # ===========================================================================
 

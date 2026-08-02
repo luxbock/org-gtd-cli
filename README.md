@@ -137,6 +137,7 @@ sync-conflict entry last).
 Current vocabulary:
 
 - `duplicate-idless-heading` (on `outline` / `agenda-view`) — see below.
+- `duplicate-heading` (on `add-task` / `add-subtask`) — see below.
 - `sync-conflict` (on **all** commands) — see below.
 
 #### `duplicate-idless-heading` — id-less duplicates on `outline` / `agenda-view`
@@ -178,6 +179,37 @@ on **stderr**; stdout carries only the normal output (the indented outline tree
 The `type` string is stable contract surface. This warning is computed per
 command and is confined to the two read commands, but it shares the universal
 `warnings` array with any other applicable warning (e.g. `sync-conflict`).
+
+#### `duplicate-heading` — heading collision observed at create (`add-task` / `add-subtask`)
+
+`add-task` and `add-subtask` — and only they, including their batch forms,
+which delegate to the same implementations — check, right after the create is
+persisted, whether the newly created heading's `(file, bare heading text)` key
+collides with any existing heading in the target file. On a collision the
+envelope's `warnings` array gains one entry:
+
+```json
+{"type": "duplicate-heading", "file": "inbox.org", "heading": "Ship the release notes", "count": 2}
+```
+
+- **One entry per create, covering the created heading's group only** —
+  `count` is the total number of headings in the file sharing the key *after*
+  the create, **including the just-created heading**, so it is always ≥ 2.
+- **The collision key is `(file, bare heading text)` regardless of ids** —
+  bare text per `org-get-heading` (TODO keyword, priority cookie, and tags
+  stripped), the same grouping `duplicate-idless-heading` uses **minus its
+  id-less restriction**: headings collide here whether or not they carry an
+  Org `:ID:` or org-gcal `:entry-id:`. The two names are one word apart, so
+  note the difference: `duplicate-idless-heading` flags *unaddressable*
+  (id-less) duplicates on the two read commands; `duplicate-heading` flags
+  *any* same-name collision observed at create time.
+- **Warn-only.** The exit code is unchanged, and the creation has already
+  been persisted by the time the warning is computed — duplicate headings
+  remain legal org. It is not a `side_effect`: the colliding heading is a
+  pre-existing observed fact, not a state change caused by the mutation.
+- In **text mode** the entry is mirrored as one line on **stderr** —
+  `Warning: N headings share the heading "..." in FILE` — while stdout keeps
+  only the normal `Added: ...` confirmation.
 
 #### `sync-conflict` — pending org-sync conflict (all commands)
 
