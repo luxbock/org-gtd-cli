@@ -568,6 +568,43 @@ emacs --batch -l org -f batch-byte-compile +gtd-core.el
 emacs --batch -l ./+gtd-core.elc -f batch-byte-compile org-gtd-cli.el
 ```
 
+### Elisp editing tools: elcheck and elindent
+
+`org-gtd-cli.el` is large, and the classic way an edit goes wrong is an
+unbalanced delimiter whose only symptom used to be a slow byte-compile or
+pytest run dying with `End of file during parsing` — an error that names the
+end of the file, not the breakage. Two dev-shell scripts (on PATH in
+`nix develop`, defined in `default.nix` from `scripts/`) close that loop:
+
+- **`elcheck`** — run after *every* elisp edit, before the test suite. With no
+  arguments it checks `+gtd-core.el` and `org-gtd-cli.el` in the current
+  directory (or pass explicit paths). Phase 1 runs Emacs `check-parens` and,
+  on imbalance, prints `FILE:LINE:COL` of the spot where the first
+  unterminated expression *starts* — the position to actually look at. Phase 2
+  byte-compiles in the dependency order above, in a scratch directory, with
+  warnings promoted to errors (the tree is warning-clean; a fresh warning is
+  almost always a typo). Completes in well under a second; exits non-zero on
+  any problem.
+- **`elindent FILE.el`** — batch reindent in place, as a *diagnostic*: when
+  elcheck says a form is unterminated but the exact spot is still unclear,
+  reindent and read `git diff` — everything below the breakage reindents
+  wildly, so the start of the runaway cascade brackets the bad form. Expect a
+  few benign one-column diffs even on a pristine file (batch Emacs vs. the
+  Doom setup that wrote it); the signal is the runaway tail, not small drift.
+  Revert with `git checkout -- FILE.el` after diagnosis; don't commit a pure
+  reindent pass.
+
+`nix flake check` runs elcheck over the committed elisp as its own cheap check
+(`org-gtd-cli-elcheck`), so an imbalance fails in seconds instead of surfacing
+mid-suite. The usual caveat applies: it sees committed sources only — for the
+working tree, run `elcheck` directly.
+
+A repair tool was evaluated and rejected: parinfer-rust (indent mode infers
+closing delimiters from indentation) does not round-trip this repo's already
+balanced elisp — it relocates parens in `+gtd-core.el` and hard-errors on
+`org-gtd-cli.el` — so there is deliberately no `elfix`. Fix delimiters by
+hand, guided by elcheck's position and elindent's diff.
+
 ## License
 
 MIT

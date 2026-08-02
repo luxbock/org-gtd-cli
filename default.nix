@@ -7,6 +7,7 @@
   python3,
   python3Packages,
   runCommand,
+  writeShellApplication,
   writeShellScriptBin,
   symlinkJoin,
 }:
@@ -59,6 +60,28 @@ let
     exec ${python3}/bin/python3 ${pythonScript} "$@"
   '';
 
+  # Agent-facing elisp dev tooling (README "Elisp changes"): fast feedback
+  # for the classic failure mode of chasing an unbalanced paren through slow
+  # byte-compile/pytest cycles whose "End of file during parsing" carries no
+  # position. Shipped via testInputs so `nix develop` — and therefore
+  # agent-vm workers — have them on PATH.
+  elcheck = writeShellApplication {
+    name = "elcheck";
+    runtimeInputs = [
+      coreutils
+      emacsWithHtmlize
+    ];
+    text = builtins.readFile ./scripts/elcheck.sh;
+  };
+  elindent = writeShellApplication {
+    name = "elindent";
+    runtimeInputs = [
+      coreutils
+      emacsWithHtmlize
+    ];
+    text = builtins.readFile ./scripts/elindent.sh;
+  };
+
   # The complete dev/test environment. Kept exhaustive on purpose: a
   # factory VM worker gets everything the suite needs from `nix develop`
   # alone (2026-07-31 ruling on #45) — no host-provided extras.
@@ -70,6 +93,8 @@ let
     python3Packages.pytest
     python3Packages.pytest-xdist
     python3Packages.hypothesis
+    elcheck
+    elindent
   ];
 
 in
@@ -86,6 +111,21 @@ symlinkJoin {
 
   passthru = {
     inherit testInputs;
+
+    # Cheap fail-fast flake check: paren balance + strict byte-compile of
+    # the committed elisp, so `nix flake check` reports an imbalance in
+    # seconds instead of burying it in the pytest suite's output.
+    elispCheck =
+      runCommand "org-gtd-cli-elcheck"
+        {
+          nativeBuildInputs = [ elcheck ];
+        }
+        ''
+          cp ${coreFile} +gtd-core.el
+          cp ${elispFile} org-gtd-cli.el
+          elcheck
+          touch $out
+        '';
 
     tests =
       runCommand "org-gtd-cli-tests"
