@@ -30,7 +30,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 
 from conftest import tier2_max_examples
 from gtd_reference_model import (
@@ -161,6 +161,34 @@ def model_side_effects(result):
 # The generative conformance property (current mode — must be green)
 # ---------------------------------------------------------------------------
 
+# Deterministic pins for the narrow reorder shapes whose hand-written
+# regression tests were DROPped into this property (see
+# test-migration-manifest.md, TestAddSubtaskStateReorder): under the
+# fast profile's small budget these shapes arise rarely per default
+# run, so each is pinned as an @example — one CLI dispatch apiece,
+# per the conftest.py rule that inputs worth keeping live in test code.
+@example(model_and_ops=(
+    # add-subtask DONE onto a parent whose children are NEXT-then-TODO
+    # (the issue-#20 shape of the dropped test_add_done_reorders_above_next)
+    Model([Node("proj", "TODO", children=[
+        Node("aa", "NEXT"), Node("bb", "TODO")])],
+        Divergences.normative()),
+    [("add_subtask", ("proj", "new900", "DONE"), {})],
+))
+@example(model_and_ops=(
+    # add-subtask NEXT to an empty parent (dropped
+    # test_add_next_to_empty_parent)
+    Model([Node("proj", "TODO")], Divergences.normative()),
+    [("add_subtask", ("proj", "new901", "NEXT"), {})],
+))
+@example(model_and_ops=(
+    # add-subtask NEXT above existing TODO siblings (dropped
+    # test_add_next_reorders_above_todo)
+    Model([Node("proj", "TODO", children=[
+        Node("aa", "TODO"), Node("bb", "TODO")])],
+        Divergences.normative()),
+    [("add_subtask", ("proj", "new902", "NEXT"), {})],
+))
 @given(models_and_ops())
 @settings(max_examples=tier2_max_examples(), deadline=None)
 def test_cli_conforms_to_current_mode_model(cli, model_and_ops):

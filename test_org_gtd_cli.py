@@ -1470,6 +1470,7 @@ class TestDone:
 
 class TestSetState:
     def test_changes_state(self, org_dir):
+        # pins §7 row 5 (#39)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         assert rc == 0
         assert "NEXT -> WAITING (tasks.org)" in stdout
@@ -1504,6 +1505,7 @@ class TestSetState:
         assert reason in drawer
 
     def test_without_reason_does_not_add_reason_note(self, org_dir):
+        # pins §7 row 5 (#39)
         stdout, stderr, rc = run_cli(
             "set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         assert rc == 0
@@ -1511,6 +1513,8 @@ class TestSetState:
         assert "\\\\" not in drawer
 
     def test_waiting_adds_tag(self, org_dir):
+        # pins §7 row 5 (#39)
+        # pins §7 row 6 (#40)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         assert rc == 0
         assert ":WAITING:" in (org_dir / "tasks.org").read_text()
@@ -1527,6 +1531,7 @@ class TestSetState:
         assert "NEXT Book a rental car" in (org_dir / "tasks.org").read_text()
 
     def test_preserves_priority_cookie(self, org_dir):
+        # pins §7 row 5 (#39)
         # WAITING (not NEXT): "Pay quarterly taxes" is a standalone task, and
         # NEXT is now rejected on non-project tasks. Priority-cookie handling
         # is identical across state changes.
@@ -1541,6 +1546,8 @@ class TestSetState:
         assert "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" in stderr
 
     def test_defer_to_waiting_cleans_defer_tag(self, org_dir):
+        # pins §7 row 5 (#39)
+        # pins §7 row 6 (#40)
         # Multi-step: DEFER then WAITING
         run_cli("set-state", "Book a rental car", "DEFER", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
@@ -1550,6 +1557,8 @@ class TestSetState:
         assert ":DEFER:" not in text
 
     def test_waiting_to_todo_cleans_waiting_tag(self, org_dir):
+        # anchor §7 row 5 (#39) — non-flipping: only the unasserted WAITING
+        # setup call changes under #39; the TODO assertions stay green
         # Multi-step: WAITING then TODO
         run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "TODO", org_dir=org_dir)
@@ -1654,6 +1663,7 @@ class TestSetPriority:
         assert "[#A] Buy groceries" in (org_dir / "inbox.org").read_text()
 
     def test_change_priority_a_to_c(self, org_dir):
+        # pins §7 row 7 (#41)
         # Set A first, then change to C
         run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "C", org_dir=org_dir)
@@ -1662,6 +1672,8 @@ class TestSetPriority:
         assert "[#C] Buy groceries" in (org_dir / "inbox.org").read_text()
 
     def test_clear_priority(self, org_dir):
+        # anchor §7 row 7 (#41) — non-flipping: only the unasserted 'C' setup
+        # call changes under #41; the --clear assertions stay green
         run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         run_cli("set-priority", "Buy groceries", "C", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "--clear", org_dir=org_dir)
@@ -1675,6 +1687,7 @@ class TestSetPriority:
         assert "Cleared priority:" in stdout
 
     def test_invalid_priority(self, org_dir):
+        # pins §7 row 7 (#41)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "D", org_dir=org_dir)
         assert rc == 1
         assert "not a valid priority" in stderr
@@ -1687,6 +1700,7 @@ class TestSetPriority:
         assert "[#A] Buy groceries" not in (org_dir / "inbox.org").read_text()
 
     def test_change_existing_priority(self, org_dir):
+        # pins §7 row 7 (#41)
         stdout, stderr, rc = run_cli("set-priority", "Pay quarterly taxes", "C", org_dir=org_dir)
         assert rc == 0
         assert "[#A] -> [#C]" in stdout
@@ -3224,109 +3238,26 @@ class TestArchiveBatch:
 # ===========================================================================
 
 class TestSiblingReordering:
+    # Pure skeleton-order assertions after state-mutation ops (set-done,
+    # set-state, set-next, set-state CANCELLED, set-state DEFER/WAITING,
+    # mixed-group no-move, top-level singleton) migrated into the
+    # tier-1/tier-2 conformance suite (issue #45 part 2, kwn.3):
+    #
+    #   test_gtd_model_properties.py::test_invariants_preserved_by_any_operation_sequence
+    #   test_gtd_model_properties.py::test_minimal_move_preserves_active_interleaving
+    #   test_gtd_model_properties.py::test_same_boundary_class_transition_never_moves_anyone
+    #   test_gtd_model_properties.py::test_mixed_groups_are_never_reordered
+    #   test_gtd_conformance.py::test_cli_conforms_to_current_mode_model
+    #
+    # Only the NEXT→WAITING skip-sort pin (§7 row 1 / #34) remains — it
+    # asserts a scenario where current and normative outputs disagree.
+
     def _write_reorder_org(self, org_dir, content):
         (org_dir / "reorder.org").write_text(content)
 
-    def test_done_reorders_above_next(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* Project A
-** DONE Already done
-** NEXT Active task
-** TODO Target task
-** TODO Another task
-""")
-        stdout, stderr, rc = run_cli("set-done", "Target task", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert "DONE Target task" in f.read_text()
-        assert_line_before(f, "DONE Target task", "NEXT Active task")
-        assert_line_before(f, "DONE Already done", "DONE Target task")
-
-    def test_done_auto_progress_reorders_both(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project B
-** DONE Old done
-** NEXT Current task
-** TODO First todo
-** TODO Second todo
-** TODO Third todo
-""")
-        stdout, stderr, rc = run_cli("set-done", "Current task", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        text = f.read_text()
-        assert "DONE Current task" in text
-        assert "NEXT First todo" in text
-        assert_line_before(f, "DONE Current task", "NEXT First todo")
-        assert_line_before(f, "NEXT First todo", "TODO Second todo")
-
-    def test_set_state_reorders(self, org_dir):
-        # Project C carries a TODO keyword so its children are project-internal
-        # and thus eligible for NEXT (the non-project NEXT guard).
-        self._write_reorder_org(org_dir, """\
-* TODO Project C
-** DONE Old done
-** NEXT Active
-** TODO Alpha
-** TODO Beta
-""")
-        stdout, stderr, rc = run_cli("set-state", "Beta", "NEXT", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "DONE Old done", "NEXT Active")
-        assert_line_before(f, "NEXT Beta", "TODO Alpha")
-
-    def test_set_next_reorders_promoted_task(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project D
-** DONE Old done
-** TODO Alpha
-** TODO Beta
-""")
-        stdout, stderr, rc = run_cli("set-next", "Project D", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert "NEXT Alpha" in f.read_text()
-        assert_line_before(f, "DONE Old done", "NEXT Alpha")
-        assert_line_before(f, "NEXT Alpha", "TODO Beta")
-
-    def test_cancelled_sorts_with_done(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* Project E
-** TODO Alpha
-** TODO Beta
-""")
-        stdout, stderr, rc = run_cli("set-state", "Alpha", "CANCELLED", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "CANCELLED Alpha", "TODO Beta")
-
-    def test_waiting_defer_ordering(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* Project F
-** TODO Alpha
-** TODO Beta
-""")
-        run_cli("set-state", "Alpha", "DEFER", org_dir=org_dir)
-        stdout, stderr, rc = run_cli("set-state", "Beta", "WAITING", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "WAITING Beta", "DEFER Alpha")
-
-    def test_todo_to_waiting_preserves_sibling_position(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* Project G
-** TODO Alpha
-** TODO Gate
-** TODO Beta
-""")
-        stdout, stderr, rc = run_cli("set-state", "Gate", "WAITING", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "TODO Alpha", "WAITING Gate")
-        assert_line_before(f, "WAITING Gate", "TODO Beta")
-
     def test_next_to_waiting_preserves_sibling_position(self, org_dir):
+        # pins §7 row 1 (#34)
+        # pins §7 row 5 (#39)
         self._write_reorder_org(org_dir, """\
 * TODO Project H
 ** TODO Alpha
@@ -3339,94 +3270,29 @@ class TestSiblingReordering:
         assert_line_before(f, "TODO Alpha", "WAITING Gate")
         assert_line_before(f, "WAITING Gate", "TODO Beta")
 
-    def test_non_task_siblings_skip_reorder(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* Computers
-** Agents
-*** TODO Agent task one
-*** TODO Agent task two
-** Emacs
-*** TODO Emacs task one
-""")
-        stdout, stderr, rc = run_cli("set-state", "Agent task one", "DONE", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "** Agents", "** Emacs")
-
-    def test_top_level_task_skip_reorder(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Top level A
-* TODO Top level B
-""")
-        stdout, stderr, rc = run_cli("set-state", "Top level A", "DONE", org_dir=org_dir)
-        assert rc == 0
-        assert "DONE Top level A" in (org_dir / "reorder.org").read_text()
-
 
 # ===========================================================================
 # 39b. add-subtask: state-aware sibling reorder (Issue #20)
 # ===========================================================================
 
 class TestAddSubtaskStateReorder:
+    # Pure skeleton-order assertions after add-subtask --state X (NEXT,
+    # DONE, CANCELLED, DEFER, TODO, empty-parent, single-child)
+    # migrated into the tier-1/tier-2 conformance suite (issue #45 part
+    # 2, kwn.3):
+    #
+    #   test_gtd_model_properties.py::test_invariants_preserved_by_any_operation_sequence
+    #   test_gtd_conformance.py::test_cli_conforms_to_current_mode_model
+    #
+    # Only the WAITING append-last pin (§7 row 1 / #34) remains — it is
+    # a stage-2c anchor for the arrival-rule fix.
+
     def _write_reorder_org(self, org_dir, content):
         (org_dir / "reorder.org").write_text(content)
 
-    def test_add_next_reorders_above_todo(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project N1
-** TODO Alpha
-** TODO Beta
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project N1", "Gate",
-            "--state", "NEXT", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "NEXT Gate", "TODO Alpha")
-        assert_line_before(f, "NEXT Gate", "TODO Beta")
-
-    def test_add_next_reorders_between_done_and_todo(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project N2
-** DONE Old work
-** TODO Alpha
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project N2", "Gate",
-            "--state", "NEXT", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "DONE Old work", "NEXT Gate")
-        assert_line_before(f, "NEXT Gate", "TODO Alpha")
-
-    def test_add_done_reorders_above_next(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project D1
-** NEXT Active
-** TODO Alpha
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project D1", "Archive item",
-            "--state", "DONE", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "DONE Archive item", "NEXT Active")
-        assert_line_before(f, "NEXT Active", "TODO Alpha")
-
-    def test_add_cancelled_reorders_above_todo(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project C1
-** TODO Alpha
-** TODO Beta
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project C1", "Aborted item",
-            "--state", "CANCELLED", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "CANCELLED Aborted item", "TODO Alpha")
-
     def test_add_waiting_preserves_end_position(self, org_dir):
+        # anchor §7 row 1 (#34) — non-flipping: current and normative outputs
+        # agree in this fixture; #34's stage-2c work touches this code path
         self._write_reorder_org(org_dir, """\
 * TODO Project W1
 ** TODO Alpha
@@ -3442,59 +3308,6 @@ class TestAddSubtaskStateReorder:
         # 3f0802b).
         assert_line_before(f, "TODO Alpha", "WAITING Hold item")
         assert_line_before(f, "TODO Beta", "WAITING Hold item")
-
-    def test_add_defer_preserves_end_position(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project F1
-** TODO Alpha
-** TODO Beta
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project F1", "Defer item",
-            "--state", "DEFER", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "TODO Alpha", "DEFER Defer item")
-        assert_line_before(f, "TODO Beta", "DEFER Defer item")
-
-    def test_add_todo_preserves_end_position(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project T1
-** DONE Old work
-** NEXT Active
-** TODO Alpha
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project T1", "New todo", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        # Default state is TODO. It should be inserted at end, not
-        # bubbled up.
-        assert_line_before(f, "TODO Alpha", "TODO New todo")
-
-    def test_add_next_to_empty_parent(self, org_dir):
-        self._write_reorder_org(org_dir, """\
-* TODO Project N3
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project N3", "First child",
-            "--state", "NEXT", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert "NEXT First child" in f.read_text()
-
-    def test_add_next_with_single_child(self, org_dir):
-        # Existing single child, add NEXT — should move to top of siblings.
-        self._write_reorder_org(org_dir, """\
-* TODO Project N4
-** TODO Only child
-""")
-        stdout, stderr, rc = run_cli(
-            "add-subtask", "Project N4", "Gate",
-            "--state", "NEXT", org_dir=org_dir)
-        assert rc == 0
-        f = org_dir / "reorder.org"
-        assert_line_before(f, "NEXT Gate", "TODO Only child")
 
 
 # ===========================================================================
@@ -5363,6 +5176,7 @@ class TestJsonMutations:
         )
 
     def test_set_state_json(self, org_dir):
+        # pins §7 row 5 (#39)
         data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", org_dir=org_dir)
         assert rc == 0
         assert data["command"] == "set-state"
@@ -5370,6 +5184,7 @@ class TestJsonMutations:
         assert data["new_state"] == "WAITING"
 
     def test_set_state_dry_run_json(self, org_dir):
+        # pins §7 row 5 (#39) — dry-run must predict the #39 failure
         data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", "--dry-run", org_dir=org_dir)
         assert rc == 0
         assert data["dry_run"] is True
@@ -7301,7 +7116,15 @@ class TestDaemonManagementCommands:
         sock = id_dir / "server"
         sock.write_text("")
         (id_dir / "emacs.d").mkdir(exist_ok=True)
-        swap = "(progn (delete-file server-name) (write-region \"\" nil server-name))" \
+        # Simulate the orphan case with `rename-file' from a temp file created
+        # in a separate directory: this guarantees a genuinely different inode
+        # on filesystems (virtiofs / some overlays) where `delete-file' +
+        # `write-region' at the same path can reuse the just-freed inode and
+        # leave the guard unable to detect the swap. In production the Python
+        # wrapper unlinks the socket and a successor daemon binds a fresh one,
+        # which is likewise a distinct inode — the harness now matches that.
+        swap = ("(let ((tmp (make-temp-file \"ogc-sock-swap-\")))"
+                " (rename-file tmp server-name t))") \
             if replace_socket else "nil"
         # `--eval' evaluates exactly ONE form, so everything goes in a progn.
         # `user-emacs-directory' must be set BEFORE the load, exactly as
@@ -8456,6 +8279,7 @@ class TestBatchExtendedCommands:
 
     def test_batch_set_state(self, org_dir):
         """--batch set-state changes TODO state per item."""
+        # pins §7 row 5 (#39)
         data, stderr, rc = run_batch(
             "set-state",
             # NEXT is rejected on freestanding tasks, so use DEFER for the
@@ -9278,6 +9102,7 @@ class TestStableIdAddressing:
 
     def test_lazy_create_on_substring_mutation(self, org_dir):
         """A substring mutation on an id-less task lazily creates a stable :ID:."""
+        # pins §7 row 5 (#39)
         inbox = org_dir / "inbox.org"
         assert _id_under(inbox, "Buy groceries") is None
         # WAITING, not NEXT: Buy groceries is a freestanding inbox task and NEXT
@@ -9292,6 +9117,7 @@ class TestStableIdAddressing:
 
     def test_lazy_id_round_trips(self, org_dir):
         """A freshly lazy-created id is immediately resolvable by --id."""
+        # pins §7 row 5 (#39)
         inbox = org_dir / "inbox.org"
         rc = run_cli("set-state", "Buy groceries", "WAITING", org_dir=org_dir)[2]
         assert rc == 0
@@ -9304,6 +9130,7 @@ class TestStableIdAddressing:
 
     def test_dry_run_does_not_create_id(self, org_dir):
         """--dry-run on an id-less task must NOT create an :ID:."""
+        # pins §7 row 5 (#39) — dry-run must predict the #39 failure
         inbox = org_dir / "inbox.org"
         before = inbox.read_bytes()
         stdout, stderr, rc = run_cli(

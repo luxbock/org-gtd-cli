@@ -161,8 +161,10 @@ including the demotion repairs of §4.0, or NEXT→WAITING) moves
 minimally to immediately **below the NEXT prefix**; a task entering
 WAITING **from TODO** keeps its position. A task **reopening out of
 the completed block** — or leaving the DEFER block — into the active
-zone lands at the **end of the active zone**, matching the arrival
-rule below; the closure-repair cascade (§4.0) applies this per
+zone lands at the **end of its zone**, matching the arrival rule
+below: a reopen to NEXT (`set-next` on a closed leaf, §4.7) at the
+end of the NEXT prefix; a reopen to TODO/WAITING at the end of the
+active zone. The closure-repair cascade (§4.0) applies this per
 reopened ancestor, in that ancestor's own sibling group. Mixed groups:
 never reordered.
 
