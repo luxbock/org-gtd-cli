@@ -125,7 +125,8 @@ unique-or-error — I12 applies to destinations exactly as to targets.
 Every state change is stamped in the task's LOGBOOK drawer (I10).
 Mutations report the resulting task state, plus a `side_effects` list
 naming every machine-made change beyond the addressed heading
-(promotions, demotions, reopenings, unblocks, `project-needs-review`)
+(promotions, demotions, reopenings, unblocks, `blocker-link-removed`,
+`project-needs-review`)
 — every command emits the same vocabulary for the same repair, `refile`
 included. Placement moves (§4.1) are **never** side effects: placement
 is presentation, not a state change. `--dry-run`, where offered, must
@@ -328,7 +329,9 @@ open TODO); the stuck view (I11) catches it.
 **WAITING exit cleanup.** Any CLI-driven exit from WAITING — the
 wake, `set-state`, `set-next`, a close, the §4.0 keyword-outgrown
 demotion — removes `:REASON:` and unwinds the `TRIGGER`/`BLOCKER`
-pair (the LOGBOOK record stays, I10).
+pair (the LOGBOOK record stays, I10). The unwind is reported as a
+`blocker-link-removed` side effect — the same name delete's unwind
+(§4.12) emits (§4.0: same vocabulary for the same repair).
 
 *Divergences (#46): today the NEXT guard admits subproject headings,
 WAITING is accepted on project headings, and a blocked DONE/CANCELLED
