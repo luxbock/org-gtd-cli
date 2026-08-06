@@ -83,8 +83,8 @@ Keywords: `TODO`, `NEXT`, `WAITING`, `DEFER` (open) · `DONE`,
 - **NEXT** — the project's active front (project-internal; see
   legality). Default one per project; parallel fronts are declared by
   hand, never minted by the machine.
-- **WAITING** — blocked on a concrete external event (reason or blocker
-  link required at CLI entry — §4.6).
+- **WAITING** — blocked on a concrete external event (CLI entry only
+  via `set-state`, reason or blocker link required — §4.6).
 - **DEFER** — deliberately shelved; invisible to promotion; sinks to
   the bottom zone.
 - **DONE** — completed **and accepted**.
@@ -187,21 +187,29 @@ and `add-task`/`add-subtask` append last with no zone placement — #34.*
 Files a freestanding task: to inbox.org (default), a named file, or
 under a category heading in tasks.org. Pre: target category resolves
 uniquely; state ≠ NEXT (a freestanding task is never NEXT — I3;
-rejected at entry). Post: task placed in the target group per §4.1's
+rejected at entry); state ≠ WAITING (create never mints WAITING —
+enter it via `set-state`, whose §4.6 guardrail applies; rejected at
+entry). Post: task placed in the target group per §4.1's
 arrival rule (end of its zone; in an all-open inbox this coincides
 with append-last); body/tags/schedule/deadline/priority as given.
+*Divergence: `--state WAITING` is accepted at create — row 5.*
 
 ### 4.3 add-subtask
 
 Adds a child task under an existing task heading. Pre: parent is a
-task (category headings never match). Post: child placed per §4.1's
+task (category headings never match); state ≠ WAITING (create never
+mints WAITING — enter it via `set-state`, whose §4.6 guardrail
+applies; rejected at entry). Post: child placed per §4.1's
 arrival rule (end of its zone); the §4.0 repairs run as needed — a
 closed parent chain reopens (closure repair, the child being an open
 arrival), a NEXT or WAITING parent gaining its first task child is
 demoted (keyword-outgrown repair; the WAITING case also emits
 `project-needs-review`). `--state NEXT` here is a legal
 *hand-declared* parallel front (§3): the machine never mints a second
-front (I6), but the user may.
+front (I6), but the user may. (An accepted asymmetry: NEXT may be
+minted at create, WAITING may not — WAITING's guardrail lives on its
+`set-state` entry.) *Divergence: `--state WAITING` is accepted at
+create — row 5.*
 
 ### 4.4 set-done / set-cancelled
 
@@ -278,8 +286,9 @@ NEXT-exit moves below the NEXT prefix; WAITING entered from TODO keeps
 its position); reopening a task below closed ancestors runs the §4.0
 closure repair (the ancestor chain reopens, with side effects).
 
-**WAITING entry.** Entering WAITING via the CLI requires at least one
-of a reason or a blocker link; a bare WAITING is rejected at entry.
+**WAITING entry.** `set-state` is the only CLI entry into WAITING
+(the create commands never mint it — §4.2/§4.3). Entry requires at
+least one of a reason or a blocker link; a bare WAITING is rejected.
 `--reason` writes a single-line `:REASON:` property.
 `--blocked-by SUBSTR` / `--blocked-by-id ID` (combinable with
 `--reason` and with each other) link the entering task to a blocking
@@ -298,8 +307,9 @@ as **NEXT** iff (a) no open sibling (NEXT/TODO/WAITING) precedes it in
 document order within its sibling group, ignoring the completed and
 DEFER blocks, and (b) the group contains no NEXT — exactly when the
 WAITING task was standing in for the group's front; otherwise it
-wakes as plain **TODO**. Under I5 the two conditions coincide; both
-are stated so the rule stays robust on hand-edited buffers. Position
+wakes as plain **TODO**. Under I5, (a) implies (b) but not
+conversely; (b) is stated so the rule is explicit and robust, and the
+(b)-without-(a) case is precisely the accepted residual below. Position
 never changes in either case, and the §4.5 promotion rule does not
 run (I9). Accepted residual: when the group has no NEXT and the woken
 task is not first, the project is left with no front — deliberately
@@ -460,11 +470,14 @@ Block membership, defined on §2/§3 + 5.2 (the state-semantic blocks):
   project-internal-and-surfaced-elsewhere nor WAITING/DEFER; the same
   DEFER/WAITING/CANCELLED ancestor-state exclusion as Next Tasks
   applies.
-- **Waiting** — WAITING tasks; future-scheduled ones hidden until due;
-  rows carry `waiting_reason`/`blocked_by` (§5.5).
+- **Waiting** — WAITING tasks; deferred(t) tasks excluded — shelved
+  WAITING work is represented by the DEFER ancestor's row;
+  future-scheduled ones hidden until due; rows carry
+  `waiting_reason`/`blocked_by` (§5.5).
 - **Stuck Projects** — exactly {p : stuck(p)} (subprojects included:
   stuckness is evaluated per project heading).
-- **Projects** — all open, non-DEFER projects.
+- **Projects** — all open, non-deferred (§5.2 — own or ancestor
+  DEFER) projects.
 - **Deferred** — own-state DEFER tasks only: a task under a DEFER
   ancestor is represented by that ancestor's row, never listed
   individually; future-dated hidden until due; stuck projects
@@ -543,7 +556,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
 | 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
 | 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
-| 5 | WAITING entry requires no reason/blocker; no blocker links, no auto-unblock (conditional wake), no exit cleanup, no `waiting_reason`/`blocked_by` surfacing | §4.4, §4.6, §5.5 | #39 |
+| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no exit cleanup, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §5.5 | #39 |
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
