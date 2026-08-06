@@ -406,13 +406,32 @@ promotion. *Divergence: set-priority validation not yet implemented —
 
 ### 4.11 archive
 
-Retires a finished record. Pre: the task is closed (DONE/CANCELLED)
-AND was created over a month ago. Post: the subtree moves to the
+Retires a finished record. Pre: the task is closed (DONE/CANCELLED),
+was created over a month ago, AND carries no `TRIGGER` entry (§4.6)
+resolving to an **open** task (below). Post: the subtree moves to the
 archive file; the history is preserved there. Open tasks below the
 subtree's category headings do not block archiving (§2 severing), but
 the archive **observes** them with the same `warnings` entry as §4.4 —
 open severed work is never silently relocated into the archive. Never
 triggers promotion: it relocates a record, it doesn't close work.
+
+**Blocker eligibility (ruling 2026-08-07).** The third criterion is
+§4.12's blocker protection in eligibility form, not a rejection with
+new machinery: the command already considers eligible tasks only, so
+single-task `archive` on a held-back blocker fails the same way it
+would fail the age check, and `archive --all` simply does not select
+it. It covers the multi-blocker corner: blocker B1 closes while its
+sibling blocker B2 stays open — the §4.4 AND-gate has not fired, and
+B1's `TRIGGER` still points at the open waiting task. Archiving B1
+would relocate it where its id may no longer resolve when B2 later
+closes and the gate asks whether **all** blockers are closed. The
+criterion holds B1 back exactly until the gate fires: the wake is a
+WAITING exit, so the §4.6 cleanup unwinds the pair — B1 becomes
+eligible with no special casing. A `TRIGGER` id that resolves to a
+*closed* task, or does not resolve at all, never blocks eligibility —
+that is the debris §4.4's close-time silent drop already tolerates.
+*Divergence: the blocker eligibility criterion does not exist — row
+5.*
 
 ### 4.12 delete
 
@@ -438,7 +457,8 @@ blocker really was mis-added, first take the waiting task out of
 WAITING (the §4.6 exit cleanup unwinds the `TRIGGER`/`BLOCKER` pair);
 the now-linkless task then deletes normally. A `TRIGGER` id that does
 **not** resolve never trips the guard — nothing actually waits, and
-the dangling debris disappears with the deletion.
+the dangling debris disappears with the deletion. Archive applies the
+same protection as an eligibility criterion (§4.11).
 
 The guard is role-based, not state-based — what it protects is being
 waited **on** — and deliberately one-directional: a waiting task that
@@ -614,7 +634,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
 | 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
 | 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
-| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no blocker-side delete guard, no waiting-side delete unwind, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.12, §5.5 | #39 |
+| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no blocker-side delete guard, no waiting-side delete unwind, no archive blocker-eligibility criterion, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.11, §4.12, §5.5 | #39 |
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state; and the Waiting block has no DEFER-ancestor exclusion at all (its matcher's tag part cannot use the inherited `:WAITING:` tag, which the row itself carries) | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
