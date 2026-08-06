@@ -241,7 +241,8 @@ firing flip wakes the task per §4.6's conditional wake and is
 reported as an `unblocked` side effect naming the woken task and its
 new state. A `TRIGGER` id that no longer resolves is dropped silently
 at close time (defensive — it covers on-disk states created outside
-the CLI). *Divergence: no auto-unblock exists — row 5.*
+the CLI, which the §4.12 delete guard cannot police). *Divergence: no
+auto-unblock exists — row 5.*
 
 *Divergences:
 strip-on-close not yet implemented — #41; the closure guard pierces
@@ -330,8 +331,9 @@ open TODO); the stuck view (I11) catches it.
 wake, `set-state`, `set-next`, a close, the §4.0 keyword-outgrown
 demotion — removes `:REASON:` and unwinds the `TRIGGER`/`BLOCKER`
 pair (the LOGBOOK record stays, I10). The unwind is reported as a
-`blocker-link-removed` side effect — the same name delete's unwind
-(§4.12) emits (§4.0: same vocabulary for the same repair).
+`blocker-link-removed` side effect — the same name delete's
+waiting-side unwind (§4.12) emits (§4.0: same vocabulary for the same
+repair).
 
 *Divergences (#46): today the NEXT guard admits subproject headings,
 WAITING is accepted on project headings, and a blocked DONE/CANCELLED
@@ -417,17 +419,33 @@ widens what delete may destroy, and content the semantics ignore
 (severed task worlds, information headings) is still content. Close or
 empty the subtree first. Post: the subtree is gone
 without trace — for work decided against, CANCELLED is the
-record-keeping alternative. Never triggers promotion. Deleting a task
-that carries `TRIGGER` entries (§4.6 — it blocks WAITING tasks)
-unwinds the pair on every task it blocked: the deleted id is removed
-from each `BLOCKER:` entry, reported as a side effect on the delete
-response. The unwind is symmetric: deleting a task carrying
-`BLOCKER:` entries removes its id from each blocker's `TRIGGER:`
-entry, likewise reported as a side effect. Deletion is not
-completion: the AND-gate never treats a deleted blocker as closed, so
-no wake fires — a task left with no remaining blockers and no
-`:REASON:` stays WAITING, now reason-less (tolerated, §4.6).
-*Divergence: no delete-side unwind exists — row 5.*
+record-keeping alternative. Never triggers promotion.
+
+**Blocker guard (ruling 2026-08-07).** Delete is rejected when the
+target carries a `TRIGGER` entry (§4.6 — it blocks WAITING tasks)
+whose id resolves to an existing task: the error names the blocked
+task(s) and nothing changes. Deletion is reserved for mis-added
+records; a task others wait on has accrued semantic weight and gets
+the careful path — `set-state CANCELLED`, a close op, so it feeds the
+§4.4 AND-gate and, when it closes the last open blocker, fires the
+conditional wake: the waiting task surfaces for re-triage. If the
+blocker really was mis-added, first take the waiting task out of
+WAITING (the §4.6 exit cleanup unwinds the `TRIGGER`/`BLOCKER` pair);
+the now-linkless task then deletes normally. A `TRIGGER` id that does
+**not** resolve never trips the guard — nothing actually waits, and
+the dangling debris disappears with the deletion.
+
+The guard is deliberately one-directional: nobody depends *on* a
+waiting task, and a mis-added WAITING task must stay deletable.
+Deleting a task carrying `BLOCKER:` entries succeeds and removes the
+deleted task's id from each blocker's `TRIGGER:` entry, reported as a
+`blocker-link-removed` side effect on the delete response
+(unresolvable blocker ids are skipped silently). This waiting-side
+unwind never touches the §4.4 gate — the deleted waiter simply stops
+waiting — and the blocker-side path is gone (guarded above), so
+delete never wakes anything.
+*Divergence: neither the blocker guard nor the waiting-side unwind
+exists — row 5.*
 
 ## 5. Derived views
 
@@ -583,7 +601,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
 | 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
 | 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
-| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no delete-side unwind (either direction), no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.12, §5.5 | #39 |
+| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no blocker-side delete guard, no waiting-side delete unwind, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.12, §5.5 | #39 |
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state; and the Waiting block has no DEFER-ancestor exclusion at all (its matcher's tag part cannot use the inherited `:WAITING:` tag, which the row itself carries) | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
