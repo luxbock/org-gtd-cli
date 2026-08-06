@@ -435,15 +435,23 @@ the now-linkless task then deletes normally. A `TRIGGER` id that does
 **not** resolve never trips the guard — nothing actually waits, and
 the dangling debris disappears with the deletion.
 
-The guard is deliberately one-directional: nobody depends *on* a
-waiting task, and a mis-added WAITING task must stay deletable.
-Deleting a task carrying `BLOCKER:` entries succeeds and removes the
-deleted task's id from each blocker's `TRIGGER:` entry, reported as a
+The guard is role-based, not state-based — what it protects is being
+waited **on** — and deliberately one-directional: a waiting task that
+nothing waits on (it carries no resolving `TRIGGER` entry of its own)
+stays deletable, so a mis-added WAITING task remains removable.
+Deleting a task carrying `BLOCKER:` entries removes the deleted
+task's id from each blocker's `TRIGGER:` entry, reported as a
 `blocker-link-removed` side effect on the delete response
 (unresolvable blocker ids are skipped silently). This waiting-side
 unwind never touches the §4.4 gate — the deleted waiter simply stops
 waiting — and the blocker-side path is gone (guarded above), so
-delete never wakes anything.
+delete never wakes anything. A task in **both** roles — a chained
+dependency; §4.6 permits a WAITING task as a blocker — is protected
+by the guard like any other blocker, with the same escape hatches:
+take *its* waiter out of WAITING first (§4.6 exit cleanup), or
+better, `set-state CANCELLED` — a close op, so its `TRIGGER` feeds
+the §4.4 gate and can wake its waiter, and a WAITING exit, so the
+§4.6 cleanup unwinds its own `BLOCKER`/`TRIGGER` pair.
 *Divergence: neither the blocker guard nor the waiting-side unwind
 exists — row 5.*
 
