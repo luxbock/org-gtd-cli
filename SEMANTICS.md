@@ -145,8 +145,10 @@ its first direct task child can invalidate its own keyword (§3: NEXT
 and WAITING live on leaves/project children only). The repair runs in
 the same mutation, whatever caused the growth (`add-subtask` or
 `refile`): a NEXT parent demotes to TODO (state-change side effect); a
-WAITING parent demotes to TODO (state-change side effect, the WAITING
-reason surviving in the LOGBOOK) **and** additionally emits
+WAITING parent demotes to TODO (state-change side effect; the
+demotion is a CLI exit from WAITING, so the §4.6 cleanup runs —
+`:REASON:` removed and the `TRIGGER`/`BLOCKER` pair unwound, the
+reason surviving only in the LOGBOOK record) **and** additionally emits
 `project-needs-review` for itself — the demotion disarmed a blocked
 marker, and whether the blocker now lives on a child is a human call.
 
@@ -296,8 +298,11 @@ least one of a reason or a blocker link; a bare WAITING is rejected.
 `--reason` and with each other) link the entering task to a blocking
 task: `:ID:` is minted on both tasks as needed; the blocker gains a
 `TRIGGER: <waiting-id>(TODO)` entry (multivalued) and the waiting task
-a `BLOCKER: <blocker-id>` entry — byte-compatible with org-depend, so
-interactive Emacs completion of the blocker behaves identically.
+a `BLOCKER: <blocker-id>` entry. The property syntax is
+byte-compatible with org-depend, so the links stay readable and
+editable in Emacs; the AND-gate, conditional wake, and exit cleanup
+are CLI-side — org-depend's own TRIGGER application (if ever loaded)
+does not reproduce them.
 Multiple blocker links are AND: the wake fires only when **all**
 listed blockers are closed (§4.4). Emacs-written WAITING without a
 reason is tolerated everywhere — reads, views, and transitions out of
@@ -321,8 +326,9 @@ stuck (the CLI must not guess between the woken task and an earlier
 open TODO); the stuck view (I11) catches it.
 
 **WAITING exit cleanup.** Any CLI-driven exit from WAITING — the
-wake, `set-state`, `set-next`, a close — removes `:REASON:` and
-unwinds the `TRIGGER`/`BLOCKER` pair (the LOGBOOK record stays, I10).
+wake, `set-state`, `set-next`, a close, the §4.0 keyword-outgrown
+demotion — removes `:REASON:` and unwinds the `TRIGGER`/`BLOCKER`
+pair (the LOGBOOK record stays, I10).
 
 *Divergences (#46): today the NEXT guard admits subproject headings,
 WAITING is accepted on project headings, and a blocked DONE/CANCELLED
@@ -477,17 +483,18 @@ Block membership, defined on §2/§3 + 5.2 (the state-semantic blocks):
 - **Next Tasks** — NEXT project children only: project headings and
   lone tasks never appear (I3 makes both unrepresentable); dated
   entries appear in Calendar instead, not here. A task with a DEFER,
-  WAITING, or CANCELLED task ancestor (§2 descent) is excluded — the
-  ancestor state hides the subtree, whether or not §3 permits that
-  state on the ancestor (§5.1: views honor what is on disk).
+  WAITING, CANCELLED, or DONE task ancestor (§2 descent) is excluded —
+  the ancestor is closed or shelved and its state hides the subtree,
+  whether or not §3 permits that state on the ancestor (§5.1 renders
+  what is on disk; the exclusion is view membership, not legality).
 - **Tasks** — open, unblocked loose ends: TODO tasks that are neither
   project-internal-and-surfaced-elsewhere nor WAITING/DEFER; the same
-  DEFER/WAITING/CANCELLED ancestor-state exclusion as Next Tasks
+  DEFER/WAITING/CANCELLED/DONE ancestor-state exclusion as Next Tasks
   applies.
-- **Waiting** — WAITING tasks; the same DEFER/WAITING/CANCELLED
+- **Waiting** — WAITING tasks; the same DEFER/WAITING/CANCELLED/DONE
   ancestor-state exclusion as Next Tasks applies — shelved WAITING
   work is represented by the DEFER ancestor's row, a subtree under a
-  CANCELLED ancestor is hidden outright (the ancestor is closed);
+  closed (DONE/CANCELLED) ancestor is hidden outright;
   future-scheduled ones hidden until due; rows carry
   `waiting_reason`/`blocked_by` (§5.5).
 - **Stuck Projects** — exactly {p : stuck(p)} (subprojects included:
@@ -518,7 +525,8 @@ structural definitions.
 WAITING tasks — null-safe (absent → null; reason-less WAITING never
 errors, §4.6). When `:REASON:` is absent but blocker links exist, the
 displayed reason derives from the blocker task's heading and current
-state.
+state. *Divergence: no `waiting_reason`/`blocked_by` surfacing
+exists — row 5.*
 
 ## 6. Invariants
 
@@ -573,7 +581,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
 | 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
 | 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no delete-side unwind (either direction), no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.12, §5.5 | #39 |
-| 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state | §5.2, §5.4 | #40 |
+| 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state; and the Waiting block has no DEFER-ancestor exclusion at all (its matcher's tag part cannot use the inherited `:WAITING:` tag, which the row itself carries) | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
 | 9 | `move` performs cross-zone reorders unguarded | §4.9 | #37 (completed-block boundary, interim) then #47 (full zone guard) |
