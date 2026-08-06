@@ -303,10 +303,11 @@ WAITING never error on a missing `:REASON:`.
 
 **The conditional wake (ruling 2026-08-06).** A WAITING task whose
 last open blocker closes (§4.4 auto-unblock) leaves WAITING. It wakes
-as **NEXT** iff (a) no open sibling (NEXT/TODO/WAITING) precedes it in
+as **NEXT** iff it is a project child (a lone task always wakes as
+TODO — I3) and (a) no open sibling (NEXT/TODO/WAITING) precedes it in
 document order within its sibling group, ignoring the completed and
 DEFER blocks, and (b) the group contains no NEXT — exactly when the
-WAITING task was standing in for the group's front; otherwise it
+WAITING task was standing in for its project's front; otherwise it
 wakes as plain **TODO**. Under I5, (a) implies (b) but not
 conversely; (b) is stated so the rule is explicit and robust, and the
 (b)-without-(a) case is precisely the accepted residual below. Position
@@ -404,7 +405,15 @@ widens what delete may destroy, and content the semantics ignore
 (severed task worlds, information headings) is still content. Close or
 empty the subtree first. Post: the subtree is gone
 without trace — for work decided against, CANCELLED is the
-record-keeping alternative. Never triggers promotion.
+record-keeping alternative. Never triggers promotion. Deleting a task
+that carries `TRIGGER` entries (§4.6 — it blocks WAITING tasks)
+unwinds the pair on every task it blocked: the deleted id is removed
+from each `BLOCKER:` entry, reported as a side effect on the delete
+response. Deletion is not completion: the AND-gate never treats a
+deleted blocker as closed, so no wake fires — a task left with no
+remaining blockers and no `:REASON:` stays WAITING, now reason-less
+(tolerated, §4.6). *Divergence: no blocker-side unwind exists —
+row 5.*
 
 ## 5. Derived views
 
@@ -529,7 +538,7 @@ state.
 - **I9** Only `set-done`/`set-cancelled` trigger the promotion rule
   (§4.5); parking (→WAITING/→DEFER) and plain `set-state` never do.
   The auto-unblock wake (§4.6) never runs §4.5 — it may mint NEXT
-  only under its own conditional rule.
+  only on a project child, under its own conditional rule.
 - **I10** Every state change leaves a LOGBOOK record.
 - **I11** Stuck = an open, non-deferred (own or ancestor DEFER —
   §5.2) project with no NEXT and no WAITING anywhere in its task
@@ -556,7 +565,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
 | 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
 | 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
-| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no exit cleanup, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §5.5 | #39 |
+| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit or blocker deletion, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.12, §5.5 | #39 |
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
