@@ -280,9 +280,14 @@ today's code.*
 
 ### 4.6 set-state
 
-Changes a keyword, nothing more: no promotion (I9), no CLOSED-side
-bookkeeping beyond org's own, LOGBOOK stamped, optional `--reason`
-recorded as a state-change note. Pre: the target/state pair is legal
+Changes a keyword and what the transition itself implies, nothing
+more: no promotion, ever (I9); LOGBOOK stamped; optional `--reason`
+recorded as a state-change note. A transition **into** DONE or
+CANCELLED on a legal target runs the same §4.4 close post-conditions
+as `set-done`/`set-cancelled` — CLOSED timestamp, cookie strip,
+reorder into the completed block, auto-unblock — the promotion rule
+alone excepted (I9): the close machinery keys on the state
+transition, not the command name. Pre: the target/state pair is legal
 per the §3 matrix — NEXT requires a project child (lone tasks and
 project/subproject headings rejected); WAITING requires a leaf (project
 headings rejected); DONE/CANCELLED on a project heading require all
