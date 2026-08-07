@@ -178,13 +178,6 @@ prefix; a new TODO/WAITING: the end of the active zone; closed: the
 bottom of the completed block; DEFER: the end of the DEFER block).
 Nothing else moves.
 
-*Divergence: today the primitive is a full stable sort by rank
-closed(0) < NEXT(1) < TODO(2) < WAITING(3) < DEFER(4), which clusters
-WAITING below TODO, destroying user interleaving whenever it runs —
-#34. The `set-state` skip-sort mitigation makes a NEXT entering WAITING
-keep its position — above the remaining NEXT prefix, violating I5 —
-and `add-task`/`add-subtask` append last with no zone placement — #34.*
-
 ### 4.2 add-task
 
 Files a freestanding task: to inbox.org (default), a named file, or
@@ -630,7 +623,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 
 | # | Current behavior (divergent) | Normative | Issue |
 |---|---|---|---|
-| 1 | Reorder is a full stable state-sort; clusters WAITING below TODO, destroying active-zone interleaving whenever it runs; `add-task`/`add-subtask` append last with no zone placement; the skip-sort mitigation leaves a NEXT-entering-WAITING above the NEXT prefix | §2, §4.1 (minimal move + arrivals + NEXT-exit) | #34 |
+| 1 | *Retired 2026-08-07: the reorder primitive is the §4.1 minimal move — arrivals, NEXT-exit, and the WAITING no-move rule included; the full stable state-sort, the append-last arrivals, and the skip-sort mitigation's I5 leak are gone (#34).* | — | — |
 | 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
 | 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
 | 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
@@ -643,4 +636,4 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 11 | A WAITING leaf gaining its first task child keeps WAITING on what is now a subproject heading; no demotion, no `project-needs-review` | §4.0 (keyword-outgrown repair), §4.3, §4.8 | #56 |
 | 12 | `refile --to` resolves by first match in document order (silent on duplicates); refile reports none of its repairs as side effects | §4.0, §4.8 | #57 |
 | 13 | Task traversal pierces category headings: the closure guard (I4), activity/stuckness predicates, and project detection treat tasks below category headings as task descendants; closing or archiving over open severed tasks emits no warning | §2 (severing), §4.4, §4.11, §5.2 | #58 |
-| 14 | The reorder primitive never runs on top-level sibling groups (level-1 guard): a uniform flat top-level task group keeps its order on every state change | §4.1 — top-level tasks form an implicit category bucket and sort like one (ruling 2026-08-02) | #34 |
+| 14 | *Retired 2026-08-07: the level-1 guard is gone — a uniform top-level group places like an implicit category bucket, per the 2026-08-02 ruling (#34).* | — | — |
