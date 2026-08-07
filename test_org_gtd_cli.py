@@ -2356,6 +2356,183 @@ Body of delta.
         assert "Body of beta." in text
 
 
+class TestMoveCompletedBlockGuard:
+    """§4.9 completed-block guard (#37): move refuses to cross the
+    completed block in a uniform sibling group.  Interim subset of the
+    full zone guard (#47) — the NEXT-prefix and DEFER-block boundaries
+    are deliberately NOT guarded here.  A rejection is exit 1 with an
+    {error, hint} pair and leaves the file byte-identical (I12)."""
+
+    FIXTURE = """\
+* TODO Guard project
+** DONE Old finished
+** CANCELLED Old dropped
+** TODO First open
+** TODO Second open
+"""
+
+    def _write(self, org_dir, content=None):
+        f = org_dir / "guard.org"
+        f.write_text(content or self.FIXTURE)
+        return f
+
+    @staticmethod
+    def _order(filepath):
+        return [line[3:] for line in filepath.read_text().splitlines()
+                if line.startswith("** ")]
+
+    def test_move_up_first_open_rejected_byte_identical(self, org_dir):
+        # Satisfaction: move --up on the first open task with completed
+        # siblings above → exit 1 + hint, file byte-identical.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "First open", "--up",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "move rejected" in stderr
+        assert ("already at the top of the active zone — "
+                "the completed block stays above") in stderr
+        assert f.read_text() == before
+
+    def test_move_up_rejection_json_error_and_hint(self, org_dir):
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("--json", "move", "First open", "--up",
+                                     org_dir=org_dir)
+        assert rc == 1
+        data = json.loads(stdout)
+        assert "move rejected" in data["error"]
+        assert "completed block stays above" in data["hint"]
+        assert f.read_text() == before
+
+    def test_move_before_done_sibling_rejected(self, org_dir):
+        # Satisfaction: move --before <done sibling> targeting an open
+        # task → same rejection.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Second open",
+                                     "--before", "Old finished",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "move rejected" in stderr
+        assert "completed block stays above" in stderr
+        assert f.read_text() == before
+
+    def test_move_after_last_done_sibling_allowed(self, org_dir):
+        # Satisfaction: --after the last completed sibling IS the top of
+        # the active zone — allowed (interim; #47 adds the NEXT prefix).
+        f = self._write(org_dir)
+        stdout, stderr, rc = run_cli("move", "Second open",
+                                     "--after", "Old dropped",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f) == [
+            "DONE Old finished", "CANCELLED Old dropped",
+            "TODO Second open", "TODO First open"]
+
+    def test_move_done_within_completed_block_allowed(self, org_dir):
+        # Satisfaction: moving a completed task within the completed
+        # block stays allowed.
+        f = self._write(org_dir)
+        stdout, stderr, rc = run_cli("move", "Old finished", "--down",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f) == [
+            "CANCELLED Old dropped", "DONE Old finished",
+            "TODO First open", "TODO Second open"]
+
+    def test_move_done_below_open_rejected(self, org_dir):
+        # Satisfaction: moving a completed task below an open sibling is
+        # rejected.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Old dropped", "--down",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "move rejected" in stderr
+        assert "completed tasks move only within it" in stderr
+        assert f.read_text() == before
+
+    def test_move_done_after_open_sibling_rejected(self, org_dir):
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Old finished",
+                                     "--after", "First open",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "move rejected" in stderr
+        assert f.read_text() == before
+
+    def test_group_without_completed_siblings_unrestricted(self, org_dir):
+        # Satisfaction: no completed siblings → behaves exactly as today
+        # (all four modes stay ordinary reorders).
+        f = self._write(org_dir, """\
+* TODO Plain project
+** TODO Alpha step
+** TODO Beta step
+** TODO Gamma step
+""")
+        stdout, stderr, rc = run_cli("move", "Beta step", "--up",
+                                     org_dir=org_dir)
+        assert rc == 0
+        stdout, stderr, rc = run_cli("move", "Beta step",
+                                     "--after", "Gamma step",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f) == [
+            "TODO Alpha step", "TODO Gamma step", "TODO Beta step"]
+
+    def test_mixed_group_carries_no_zones(self, org_dir):
+        # §4.9/§2: a keyword-less sibling makes the group mixed — no
+        # zones, no guard, the move crosses a DONE sibling freely.
+        f = self._write(org_dir, """\
+* TODO Mixed parent
+** DONE Done sib
+** Reference notes
+** TODO Open sib
+""")
+        stdout, stderr, rc = run_cli("move", "Open sib",
+                                     "--before", "Done sib",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f) == [
+            "TODO Open sib", "DONE Done sib", "Reference notes"]
+
+    def test_open_task_deeper_down_gets_generic_hint(self, org_dir):
+        # An open task that is NOT at the top of the active zone gets
+        # the generic corrective hint, not the "already at the top" one.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Second open",
+                                     "--before", "Old dropped",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "already at the top" not in stderr
+        assert "the top of the active zone is directly below it" in stderr
+        assert f.read_text() == before
+
+    def test_batch_move_guard_rejects_per_item(self, org_dir):
+        # Satisfaction: a violating batch item gets the per-item error +
+        # hint without aborting the batch; the legal item still lands.
+        f = self._write(org_dir)
+        data, stderr, rc = run_batch(
+            "move",
+            [{"heading": "First open", "direction": "up"},
+             {"heading": "Second open", "direction": "before",
+              "sibling": "First open"}],
+            org_dir=org_dir,
+        )
+        assert rc == 0  # at least one item succeeded
+        assert data["summary"] == {"total": 2, "succeeded": 1, "failed": 1}
+        assert data["results"][0]["success"] is False
+        assert "move rejected" in data["results"][0]["error"]
+        assert "completed block stays above" in data["results"][0]["hint"]
+        assert data["results"][1]["success"] is True
+        assert self._order(f) == [
+            "DONE Old finished", "CANCELLED Old dropped",
+            "TODO Second open", "TODO First open"]
+
+
 # ===========================================================================
 # 25. org-timestamp --inactive
 # ===========================================================================
