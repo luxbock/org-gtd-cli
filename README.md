@@ -6,8 +6,9 @@ coding agents alike: every command has a `--json` mode for scripting.
 
 It's a thin Python dispatch layer (`org-gtd-cli.py`) over Emacs running in
 batch mode — all org logic lives in Emacs Lisp (`org-gtd-cli.el`), sharing
-its core (TODO keywords, state machine, project detection) with an
-interactive Doom Emacs config via `+gtd-core.el`.
+its core (TODO keywords, state machine, project detection, the §4.1
+sibling-placement primitive) with an interactive Doom Emacs config via
+`+gtd-core.el`.
 
 ## Requirements
 
