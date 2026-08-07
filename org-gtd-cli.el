@@ -4238,6 +4238,113 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
 
 ;; --- move ---
 
+(defun org-gtd-cli/move--collect-group ()
+  "Collect the sibling group of the heading at point.
+Returns (SIBS . MY-INDEX): SIBS is a list of (BOL . STATE) conses in
+document order — STATE nil for a keyword-less sibling — and MY-INDEX is
+the position of the heading at point within SIBS (nil if not found).
+Same group definition as the §4.1 placement primitive
+`gtd/reorder-place-entry': the group ends at the first shallower
+heading (or buffer end); deeper headings are skipped."
+  (let* ((level (org-current-level))
+         (my-beg (line-beginning-position))
+         (sibs '()))
+    (save-excursion
+      (if (> level 1)
+          (progn (org-up-heading-safe) (forward-line 1))
+        (goto-char (point-min)))
+      (catch 'group-done
+        (while (re-search-forward org-heading-regexp nil t)
+          (let ((this-level (org-current-level)))
+            (cond
+             ((< this-level level)
+              (throw 'group-done nil))
+             ((= this-level level)
+              (push (cons (line-beginning-position)
+                          (org-get-todo-state))
+                    sibs)))))))
+    (setq sibs (nreverse sibs))
+    (cons sibs (cl-position my-beg sibs :key #'car))))
+
+(defun org-gtd-cli/move--guard-completed-block (heading direction
+                                                        &optional sibling-pos)
+  "Reject a move crossing the completed block (SEMANTICS.md §4.9, #37).
+Call with point on the moving heading, before any text change.  Computes
+the post-move sibling order for DIRECTION (\"up\", \"down\", \"before\",
+\"after\" — the latter two relative to the sibling at buffer position
+SIBLING-POS) and rejects the move — {error, hint} + exit 1, file
+untouched (I12) — when the entry HEADING would end up as an open task
+(TODO/NEXT/WAITING/DEFER) above a DONE/CANCELLED sibling, or as a
+completed task below an open sibling.  Moves entirely within one block
+stay legal; mixed sibling groups carry no zones and are never
+restricted (§2); moves past the group edge fall through to the caller's
+existing error paths.  The check is relative to the moved entry only —
+a move never changes the other siblings' relative order, so any new
+violation involves the mover, and a group already in violation neither
+blocks unrelated moves nor prevents incremental repair.  The NEXT-prefix
+and DEFER-block boundaries are #47's full zone guard, not this one."
+  (save-excursion
+    (org-back-to-heading t)
+    (pcase-let ((`(,sibs . ,my-index) (org-gtd-cli/move--collect-group)))
+      ;; Mixed group (a keyword-less sibling) → no zones, no guard (§2).
+      (when (and my-index
+                 (not (seq-some (lambda (s) (null (cdr s))) sibs)))
+        (let* ((states (mapcar #'cdr sibs))
+               (n (length states))
+               (my-state (nth my-index states))
+               (target-index (and sibling-pos
+                                  (cl-position sibling-pos sibs :key #'car)))
+               ;; Insertion index within the group-minus-the-mover; nil
+               ;; when the move runs off the group edge (not ours to
+               ;; reject) or the target is not in the group.
+               (dest (pcase direction
+                       ("up" (and (> my-index 0) (1- my-index)))
+                       ("down" (and (< my-index (1- n)) (1+ my-index)))
+                       ((or "before" "after")
+                        (when target-index
+                          (let ((base (if (> target-index my-index)
+                                          (1- target-index)
+                                        target-index)))
+                            (if (string= direction "before")
+                                base
+                              (1+ base))))))))
+          (when dest
+            (let* ((rest (append (cl-subseq states 0 my-index)
+                                 (cl-subseq states (1+ my-index))))
+                   (closed-p (lambda (s) (member s org-done-keywords)))
+                   (mover-closed (funcall closed-p my-state))
+                   (violation
+                    (if mover-closed
+                        ;; Completed mover: no open sibling may end up
+                        ;; above it.
+                        (seq-some (lambda (s) (not (funcall closed-p s)))
+                                  (cl-subseq rest 0 dest))
+                      ;; Open mover: no completed sibling may end up
+                      ;; below it.
+                      (seq-some closed-p (cl-subseq rest dest)))))
+              (when violation
+                (let ((msg (if mover-closed
+                               (format "move rejected: completed task \"%s\" (%s) would land below an open sibling"
+                                       heading my-state)
+                             (format "move rejected: open task \"%s\" (%s) would land above a completed sibling"
+                                     heading my-state)))
+                      (hint (cond
+                             (mover-closed
+                              "the completed block stays above the active zone — completed tasks move only within it")
+                             ;; Open mover sitting directly below the
+                             ;; completed block: the issue's canonical hint.
+                             ((and (> my-index 0)
+                                   (cl-every closed-p
+                                             (cl-subseq states 0 my-index)))
+                              "already at the top of the active zone — the completed block stays above")
+                             (t
+                              "the completed block stays above the active zone — the top of the active zone is directly below it"))))
+                  (if org-gtd-cli/json-mode
+                      (org-gtd-cli/output `((error . ,msg) (hint . ,hint)))
+                    (org-gtd-cli/error "Error: %s" msg)
+                    (org-gtd-cli/error "Hint: %s" hint))
+                  (kill-emacs 1))))))))))
+
 (defun org-gtd-cli/move (substring direction &optional sibling-substring index)
   "Reorder a subtask within its sibling group."
   (let* ((idx (org-gtd-cli/parse-index index))
@@ -4249,6 +4356,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (cond
           ((string= direction "up")
+           (org-gtd-cli/move--guard-completed-block heading "up")
            (org-move-subtree-up)
            ;; The subtree has moved, so BUF-POS is now stale.  Save first
            ;; (so a failed re-find can't lose the move) and enrich by
@@ -4262,6 +4370,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                 heading)
              (princ (format "Moved: \"%s\" up (%s)\n" heading rel-file))))
           ((string= direction "down")
+           (org-gtd-cli/move--guard-completed-block heading "down")
            (org-move-subtree-down)
            (save-buffer)
            (if org-gtd-cli/json-mode
@@ -4304,6 +4413,10 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
              (unless sibling-pos
                (org-gtd-cli/error "Error: sibling \"%s\" not found" sibling-substring)
                (kill-emacs 1))
+             ;; §4.9 (#37): refuse to cross the completed block. Runs
+             ;; before any text change, so a rejection leaves the file
+             ;; byte-identical (I12).
+             (org-gtd-cli/move--guard-completed-block heading direction sibling-pos)
              ;; Delete the task. Compute the sibling's post-deletion
              ;; position from the SIBLING-POS found in the bounded
              ;; search above, adjusting for the deleted region.

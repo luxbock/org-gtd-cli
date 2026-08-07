@@ -114,7 +114,10 @@ class Divergences:
     d5_no_waiting_reason: bool = False  # §7 row 5 → #39
     d7_no_priority_rules: bool = False  # §7 row 7 → #41
     d8_lax_state_guards: bool = False   # §7 row 8 → #46
-    d9_move_unguarded: bool = False     # §7 row 9 → #37/#47
+    # §7 row 9 interim (#37, landed): move guards the completed-block
+    # boundary; True = only that boundary (today's CLI), False = the
+    # full §4.9 zone guard (NEXT prefix + DEFER block) — #47.
+    d9_completed_block_only: bool = False
     # Observed divergence with no §7 row yet (PARKED for ruling
     # 2026-07-31): set-next on a *closed* leaf is rejected by the CLI,
     # while §4.7 ("same guard as set-state NEXT") implies acceptance.
@@ -128,7 +131,7 @@ class Divergences:
     def current(cls):
         return cls(d3_scan_from_closed=True, d4_no_subproject_review=True,
                    d5_no_waiting_reason=True, d7_no_priority_rules=True,
-                   d8_lax_state_guards=True, d9_move_unguarded=True,
+                   d8_lax_state_guards=True, d9_completed_block_only=True,
                    dx_setnext_rejects_closed_leaf=True)
 
 
@@ -732,12 +735,36 @@ class Model:
         candidate = list(group)
         candidate.remove(node)
         candidate.insert(new_index, node)
-        if (self.is_uniform(group) and not self.div.d9_move_unguarded
-                and not self._zone_order_ok(candidate)):
-            # I5: a move that would cross a zone boundary is rejected.
-            return Result(False, "move would cross a zone boundary")
+        if self.is_uniform(group):
+            if self.div.d9_completed_block_only:
+                # §7 row 9 interim (#37): only the completed-block
+                # boundary is guarded; the NEXT-prefix and DEFER-block
+                # boundaries are #47.
+                if not self._completed_block_ok(candidate, node):
+                    return Result(False, "move would cross the completed block")
+            elif not self._zone_order_ok(candidate):
+                # I5: a move that would cross a zone boundary is rejected.
+                return Result(False, "move would cross a zone boundary")
         group[:] = candidate
         return Result(True, new_state=node.keyword)
+
+    @staticmethod
+    def _completed_block_ok(candidate, node):
+        """§4.9 interim (#37): the moved entry may not cross the completed block.
+
+        Relative to the moved entry only: an open mover may leave no
+        completed sibling below it, a completed mover no open sibling
+        above it.  Other siblings' relative order is untouched by a
+        move, so any *new* violation involves the mover — a group
+        already in violation neither blocks unrelated moves nor
+        prevents incremental repair.
+        """
+        idx = candidate.index(node)
+        if zone_of(node.keyword) == ZONE_COMPLETED:
+            return all(zone_of(n.keyword) == ZONE_COMPLETED
+                       for n in candidate[:idx])
+        return all(zone_of(n.keyword) != ZONE_COMPLETED
+                   for n in candidate[idx + 1:])
 
     @staticmethod
     def _zone_order_ok(group):
