@@ -381,11 +381,12 @@ sibling) within one sibling group. The order it writes is user data
 order must still satisfy the zone invariant (I5) — completed block on
 top, DEFER block at the bottom, active zone between, NEXT entries at
 the top of the active zone; a move that would cross a zone boundary is
-rejected with a hint. Moves within a zone are always legal. Mixed
-groups carry no zones and are unrestricted. *Divergence: today only
-the completed-block boundary is guarded (#37, interim); the DEFER-block
-and NEXT-prefix boundaries still cross unguarded — #47 (full zone
-guard) — row 9.*
+rejected with a hint naming the boundary. The check is
+**moved-entry-relative** (ruling 2026-08-07): only a violation
+involving the moved entry rejects, so a group already in violation
+neither blocks unrelated moves nor gets repaired — repair-by-move stays
+possible. Moves within a zone are always legal. Mixed groups carry no
+zones and are unrestricted.
 
 ### 4.10 Annotation operations
 
@@ -632,7 +633,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state; and the Waiting block has no DEFER-ancestor exclusion at all (its matcher's tag part cannot use the inherited `:WAITING:` tag, which the row itself carries) | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
-| 9 | `move` guards only the completed-block boundary (#37 interim, landed 2026-08-07); the NEXT-prefix and DEFER-block boundaries still cross unguarded | §4.9 | #47 (full zone guard) |
+| 9 | *Retired 2026-08-07: `move` guards the full §4.9 zone invariant — completed block, NEXT prefix, and DEFER block — rejecting any reordering that would put the moved entry on the wrong side of a boundary (#37 interim, #47 full).* | — | — |
 | 10 | No closure repair: `add-subtask`, `set-state` (reopening), and `refile` place an open task below a closed heading with no reopen cascade; `set-next` rejects closed leaves outright | §4.0 (closure repair), §4.7 | #56 |
 | 11 | A WAITING leaf gaining its first task child keeps WAITING on what is now a subproject heading; no demotion, no `project-needs-review` | §4.0 (keyword-outgrown repair), §4.3, §4.8 | #56 |
 | 12 | `refile --to` resolves by first match in document order (silent on duplicates); refile reports none of its repairs as side effects | §4.0, §4.8 | #57 |
