@@ -4266,23 +4266,70 @@ heading (or buffer end); deeper headings are skipped."
     (setq sibs (nreverse sibs))
     (cons sibs (cl-position my-beg sibs :key #'car))))
 
-(defun org-gtd-cli/move--guard-completed-block (heading direction
-                                                        &optional sibling-pos)
-  "Reject a move crossing the completed block (SEMANTICS.md §4.9, #37).
+(defun org-gtd-cli/move--zone-violation (my-state above below)
+  "Which §6-I5 zone boundary a mover in MY-STATE would cross.
+ABOVE and BELOW are the state lists of the siblings that would sit above
+and below the moved entry in the *resulting* order — the sibling group
+minus the mover, split at the insertion point.  Returns nil when that
+order is legal for the mover, else one of the symbols `completed-block',
+`defer-block', `next-prefix': the boundary the move would cross.
+
+Zone classification is the §4.1 classification, reused verbatim from
++gtd-core.el (`gtd/reorder--state-zone', `gtd/reorder--boundary-class'),
+so the guard and the automatic placement primitive can never disagree
+about where a keyword belongs.
+
+The verdict is *moved-entry-relative* (olli ruling 2026-08-07): only a
+violation involving the mover rejects.  A move never changes the other
+siblings' relative order, so on a state satisfying I5 that is the same
+as validating the whole resulting order; on a state already in
+violation it is what keeps repair-by-move possible — pre-existing
+violations among unmoved siblings neither block the move nor get
+repaired."
+  (let ((zone (lambda (s) (gtd/reorder--state-zone s)))
+        (nextp (lambda (s) (eq (gtd/reorder--boundary-class s) 'next))))
+    (pcase (gtd/reorder--state-zone my-state)
+      ;; Completed block on top: nothing but completed siblings above.
+      ('completed
+       (and (seq-some (lambda (s) (not (eq (funcall zone s) 'completed))) above)
+            'completed-block))
+      ;; DEFER block at the bottom: nothing but DEFER siblings below.
+      ('defer
+       (and (seq-some (lambda (s) (not (eq (funcall zone s) 'defer))) below)
+            'defer-block))
+      ;; Active zone: between the two blocks, and behind the NEXT prefix.
+      (_
+       (cond
+        ((seq-some (lambda (s) (eq (funcall zone s) 'completed)) below)
+         'completed-block)
+        ((seq-some (lambda (s) (eq (funcall zone s) 'defer)) above)
+         'defer-block)
+        ((funcall nextp my-state)
+         ;; A NEXT stays above every other open sibling in the zone.
+         (and (seq-some (lambda (s) (and (eq (funcall zone s) 'active)
+                                         (not (funcall nextp s))))
+                        above)
+              'next-prefix))
+        ;; TODO/WAITING: no NEXT sibling may end up below it.
+        ((seq-some nextp below) 'next-prefix))))))
+
+(defun org-gtd-cli/move--guard-zones (heading direction &optional sibling-pos)
+  "Reject a move that crosses a zone boundary (SEMANTICS.md §4.9, #47).
 Call with point on the moving heading, before any text change.  Computes
 the post-move sibling order for DIRECTION (\"up\", \"down\", \"before\",
 \"after\" — the latter two relative to the sibling at buffer position
 SIBLING-POS) and rejects the move — {error, hint} + exit 1, file
-untouched (I12) — when the entry HEADING would end up as an open task
-(TODO/NEXT/WAITING/DEFER) above a DONE/CANCELLED sibling, or as a
-completed task below an open sibling.  Moves entirely within one block
-stay legal; mixed sibling groups carry no zones and are never
-restricted (§2); moves past the group edge fall through to the caller's
-existing error paths.  The check is relative to the moved entry only —
-a move never changes the other siblings' relative order, so any new
-violation involves the mover, and a group already in violation neither
-blocks unrelated moves nor prevents incremental repair.  The NEXT-prefix
-and DEFER-block boundaries are #47's full zone guard, not this one."
+untouched (I12) — when the entry HEADING would land on the wrong side of
+a §6-I5 boundary: the completed block on top, the DEFER block at the
+bottom, or the NEXT prefix at the top of the active zone.  The hint
+names the boundary.
+
+Moves *within* a zone are always legal — the order among NEXTs, among
+TODO/WAITING, among closed, and among DEFER entries is user data (§2).
+Mixed sibling groups carry no zones and are never restricted (§2), and
+moves past the group edge fall through to the caller's existing error
+paths.  The check is relative to the moved entry only; see
+`org-gtd-cli/move--zone-violation'."
   (save-excursion
     (org-back-to-heading t)
     (pcase-let ((`(,sibs . ,my-index) (org-gtd-cli/move--collect-group)))
@@ -4311,34 +4358,65 @@ and DEFER-block boundaries are #47's full zone guard, not this one."
           (when dest
             (let* ((rest (append (cl-subseq states 0 my-index)
                                  (cl-subseq states (1+ my-index))))
-                   (closed-p (lambda (s) (member s org-done-keywords)))
-                   (mover-closed (funcall closed-p my-state))
-                   (violation
-                    (if mover-closed
-                        ;; Completed mover: no open sibling may end up
-                        ;; above it.
-                        (seq-some (lambda (s) (not (funcall closed-p s)))
-                                  (cl-subseq rest 0 dest))
-                      ;; Open mover: no completed sibling may end up
-                      ;; below it.
-                      (seq-some closed-p (cl-subseq rest dest)))))
-              (when violation
-                (let ((msg (if mover-closed
-                               (format "move rejected: completed task \"%s\" (%s) would land below an open sibling"
-                                       heading my-state)
-                             (format "move rejected: open task \"%s\" (%s) would land above a completed sibling"
-                                     heading my-state)))
-                      (hint (cond
-                             (mover-closed
-                              "the completed block stays above the active zone — completed tasks move only within it")
-                             ;; Open mover sitting directly below the
-                             ;; completed block: the issue's canonical hint.
-                             ((and (> my-index 0)
-                                   (cl-every closed-p
-                                             (cl-subseq states 0 my-index)))
-                              "already at the top of the active zone — the completed block stays above")
-                             (t
-                              "the completed block stays above the active zone — the top of the active zone is directly below it"))))
+                   (above (cl-subseq rest 0 dest))
+                   (below (cl-subseq rest dest))
+                   (zone-of (lambda (s) (gtd/reorder--state-zone s)))
+                   (my-zone (gtd/reorder--state-zone my-state))
+                   (crossed (org-gtd-cli/move--zone-violation
+                             my-state above below)))
+              (when crossed
+                (let ((msg
+                       (pcase (cons crossed my-zone)
+                         (`(completed-block . completed)
+                          (format "move rejected: completed task \"%s\" (%s) would land below an open sibling"
+                                  heading my-state))
+                         (`(completed-block . ,_)
+                          (format "move rejected: open task \"%s\" (%s) would land above a completed sibling"
+                                  heading my-state))
+                         (`(defer-block . defer)
+                          (format "move rejected: deferred task \"%s\" (%s) would land above a sibling outside the DEFER block"
+                                  heading my-state))
+                         (`(defer-block . ,_)
+                          (format "move rejected: open task \"%s\" (%s) would land inside the DEFER block"
+                                  heading my-state))
+                         (_
+                          (if (eq (gtd/reorder--boundary-class my-state) 'next)
+                              (format "move rejected: NEXT task \"%s\" would land below a non-NEXT open sibling"
+                                      heading)
+                            (format "move rejected: open task \"%s\" (%s) would land above a NEXT sibling"
+                                    heading my-state)))))
+                      (hint
+                       (pcase crossed
+                         ('completed-block
+                          (cond
+                           ((eq my-zone 'completed)
+                            "the completed block stays above the active zone — completed tasks move only within it")
+                           ;; Open mover sitting directly below the
+                           ;; completed block: the issue's canonical hint.
+                           ((and (> my-index 0)
+                                 (cl-every (lambda (s)
+                                             (eq (funcall zone-of s) 'completed))
+                                           (cl-subseq states 0 my-index)))
+                            "already at the top of the active zone — the completed block stays above")
+                           (t
+                            "the completed block stays above the active zone — the top of the active zone is directly below it")))
+                         ('defer-block
+                          (cond
+                           ((eq my-zone 'defer)
+                            "the DEFER block stays at the bottom of the group — deferred tasks move only within it")
+                           ;; Open mover sitting directly above the DEFER
+                           ;; block: the mirror of the canonical hint.
+                           ((and (< my-index (1- n))
+                                 (cl-every (lambda (s)
+                                             (eq (funcall zone-of s) 'defer))
+                                           (cl-subseq states (1+ my-index))))
+                            "already at the bottom of the active zone — the DEFER block stays below")
+                           (t
+                            "the DEFER block stays at the bottom of the group — the bottom of the active zone is directly above it")))
+                         (_
+                          (if (eq (gtd/reorder--boundary-class my-state) 'next)
+                              "NEXT entries form the top of the active zone — a NEXT stays above the other open tasks"
+                            "NEXT entries form the top of the active zone — open tasks stay below the NEXT prefix")))))
                   (if org-gtd-cli/json-mode
                       (org-gtd-cli/output `((error . ,msg) (hint . ,hint)))
                     (org-gtd-cli/error "Error: %s" msg)
@@ -4356,7 +4434,7 @@ and DEFER-block boundaries are #47's full zone guard, not this one."
              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
          (cond
           ((string= direction "up")
-           (org-gtd-cli/move--guard-completed-block heading "up")
+           (org-gtd-cli/move--guard-zones heading "up")
            (org-move-subtree-up)
            ;; The subtree has moved, so BUF-POS is now stale.  Save first
            ;; (so a failed re-find can't lose the move) and enrich by
@@ -4370,7 +4448,7 @@ and DEFER-block boundaries are #47's full zone guard, not this one."
                 heading)
              (princ (format "Moved: \"%s\" up (%s)\n" heading rel-file))))
           ((string= direction "down")
-           (org-gtd-cli/move--guard-completed-block heading "down")
+           (org-gtd-cli/move--guard-zones heading "down")
            (org-move-subtree-down)
            (save-buffer)
            (if org-gtd-cli/json-mode
@@ -4413,10 +4491,10 @@ and DEFER-block boundaries are #47's full zone guard, not this one."
              (unless sibling-pos
                (org-gtd-cli/error "Error: sibling \"%s\" not found" sibling-substring)
                (kill-emacs 1))
-             ;; §4.9 (#37): refuse to cross the completed block. Runs
+             ;; §4.9 (#47): refuse to cross a zone boundary. Runs
              ;; before any text change, so a rejection leaves the file
              ;; byte-identical (I12).
-             (org-gtd-cli/move--guard-completed-block heading direction sibling-pos)
+             (org-gtd-cli/move--guard-zones heading direction sibling-pos)
              ;; Delete the task. Compute the sibling's post-deletion
              ;; position from the SIBLING-POS found in the bounded
              ;; search above, adjusting for the deleted region.
