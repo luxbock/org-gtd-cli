@@ -733,45 +733,162 @@ Use this for errors, warnings, and hints — never for command output data."
     (kill-emacs 1)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
-;; Sibling reordering by state
+;; Sibling reordering by state — the §4.1 minimal-move primitive
 ;; ══════════════════════════════════════════════════════════════════════════════
 
-(defun org-gtd-cli/state-sort-priority (state)
-  "Return sort priority for STATE. Lower = earlier among siblings."
+(defun org-gtd-cli/state-zone (state)
+  "Return the SEMANTICS.md §2 zone STATE belongs to.
+One of the symbols `completed' (DONE/CANCELLED, top block), `defer'
+(DEFER, bottom block), or `active' (everything else — TODO/NEXT/WAITING
+today; any later open keyword falls here by default)."
   (cond
-   ((null state) 5)
-   ((member state org-done-keywords) 0)
-   ((string= state "NEXT") 1)
-   ((string= state "TODO") 2)
-   ((string= state "WAITING") 3)
-   ((string= state "DEFER") 4)
-   (t 5)))
+   ((member state org-done-keywords) 'completed)
+   ((string= state "DEFER") 'defer)
+   (t 'active)))
 
-(defun org-gtd-cli/reorder-siblings-by-state ()
-  "Sort siblings of heading at point by state priority.
-Point must be on a child heading (level > 1). Only sorts when all
-siblings have TODO keywords (skips if organizational headings are mixed in)."
+(defun org-gtd-cli/state-boundary-class (state)
+  "Return the §4.1 boundary class of STATE.
+`closed' (completed block), `next' (the NEXT prefix), `defer' (DEFER
+block), or `active-rest' — the free interior of the active zone
+(TODO/WAITING today; the never-move set, so a later addition such as
+ONGOING lands here without further changes). A transition that stays
+within one class never moves anything."
+  (cond
+   ((member state org-done-keywords) 'closed)
+   ((string= state "NEXT") 'next)
+   ((string= state "DEFER") 'defer)
+   (t 'active-rest)))
+
+(defun org-gtd-cli/reorder--dest-index (new-state old-state states)
+  "Destination index for an entry with NEW-STATE among sibling STATES.
+STATES is the ordered state list of the sibling group WITHOUT the
+moving entry; the returned index is the position to insert before.
+OLD-STATE is the keyword before the change; nil means the entry newly
+arrived in the group (add-task/add-subtask/refile). Mirrors
+`gtd_reference_model.Model._reorder' exactly (SEMANTICS.md §4.1)."
+  (let* ((n (length states))
+         (states (vconcat states))
+         (completed-run
+          (let ((i 0))
+            (while (and (< i n)
+                        (eq (org-gtd-cli/state-zone (aref states i))
+                            'completed))
+              (setq i (1+ i)))
+            i))
+         (next-prefix-end
+          (let ((i completed-run))
+            (while (and (< i n) (string= (aref states i) "NEXT"))
+              (setq i (1+ i)))
+            i)))
+    (cond
+     ((eq (org-gtd-cli/state-zone new-state) 'completed)
+      ;; Closed → bottom of the completed block (all paths).
+      completed-run)
+     ((string= new-state "NEXT")
+      ;; Entering NEXT from within the active zone → top of the active
+      ;; zone (§2: NEXT always at the top); arrivals, reopens out of
+      ;; the completed block, and releases out of the DEFER block →
+      ;; the end of the NEXT prefix (§4.1 arrival/reopen rules).
+      (if (and old-state (eq (org-gtd-cli/state-zone old-state) 'active))
+          completed-run
+        next-prefix-end))
+     ((string= new-state "DEFER")
+      ;; DEFER → top of the DEFER block; arrivals → the end of it.
+      (if old-state
+          (let ((i 0))
+            (while (and (< i n)
+                        (not (eq (org-gtd-cli/state-zone (aref states i))
+                                 'defer)))
+              (setq i (1+ i)))
+            i)
+        n))
+     (t
+      ;; TODO/WAITING: leaving NEXT while staying in the active zone →
+      ;; immediately below the remaining NEXT prefix; arrivals, reopens
+      ;; out of the completed block, and DEFER releases → the end of
+      ;; the active zone.
+      (if (and old-state (string= old-state "NEXT"))
+          next-prefix-end
+        (let ((i n))
+          (while (and (> i 0)
+                      (eq (org-gtd-cli/state-zone (aref states (1- i)))
+                          'defer))
+            (setq i (1- i)))
+          i))))))
+
+(defun org-gtd-cli/reorder-siblings-by-state (&optional old-state)
+  "Place the entry at point within its sibling group per SEMANTICS.md §4.1.
+
+Minimal move: only the entry at point may move — cut and reinserted at
+its zone boundary — leaving every other sibling's bytes untouched.  An
+entry already at a consistent position is a strict no-op (the buffer is
+not modified at all).  OLD-STATE is the TODO keyword the entry carried
+before the mutating state change; nil means the entry newly arrived in
+this group (add-task/add-subtask/refile placement — the §4.1 arrival
+rule, end of its zone).  Mixed sibling groups (any keyword-less
+sibling) are never reordered.  Top-level groups place like any other —
+a uniform top-level group is an implicit category bucket (ruling
+2026-08-02, ex-§7 row 14).
+
+Leaves point on the entry's heading (at its new location when moved)."
   (org-back-to-heading 'invisible-ok)
-  (when (> (org-current-level) 1)
-    (let ((level (org-current-level))
-          (all-tasks t))
-      ;; Check that all siblings at this level have TODO keywords
-      (save-excursion
-        (org-up-heading-safe)
-        (let ((parent-end (save-excursion (org-end-of-subtree t) (point))))
-          (save-excursion
-            (forward-line 1)
-            (while (and all-tasks (< (point) parent-end)
-                        (re-search-forward org-heading-regexp parent-end t))
-              (when (and (= (org-current-level) level)
-                         (not (org-get-todo-state)))
-                (setq all-tasks nil))))
-          (when all-tasks
-            (org-sort-entries nil ?f
-                             (lambda ()
-                               (number-to-string
-                                (org-gtd-cli/state-sort-priority
-                                 (org-get-todo-state)))))))))))
+  (let* ((level (org-current-level))
+         (my-beg (point))
+         (new-state (org-get-todo-state)))
+    (unless (and old-state new-state
+                 (eq (org-gtd-cli/state-boundary-class old-state)
+                     (org-gtd-cli/state-boundary-class new-state)))
+      ;; Collect the sibling group: (BOL . STATE) per sibling, in
+      ;; document order, plus the group's end position (the first
+      ;; heading shallower than LEVEL, or point-max).
+      (let ((group-end (point-max))
+            (sibs '()))
+        (save-excursion
+          (if (> level 1)
+              (progn (org-up-heading-safe) (forward-line 1))
+            (goto-char (point-min)))
+          (catch 'group-done
+            (while (re-search-forward org-heading-regexp nil t)
+              (let ((this-level (org-current-level)))
+                (cond
+                 ((< this-level level)
+                  (setq group-end (line-beginning-position))
+                  (throw 'group-done nil))
+                 ((= this-level level)
+                  (push (cons (line-beginning-position)
+                              (org-get-todo-state))
+                        sibs)))))))
+        (setq sibs (nreverse sibs))
+        ;; Mixed group (a keyword-less sibling) → never reordered (§2).
+        (unless (seq-some (lambda (s) (null (cdr s))) sibs)
+          (let* ((my-index (or (cl-position my-beg sibs :key #'car)
+                               (error "reorder: entry at %d not in its sibling group" my-beg)))
+                 (others (append (cl-subseq sibs 0 my-index)
+                                 (cl-subseq sibs (1+ my-index))))
+                 (dest (org-gtd-cli/reorder--dest-index
+                        new-state old-state (mapcar #'cdr others))))
+            (unless (= dest my-index)
+              ;; Cut the entry's region — its heading line through the
+              ;; next sibling's heading line (or the group end) — and
+              ;; reinsert it at the destination boundary. Markers keep
+              ;; the insertion point valid across the deletion.
+              (let* ((region-end (if (< (1+ my-index) (length sibs))
+                                     (car (nth (1+ my-index) sibs))
+                                   group-end))
+                     (text (buffer-substring my-beg region-end))
+                     (insert-marker
+                      (copy-marker (if (< dest (length others))
+                                       (car (nth dest others))
+                                     group-end))))
+                (unless (string-suffix-p "\n" text)
+                  (setq text (concat text "\n")))
+                (delete-region my-beg region-end)
+                (goto-char insert-marker)
+                (unless (bolp) (insert "\n"))
+                (let ((entry-beg (point)))
+                  (insert text)
+                  (goto-char entry-beg))
+                (set-marker insert-marker nil)))))))))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
 ;; Shared helpers
@@ -2884,7 +3001,12 @@ any state (including DONE) and plain category/note headings."
                      (setq new-buf-pos (cons (current-buffer) new-pos)))
                    ;; Remove orphaned blank lines at insertion point
                    (while (and (not (eobp)) (looking-at-p "\n"))
-                     (delete-char 1)))))
+                     (delete-char 1))
+                   ;; §4.1 arrival rule: place the new task in the
+                   ;; category's group (end of its zone).
+                   (goto-char (cdr new-buf-pos))
+                   (org-gtd-cli/reorder-siblings-by-state)
+                   (setq new-buf-pos (cons (current-buffer) (point))))))
            ;; Append to end of file
            (goto-char (point-max))
            (unless (bolp) (insert "\n"))
@@ -2901,7 +3023,12 @@ any state (including DONE) and plain category/note headings."
              (save-excursion
                (goto-char new-pos)
                (org-id-get-create))
-             (setq new-buf-pos (cons (current-buffer) new-pos)))))
+             ;; §4.1 arrival rule: place the new task in the file's
+             ;; top-level group (end of its zone; in an all-open inbox
+             ;; this coincides with append-last).
+             (goto-char new-pos)
+             (org-gtd-cli/reorder-siblings-by-state)
+             (setq new-buf-pos (cons (current-buffer) (point))))))
         (save-buffer)
         ;; Warn-only duplicate detection (#64): does the created heading's
         ;; (file, bare heading text) key collide with any pre-existing
@@ -2989,14 +3116,18 @@ any state (including DONE) and plain category/note headings."
          ;; Remove orphaned blank lines at insertion point
            (while (and (not (eobp)) (looking-at-p "\n"))
              (delete-char 1))
-           ;; Reorder siblings by state when the created state sorts above
-           ;; plain TODO (NEXT or any done keyword). WAITING/DEFER/TODO
-           ;; must preserve position (WAITING invariant, see 3f0802b).
-           (when (or (string= todo-state "NEXT")
-                     (member todo-state org-done-keywords))
+           ;; §4.1 arrival rule: the new child enters at the end of its
+           ;; zone (never blindly appended).
+           (save-excursion
+             (goto-char child-pos)
+             (org-gtd-cli/reorder-siblings-by-state))
+           ;; A demoted parent left NEXT (§4.0 keyword-outgrown repair):
+           ;; re-place it in its own sibling group — immediately below
+           ;; that group's remaining NEXT prefix (§4.1 NEXT-exit rule).
+           (when parent-was-next
              (save-excursion
-               (goto-char child-pos)
-               (org-gtd-cli/reorder-siblings-by-state)))
+               (goto-char (cdr buf-pos))
+               (org-gtd-cli/reorder-siblings-by-state "NEXT")))
            (save-buffer)
            ;; Warn-only duplicate detection (#64): does the created child's
            ;; (file, bare heading text) key collide with any pre-existing
@@ -3339,6 +3470,10 @@ Returns a list of message strings in printing order."
                     (if (not (gtd/is-project-p))
                         (let ((h (org-get-heading t t t t)))
                           (org-todo "NEXT")
+                          ;; §4.1: the promoted task enters NEXT from
+                          ;; within the active zone — top of the zone.
+                          (save-excursion
+                            (org-gtd-cli/reorder-siblings-by-state "TODO"))
                           (setq msgs (nconc msgs
                             (list (format "  Auto-progressed: \"%s\" -> NEXT (%s)\n"
                                           h rel-file))))
@@ -3348,6 +3483,18 @@ Returns a list of message strings in printing order."
                         (let* ((sub-heading (org-get-heading t t t t))
                                (child-heading (gtd/promote-first-child-task)))
                           (when child-heading
+                            ;; §4.1: place the drilled promotion within
+                            ;; the subproject's own sibling group. The
+                            ;; drill only ever promotes when the group
+                            ;; had no NEXT, so the first NEXT child is
+                            ;; the one just promoted.
+                            (save-excursion
+                              (when (org-goto-first-child)
+                                (let ((found (equal (org-get-todo-state) "NEXT")))
+                                  (while (and (not found) (org-get-next-sibling))
+                                    (setq found (equal (org-get-todo-state) "NEXT")))
+                                  (when found
+                                    (org-gtd-cli/reorder-siblings-by-state "TODO")))))
                             (setq msgs (nconc msgs
                               (list (format "  Auto-progressed: \"%s\" -> NEXT (in subproject \"%s\") (%s)\n"
                                             child-heading sub-heading rel-file))))
@@ -3498,10 +3645,15 @@ Returns a list of message strings in printing order."
                       "Cannot mark \"%s\" DONE: blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
                       heading)))
                  (kill-emacs 1))
-             (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
+             ;; Track the closed task with a marker: auto-progress may
+             ;; move the promoted sibling above it (§4.1 placement),
+             ;; which would leave the raw position stale.
+             (let* ((done-marker (copy-marker (cdr buf-pos)))
+                    (auto-msgs (org-gtd-cli/auto-progress rel-file)))
                (save-excursion
-                 (goto-char (cdr buf-pos))
-                 (org-gtd-cli/reorder-siblings-by-state))
+                 (goto-char done-marker)
+                 (org-gtd-cli/reorder-siblings-by-state old-state))
+               (set-marker done-marker nil)
                (save-buffer)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
@@ -3590,10 +3742,15 @@ Returns a list of message strings in printing order."
                       "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
                       heading)))
                  (kill-emacs 1))
-             (let ((auto-msgs (org-gtd-cli/auto-progress rel-file)))
+             ;; Track the closed task with a marker: auto-progress may
+             ;; move the promoted sibling above it (§4.1 placement),
+             ;; which would leave the raw position stale.
+             (let* ((done-marker (copy-marker (cdr buf-pos)))
+                    (auto-msgs (org-gtd-cli/auto-progress rel-file)))
                (save-excursion
-                 (goto-char (cdr buf-pos))
-                 (org-gtd-cli/reorder-siblings-by-state))
+                 (goto-char done-marker)
+                 (org-gtd-cli/reorder-siblings-by-state old-state))
+               (set-marker done-marker nil)
                (save-buffer)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
@@ -3799,9 +3956,12 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
              (org-todo new-state))
            (when (and reason (not (string-empty-p reason)))
              (org-gtd-cli/add-state-reason-note new-state old-state reason))
-           (unless (and (equal new-state "WAITING")
-                        (member old-state '("TODO" "NEXT")))
-             (org-gtd-cli/reorder-siblings-by-state))
+           ;; §4.1 minimal move. The primitive itself keeps a
+           ;; TODO→WAITING (and any other same-boundary-class
+           ;; transition) in place, and sends a NEXT→WAITING below the
+           ;; remaining NEXT prefix — the old skip-sort mitigation's I5
+           ;; violation must not survive.
+           (org-gtd-cli/reorder-siblings-by-state old-state)
            (save-buffer)
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
@@ -4026,8 +4186,9 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
 TARGET-POS is a position in TARGET-BUF pointing at the destination parent.
 Demotes the moved subtree to TODO when it is a NEXT that would be freestanding
 or a duplicate NEXT sibling in its new home; demotes a NEXT parent that has just
-become a project because a child was refiled under it; and reorders destination
-siblings by state (DONE > NEXT > TODO > WAITING > DEFER)."
+become a project because a child was refiled under it; and places the arrived
+subtree in the destination group per the SEMANTICS.md §4.1 arrival rule (end of
+its zone)."
   (with-current-buffer target-buf
     (org-with-wide-buffer
      (goto-char target-pos)
@@ -4068,16 +4229,20 @@ siblings by state (DONE > NEXT > TODO > WAITING > DEFER)."
                (when (or freestanding has-other-next)
                  (let ((org-inhibit-logging nil))
                    (org-todo "TODO")))))
-           ;; Reorder destination siblings using the standard rank.
+           ;; §4.1 arrival rule: the moved subtree enters the destination
+           ;; group at the end of its (post-demotion) zone.
            (org-gtd-cli/reorder-siblings-by-state)))
        ;; Demote target parent from NEXT to TODO when it just gained a
-       ;; TODO-keyword child (a NEXT that becomes a project must be TODO).
+       ;; TODO-keyword child (a NEXT that becomes a project must be TODO),
+       ;; then re-place it in its own sibling group — immediately below
+       ;; that group's remaining NEXT prefix (§4.1 NEXT-exit rule).
        (save-excursion
          (goto-char target-pos)
          (when (and (equal (org-get-todo-state) "NEXT")
                     (org-gtd-cli/has-todo-children-p))
            (let ((org-inhibit-logging nil))
-             (org-todo "TODO"))))))))
+             (org-todo "TODO"))
+           (org-gtd-cli/reorder-siblings-by-state "NEXT")))))))
 
 ;; --- set-next ---
 
@@ -4154,6 +4319,10 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
               (t
                (let ((org-inhibit-logging nil))
                  (org-todo "NEXT"))
+               ;; §4.1: entering NEXT from within the active zone takes
+               ;; the top of the active zone; a DEFER release lands at
+               ;; the end of the NEXT prefix.
+               (org-gtd-cli/reorder-siblings-by-state current-state)
                (save-buffer)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
@@ -4161,7 +4330,9 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                       (heading . ,heading) (file . ,rel-file)
                       (old_state . ,current-state) (new_state . "NEXT")
                       (side_effects . []))
-                    buf-pos)
+                    ;; Re-find by heading — the placement may have moved
+                    ;; the entry, leaving buf-pos stale.
+                    heading)
                  (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file)))))))
           (existing-next
            (if org-gtd-cli/json-mode
@@ -4186,7 +4357,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                                    (org-get-todo-state))))
              (let ((org-inhibit-logging nil))
                (org-todo "NEXT"))
-             (org-gtd-cli/reorder-siblings-by-state)
+             (org-gtd-cli/reorder-siblings-by-state "TODO")
              (save-buffer)
              (if org-gtd-cli/json-mode
                  (org-gtd-cli/mutation-output

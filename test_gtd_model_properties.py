@@ -18,7 +18,6 @@ from hypothesis import assume, given, settings, strategies as st
 
 from gtd_reference_model import (
     CLOSED_STATES, Divergences, Model, Node, parse_org_text, zone_of,
-    ZONE_ACTIVE,
 )
 
 # ---------------------------------------------------------------------------
@@ -164,43 +163,26 @@ def _in_closed_subtree(model, node):
     return any(n.keyword in CLOSED_STATES for n in chain)
 
 
-def _append_breaks_zone_order(group, state):
-    """True when appending STATE at the group's end violates I5."""
-    if not group or not Model.is_uniform(group):
-        return False
-    return zone_of(state) < zone_of(group[-1].keyword)
-
-
 def hits_parked_spec_gap(model, op, args, kwargs):
     """PARKED SPEC QUESTIONS (2026-07-31, awaiting olli's ruling).
 
-    Two gap families where a documented-legal operation produces a state
-    the §3 matrix / §6 invariants forbid — the real CLI accepts both:
+    Gap families where a documented-legal operation produces a state
+    the §3 matrix / §6 invariants forbid — the real CLI accepts both
+    (the append-last, demotion-unplaced, and WAITING-above-the-NEXT-
+    prefix families recorded here originally were resolved by the §4.1
+    arrival/NEXT-exit rules and closed by #34):
 
     - **I4 outside closure**: §4.3 add-subtask, §4.6 set-state
       (reopening), and §4.8 refile can place an open task under a closed
-      heading — a closed project with open descendants.
-    - **Leaf→project repairs are incomplete**: §4.3/§4.8 only repair a
+      heading — a closed project with open descendants (§4.0's closure
+      repair closes this; #56, §7 row 10).
+    - **Leaf→project WAITING repair missing**: §4.3/§4.8 only repair a
       NEXT parent that becomes a project; a WAITING leaf gaining its
       first task child keeps WAITING on what is now a project heading
-      (§3 allows WAITING on leaves only). And the NEXT repair itself
-      only demotes: the demoted parent is not re-placed in its own
-      sibling group, so a NEXT sibling below it now violates I5's
-      NEXT-prefix rule (the CLI's repair likewise runs no reorder
-      there).
-    - **Append-last vs I5**: §4.2/§4.3 append the new task as last
-      child, but that spot can violate zone order — a DONE filed into a
-      bucket of open tasks lands below the active zone, a TODO filed
-      into a group with a DEFER block lands below it. §4.3 reorders only
-      when the created state ranks above TODO; §4.2 never reorders.
-    - **WAITING-keeps-position vs the NEXT prefix**: a NEXT entering
-      WAITING keeps its position (§4.6/§4.1) — at the top of the active
-      zone; if another (hand-declared) NEXT sits below, the group now
-      has WAITING above NEXT, breaking I5's NEXT-prefix rule. The CLI's
-      skip-sort mitigation produces the same state.
+      (§3 allows WAITING on leaves only; #56, §7 row 11).
 
-    Until ruled, the preservation property routes around these cases;
-    the xfail test below keeps them visible.
+    Until the fixes land, the preservation property routes around these
+    cases; the xfail test below keeps them visible.
 
     One further parked question needs NO routing (no property depends
     on it) but awaits the same ruling batch:
@@ -212,43 +194,23 @@ def hits_parked_spec_gap(model, op, args, kwargs):
       (gtd_reference_model.py, promotion scan). §4.5's prose does not
       pin the scope.
     """
-    if op == "add_task":
-        _, state = args
-        group = model.roots  # ops strategy files at top level only
-        return _append_breaks_zone_order(group, state)
     if op == "add_subtask":
         parent, _, state = args
         node, _ = model.find(parent)
         if node is None:
             return False
-        appended_out_of_zone = (
-            state not in CLOSED_STATES and state != "NEXT"
-            and _append_breaks_zone_order(node.children, state))
-        # §4.3's NEXT-parent demotion never re-places the demoted parent
-        # in its own group (same repair gap as refile's — docstring).
-        demotes_unplaced = (
-            node.keyword == "NEXT"
-            and any(s is not node and s.keyword == "NEXT"
-                    for s in model.sibling_group(node)))
         return ((state not in CLOSED_STATES
                  and _in_closed_subtree(model, node))
                 or (node.keyword == "WAITING"
-                    and model.is_leaf_task(node))
-                or appended_out_of_zone
-                or demotes_unplaced)
+                    and model.is_leaf_task(node)))
     if op == "set_state":
         target, state = args
         node, _ = model.find(target)
         if node is None:
             return False
-        if (state not in CLOSED_STATES
+        return (state not in CLOSED_STATES
                 and any(n.keyword in CLOSED_STATES
-                        for n in model.task_ancestors(node))):
-            return True
-        # WAITING-keeps-position vs NEXT prefix (see docstring).
-        return (state == "WAITING" and node.keyword == "NEXT"
-                and any(s is not node and s.keyword == "NEXT"
-                        for s in model.sibling_group(node)))
+                        for n in model.task_ancestors(node)))
     if op == "set_next":
         # Same I4 family: set-next can reopen (promote) inside a closed
         # subtree — directly, or via the project path's child promotion.
@@ -278,13 +240,8 @@ def hits_parked_spec_gap(model, op, args, kwargs):
         makes_waiting_project = (subtree_has_task
                                  and target.keyword == "WAITING"
                                  and model.is_leaf_task(target))
-        # NEXT-leaf target: becoming a project demotes it (§4.8), but
-        # the demoted parent is never re-placed in its own group.
-        demotes_unplaced = (subtree_has_task
-                            and target.keyword == "NEXT"
-                            and model.is_leaf_task(target))
         return ((subtree_open and _in_closed_subtree(model, target))
-                or makes_waiting_project or demotes_unplaced)
+                or makes_waiting_project)
     return False
 
 

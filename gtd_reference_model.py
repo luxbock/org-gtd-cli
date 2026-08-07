@@ -15,11 +15,11 @@ two modes:
 
 - ``Divergences.normative()`` — the document's semantics, exactly.
 - ``Divergences.current()`` — reproduces today's CLI behavior by enabling
-  one named flag per applicable §7 row (``d1_full_sort`` = §7 row 1, and
-  so on). The tier-2 conformance harness runs the model in this mode and
-  expects an exact match against the real CLI; per-row expected-failure
-  tests run the normative mode and flip green as each stage-2c fix lands
-  (2026-07-31 ruling on #45).
+  one named flag per applicable §7 row (``d3_scan_from_closed`` = §7 row
+  3, and so on). The tier-2 conformance harness runs the model in this
+  mode and expects an exact match against the real CLI; per-row
+  expected-failure tests run the normative mode and flip green as each
+  stage-2c fix lands (2026-07-31 ruling on #45).
 
 The model is Emacs-free and I/O-free except for the org-text projection
 helpers at the bottom (``to_org_text`` / ``parse_org_text``), which the
@@ -35,12 +35,6 @@ from dataclasses import dataclass, field, replace
 OPEN_STATES = ("TODO", "NEXT", "WAITING", "DEFER")
 CLOSED_STATES = ("DONE", "CANCELLED")  # closed = {DONE, CANCELLED} (I2)
 KEYWORDS = OPEN_STATES + CLOSED_STATES
-
-# §4.1 divergence (§7 row 1): today's reorder is a full stable sort by
-# this rank. The normative primitive (minimal move) never uses it.
-CURRENT_SORT_RANK = {
-    "DONE": 0, "CANCELLED": 0, "NEXT": 1, "TODO": 2, "WAITING": 3, "DEFER": 4,
-}
 
 # §2 zones of a uniform sibling group: completed block on top, DEFER
 # block at the bottom, active zone between (I5).
@@ -107,7 +101,10 @@ class Divergences:
     does not model the derived views it affects.
     """
 
-    d1_full_sort: bool = False          # §7 row 1 → #34
+    # §7 rows 1 and 14 (#34, retired 2026-08-07 with the minimal-move
+    # primitive): ``d1_full_sort`` and ``d14_no_toplevel_reorder`` are
+    # gone — the CLI now implements §4.1 exactly, in every sibling
+    # group including the top level.
     # §7 row 2 (#34) has no flag: the recorded divergence (refile not
     # placing arrivals in the destination's zones) does NOT reproduce on
     # 2026-07-31 master — the destination reorder runs unconditionally.
@@ -118,7 +115,6 @@ class Divergences:
     d7_no_priority_rules: bool = False  # §7 row 7 → #41
     d8_lax_state_guards: bool = False   # §7 row 8 → #46
     d9_move_unguarded: bool = False     # §7 row 9 → #37/#47
-    d14_no_toplevel_reorder: bool = False   # §7 row 14 → #34
     # Observed divergence with no §7 row yet (PARKED for ruling
     # 2026-07-31): set-next on a *closed* leaf is rejected by the CLI,
     # while §4.7 ("same guard as set-state NEXT") implies acceptance.
@@ -130,11 +126,9 @@ class Divergences:
 
     @classmethod
     def current(cls):
-        return cls(d1_full_sort=True,
-                   d3_scan_from_closed=True, d4_no_subproject_review=True,
+        return cls(d3_scan_from_closed=True, d4_no_subproject_review=True,
                    d5_no_waiting_reason=True, d7_no_priority_rules=True,
                    d8_lax_state_guards=True, d9_move_unguarded=True,
-                   d14_no_toplevel_reorder=True,
                    dx_setnext_rejects_closed_leaf=True)
 
 
@@ -295,27 +289,19 @@ class Model:
         return "active-rest"  # TODO / WAITING — no boundary of their own
 
     def _reorder(self, group, changed, old_keyword=None):
-        """§4.1: re-sort the changed task's sibling group.
+        """§4.1: place the changed task within its sibling group.
 
-        Normative: minimal move — the changed task moves to its zone
-        boundary; nothing else moves, and a task whose boundary class
-        did not change keeps its position (§2: sibling order is user
-        data). OLD_KEYWORD is the keyword before the change; None means
-        the task newly arrived in this group (add/refile) and is placed
-        regardless. Current (§7 row 1): full stable sort by
-        CURRENT_SORT_RANK. Mixed groups: never reordered (§2).
+        Minimal move — the changed task moves to its zone boundary and
+        nothing else moves; a task whose boundary class did not change
+        keeps its position (§2: sibling order is user data). OLD_KEYWORD
+        is the keyword before the change; None means the task newly
+        arrived in this group (add/refile) and enters at the end of its
+        zone (§4.1 arrival rule). Mixed groups: never reordered (§2).
+        Top-level groups place like any other — a uniform top-level
+        group is an implicit category bucket (ruling 2026-08-02,
+        ex-§7 row 14).
         """
         if not self.is_uniform(group):
-            return
-        if self.div.d14_no_toplevel_reorder and group is self.roots:
-            # §7 row 14 (#34): the CLI's reorder guards with
-            # `(when (> (org-current-level) 1))` and so never runs on
-            # top-level siblings. Ruled an accident (2026-08-02, #62):
-            # normatively a uniform top-level group sorts like an
-            # implicit category bucket.
-            return
-        if self.div.d1_full_sort:
-            group.sort(key=lambda n: CURRENT_SORT_RANK[n.keyword])
             return
         if (old_keyword is not None
                 and self._boundary_class(old_keyword)
@@ -326,45 +312,48 @@ class Model:
             return
         # Minimal move: remove, then reinsert at the zone boundary.
         group.remove(changed)
-        zone = zone_of(changed.keyword)
-        if zone == ZONE_COMPLETED:
-            # Closed → bottom of the completed block (top zone).
-            index = 0
-            while (index < len(group)
-                   and zone_of(group[index].keyword) == ZONE_COMPLETED):
-                index += 1
+        completed_run = 0
+        while (completed_run < len(group)
+               and zone_of(group[completed_run].keyword) == ZONE_COMPLETED):
+            completed_run += 1
+        next_prefix_end = completed_run
+        while (next_prefix_end < len(group)
+               and group[next_prefix_end].keyword == "NEXT"):
+            next_prefix_end += 1
+        if zone_of(changed.keyword) == ZONE_COMPLETED:
+            # Closed → bottom of the completed block (all paths).
+            index = completed_run
         elif changed.keyword == "NEXT":
-            # NEXT → top of the active zone (§2: NEXT always at the top).
-            index = 0
-            while (index < len(group)
-                   and zone_of(group[index].keyword) == ZONE_COMPLETED):
-                index += 1
+            # Entering NEXT from within the active zone → top of the
+            # active zone (§2: NEXT always at the top); arrivals,
+            # reopens out of the completed block, and releases out of
+            # the DEFER block → the end of the NEXT prefix (§4.1
+            # arrival/reopen rules).
+            if (old_keyword is not None
+                    and zone_of(old_keyword) == ZONE_ACTIVE):
+                index = completed_run
+            else:
+                index = next_prefix_end
         elif changed.keyword == "DEFER":
-            # DEFER → top of the DEFER block.
-            index = 0
-            while (index < len(group)
-                   and zone_of(group[index].keyword) != ZONE_DEFER):
-                index += 1
-        else:
-            # TODO/WAITING have no boundary of their own (§4.1).
-            if old_keyword == "NEXT":
-                # Demotion within the active zone: the minimal
-                # I5-preserving move — just past the remaining NEXT
-                # prefix, i.e. in place unless a NEXT sibling would end
-                # up below it.
+            # DEFER → top of the DEFER block; arrivals → the end of it.
+            if old_keyword is None:
+                index = len(group)
+            else:
                 index = 0
                 while (index < len(group)
-                       and zone_of(group[index].keyword) == ZONE_COMPLETED):
+                       and zone_of(group[index].keyword) != ZONE_DEFER):
                     index += 1
-                while index < len(group) and group[index].keyword == "NEXT":
-                    index += 1
-                group.insert(index, changed)
-                return
-            # True arrivals (old_keyword None: add/refile) and
-            # cross-zone reopens are placed at the end of the active
-            # zone.
-            group.insert(self._active_zone_end(group), changed)
-            return
+        else:
+            # TODO/WAITING: leaving NEXT while staying in the active
+            # zone (demotions included, §4.0) → immediately below the
+            # remaining NEXT prefix — in place unless a NEXT sibling
+            # would end up below it; arrivals, reopens out of the
+            # completed block, and DEFER releases → the end of the
+            # active zone.
+            if old_keyword == "NEXT":
+                index = next_prefix_end
+            else:
+                index = self._active_zone_end(group)
         group.insert(index, changed)
 
     @staticmethod
@@ -448,19 +437,18 @@ class Model:
                 promoted.logbook += 1
                 effects.append(SideEffect(
                     "state-change", promoted.heading, "TODO", "NEXT"))
-                if not self.div.d1_full_sort:
-                    # §2: a task entering NEXT takes the top of the
-                    # active zone. Today's CLI never re-sorts the drilled
-                    # subproject's group (row-1 reorder discipline).
-                    self._reorder(candidate.children, promoted,
-                                  old_keyword="TODO")
+                # §2: a task entering NEXT takes the top of the active
+                # zone — placed within the drilled subproject's group.
+                self._reorder(candidate.children, promoted,
+                              old_keyword="TODO")
                 return effects
         return effects
 
     # ── §4.2 add-task ─────────────────────────────────────────────────
 
     def add_task(self, heading, state="TODO", category=None, priority=None):
-        """§4.2: file a freestanding task; never NEXT (I3)."""
+        """§4.2: file a freestanding task; never NEXT (I3); placed per
+        §4.1's arrival rule (end of its zone)."""
         if state == "NEXT":
             return Result(False, "NEXT is only valid inside a project")
         if state not in KEYWORDS:
@@ -468,17 +456,19 @@ class Model:
         node = Node(heading, state, priority=priority)
         if category is None:
             self.roots.append(node)
+            self._reorder(self.roots, node)
             return Result(True, new_state=state)
         target, error = self.find_category(category)
         if target is None:
             return Result(False, error)
         target.children.append(node)
+        self._reorder(target.children, node)
         return Result(True, new_state=state)
 
     # ── §4.3 add-subtask ──────────────────────────────────────────────
 
     def add_subtask(self, parent_substr, heading, state="TODO"):
-        """§4.3: append a child task as last direct child."""
+        """§4.3: add a child task, placed per §4.1's arrival rule."""
         parent, error = self.find(parent_substr)
         if parent is None:
             return Result(False, error)
@@ -491,14 +481,19 @@ class Model:
         node = Node(heading, state)
         parent.children.append(node)
         if parent.keyword == "NEXT":
-            # A project heading is never NEXT (I3): demote, side effect.
+            # A project heading is never NEXT (I3): demote, side effect,
+            # and re-place the demoted parent in its own sibling group —
+            # immediately below that group's remaining NEXT prefix
+            # (§4.1 NEXT-exit rule, demotions included).
             parent.keyword = "TODO"
             parent.logbook += 1
             effects.append(SideEffect(
                 "state-change", parent.heading, "NEXT", "TODO"))
-        if state == "NEXT" or state in CLOSED_STATES:
-            # §4.3: reorder only when the created state ranks above TODO.
-            self._reorder(parent.children, node)
+            self._reorder(self.sibling_group(parent), parent,
+                          old_keyword="NEXT")
+        # §4.1 arrival rule: the child enters at the end of its zone —
+        # never blindly appended.
+        self._reorder(parent.children, node)
         return Result(True, new_state=state, side_effects=effects)
 
     # ── §4.4 set-done / set-cancelled ─────────────────────────────────
@@ -591,11 +586,11 @@ class Model:
         node.logbook += 1  # I10
         if reason and new_state == "WAITING":
             node.waiting_reason = reason
-        # §4.6/§4.1: reorder unless the task entered WAITING from
-        # TODO/NEXT (it keeps its position — §2 zones).
-        if not (new_state == "WAITING" and old_state in ("TODO", "NEXT")):
-            self._reorder(self.sibling_group(node), node,
-                          old_keyword=old_state)
+        # §4.6/§4.1: minimal move. The primitive itself keeps a
+        # TODO→WAITING in place (same boundary class) and sends a
+        # NEXT→WAITING immediately below the remaining NEXT prefix.
+        self._reorder(self.sibling_group(node), node,
+                      old_keyword=old_state)
         return Result(True, old_state=old_state, new_state=new_state)
 
     # ── §4.7 set-next ─────────────────────────────────────────────────
@@ -647,11 +642,11 @@ class Model:
         old_state = node.keyword
         node.keyword = "NEXT"
         node.logbook += 1
-        if not self.div.d1_full_sort:
-            # §2: entering NEXT takes the top of the active zone; the
-            # CLI's leaf set-next never reorders (row-1 discipline).
-            self._reorder(self.sibling_group(node), node,
-                          old_keyword=old_state)
+        # §2/§4.1: entering NEXT from within the active zone takes the
+        # top of the active zone; a DEFER release lands at the end of
+        # the NEXT prefix.
+        self._reorder(self.sibling_group(node), node,
+                      old_keyword=old_state)
         return Result(True, old_state=old_state, new_state="NEXT")
 
     # ── §4.8 refile ───────────────────────────────────────────────────
@@ -694,15 +689,17 @@ class Model:
                 effects.append(SideEffect(
                     "state-change", node.heading, "NEXT", "TODO"))
         if self.is_task(target) and target.keyword == "NEXT":
-            # A NEXT target parent that just became a project → TODO.
+            # A NEXT target parent that just became a project → TODO,
+            # re-placed in its own sibling group (§4.1 NEXT-exit rule,
+            # demotions included).
             target.keyword = "TODO"
             target.logbook += 1
             effects.append(SideEffect(
                 "state-change", target.heading, "NEXT", "TODO"))
-        # §4.8: the destination group is reordered; a surviving NEXT
-        # takes the top of the active zone (§2). Today's CLI does this
-        # too (the §7 row 2 divergence does not reproduce — see the
-        # Divergences docstring); only the sort discipline differs (d1).
+            self._reorder(self.sibling_group(target), target,
+                          old_keyword="NEXT")
+        # §4.8/§4.1 arrival rule: the moved subtree enters the
+        # destination group at the end of its (post-demotion) zone.
         self._reorder(target.children, node)
         return Result(True, new_state=node.keyword, side_effects=effects)
 

@@ -226,9 +226,8 @@ def run_normative(cli, model, op, args, kwargs):
     return envelope, rc, result
 
 
-@pytest.mark.xfail(reason="§7 row 1 (#34): reorder is a full stable "
-                          "state-sort, destroying TODO/WAITING interleaving",
-                   strict=True)
+# §7 row 1 retired 2026-08-07 (#34): the reorder primitive is the §4.1
+# minimal move — this witness now pins the agreeing behavior.
 def test_s7row1_minimal_move_preserves_interleaving(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"), Node("ww", "WAITING"), Node("bb", "TODO"),
@@ -337,10 +336,9 @@ def test_s7row9_move_zone_guard(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-@pytest.mark.xfail(reason="§7 row 14 (#34): reorder never runs on "
-                          "top-level sibling groups (level guard); ruled "
-                          "2026-08-02 to sort as an implicit category bucket",
-                   strict=True)
+# §7 row 14 retired 2026-08-07 (#34): the level-1 guard is gone — a
+# uniform top-level group places like an implicit category bucket
+# (ruling 2026-08-02). This witness now pins the agreeing behavior.
 def test_s7row14_toplevel_group_sorts_as_category_bucket(cli):
     # Uniform flat top-level group (NEXT is illegal at top level, so
     # the bucket's zones are TODO/WAITING -> DEFER -> closed).
@@ -350,6 +348,5 @@ def test_s7row14_toplevel_group_sorts_as_category_bucket(cli):
     _, rc, result = run_normative(
         cli, model, "set_state", ("aa", "DEFER"), {})
     assert rc == 0 and result.ok
-    # Normative: aa sinks to the top of the DEFER block; today's CLI
-    # leaves top-level order untouched.
+    # aa sinks to the top of the DEFER block.
     assert cli.read_skeleton() == model.skeleton()

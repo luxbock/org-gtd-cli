@@ -3249,15 +3249,20 @@ class TestSiblingReordering:
     #   test_gtd_model_properties.py::test_mixed_groups_are_never_reordered
     #   test_gtd_conformance.py::test_cli_conforms_to_current_mode_model
     #
-    # Only the NEXT→WAITING skip-sort pin (§7 row 1 / #34) remains — it
-    # asserts a scenario where current and normative outputs disagree.
+    # The NEXT→WAITING pin below flipped with §7 row 1's retirement
+    # (#34, 2026-08-07): a task leaving NEXT moves immediately below
+    # the remaining NEXT prefix (§4.1) instead of keeping a position
+    # that full-sort placement had given it.
 
     def _write_reorder_org(self, org_dir, content):
         (org_dir / "reorder.org").write_text(content)
 
-    def test_next_to_waiting_preserves_sibling_position(self, org_dir):
-        # pins §7 row 1 (#34)
-        # pins §7 row 5 (#39)
+    def test_next_to_waiting_lands_below_next_prefix(self, org_dir):
+        # pins §7 row 5 (#39): the reasonless WAITING call flips to
+        # failure when #39 lands.
+        # §4.1 NEXT-exit: the only NEXT leaving to WAITING lands just
+        # below the (now empty) NEXT prefix — the top of the active
+        # zone — with the TODO interleaving untouched.
         self._write_reorder_org(org_dir, """\
 * TODO Project H
 ** TODO Alpha
@@ -3267,8 +3272,8 @@ class TestSiblingReordering:
         stdout, stderr, rc = run_cli("set-state", "Gate", "WAITING", org_dir=org_dir)
         assert rc == 0
         f = org_dir / "reorder.org"
-        assert_line_before(f, "TODO Alpha", "WAITING Gate")
-        assert_line_before(f, "WAITING Gate", "TODO Beta")
+        assert_line_before(f, "WAITING Gate", "TODO Alpha")
+        assert_line_before(f, "TODO Alpha", "TODO Beta")
 
 
 # ===========================================================================
@@ -3284,15 +3289,18 @@ class TestAddSubtaskStateReorder:
     #   test_gtd_model_properties.py::test_invariants_preserved_by_any_operation_sequence
     #   test_gtd_conformance.py::test_cli_conforms_to_current_mode_model
     #
-    # Only the WAITING append-last pin (§7 row 1 / #34) remains — it is
-    # a stage-2c anchor for the arrival-rule fix.
+    # Only the WAITING arrival pin remains — the §4.1 arrival rule
+    # places a new WAITING at the end of the active zone (§7 row 1
+    # retired 2026-08-07, #34).
 
     def _write_reorder_org(self, org_dir, content):
         (org_dir / "reorder.org").write_text(content)
 
     def test_add_waiting_preserves_end_position(self, org_dir):
-        # anchor §7 row 1 (#34) — non-flipping: current and normative outputs
-        # agree in this fixture; #34's stage-2c work touches this code path
+        # §4.1 arrival rule: a new WAITING enters at the end of the
+        # active zone — after the existing TODO siblings; placement
+        # MUST NOT bubble it above them (the WAITING position
+        # invariant, see 3f0802b).
         self._write_reorder_org(org_dir, """\
 * TODO Project W1
 ** TODO Alpha
@@ -3303,9 +3311,6 @@ class TestAddSubtaskStateReorder:
             "--state", "WAITING", org_dir=org_dir)
         assert rc == 0
         f = org_dir / "reorder.org"
-        # WAITING must appear after existing TODO siblings — reorder MUST
-        # NOT bubble it above them (the WAITING position invariant, see
-        # 3f0802b).
         assert_line_before(f, "TODO Alpha", "WAITING Hold item")
         assert_line_before(f, "TODO Beta", "WAITING Hold item")
 
