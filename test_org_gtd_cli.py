@@ -3316,6 +3316,266 @@ class TestAddSubtaskStateReorder:
 
 
 # ===========================================================================
+# 39c. The §4.1 minimal-move reorder primitive (Issue #34)
+# ===========================================================================
+
+class TestMinimalMoveReorder:
+    """§4.1 minimal move (#34): diff-shape regressions.
+
+    The reorder primitive moves only the changed entry — every other
+    sibling's bytes stay identical — and an entry already at a
+    consistent position is a strict no-op (byte-identical file outside
+    the entry's own lines). These pins are byte comparisons, not just
+    order assertions: `org-sort-entries` was unstable, so even ordered
+    groups used to reshuffle."""
+
+    def _write(self, org_dir, content):
+        f = org_dir / "minimal.org"
+        f.write_text(content)
+        return f
+
+    @staticmethod
+    def _split_entry(text, heading):
+        """Split TEXT into (entry_lines, other_lines) where entry_lines
+        is HEADING's subtree (heading line up to the next heading of
+        equal-or-shallower level) and other_lines is everything else."""
+        entry, others = [], []
+        level, taking = None, False
+        for line in text.splitlines(keepends=True):
+            m = re.match(r"^(\*+) ", line)
+            if taking and m and len(m.group(1)) <= level:
+                taking = False
+            if not taking and m and heading in line:
+                taking, level = True, len(m.group(1))
+            (entry if taking else others).append(line)
+        return entry, others
+
+    def test_set_done_in_place_is_byte_noop_outside_entry(self, org_dir):
+        # Already at the bottom of the completed block: strict no-op —
+        # every byte outside the closed entry's own lines is unchanged.
+        # (WAITING sibling blocks promotion, isolating the primitive.)
+        f = self._write(org_dir, """\
+* TODO Noop project
+** DONE Ancient
+** TODO Fresh close
+** WAITING Hold gate
+** TODO Later work
+""")
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("set-done", "Fresh close", org_dir=org_dir)
+        assert rc == 0
+        after = f.read_text()
+        _, others_before = self._split_entry(before, "Fresh close")
+        entry_after, others_after = self._split_entry(after, "Fresh close")
+        assert others_after == others_before  # byte-identical siblings
+        assert entry_after[0].startswith("** DONE Fresh close")
+
+    def test_set_done_reposition_moves_only_the_entry(self, org_dir):
+        # Repositioning: the diff is exactly the entry's removal +
+        # insertion; all other siblings byte-identical and in order.
+        f = self._write(org_dir, """\
+* TODO Move project
+** TODO Alpha step
+** WAITING Hold gate
+** TODO Move close
+""")
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("set-done", "Move close", org_dir=org_dir)
+        assert rc == 0
+        after = f.read_text()
+        _, others_before = self._split_entry(before, "Move close")
+        entry_after, others_after = self._split_entry(after, "Move close")
+        assert others_after == others_before
+        assert entry_after[0].startswith("** DONE Move close")
+        assert_line_before(f, "DONE Move close", "TODO Alpha step")
+        assert_line_before(f, "TODO Alpha step", "WAITING Hold gate")
+
+    def test_set_state_todo_to_waiting_zero_movement(self, org_dir):
+        # §4.1: WAITING entered from TODO keeps its position — the
+        # sunk-WAITING regression (the old full sort clustered WAITING
+        # below TODO).
+        f = self._write(org_dir, """\
+* TODO Wait project
+** TODO Alpha step
+** TODO Wait gate
+** TODO Beta step
+""")
+        before = f.read_text()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wait gate", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        after = f.read_text()
+        _, others_before = self._split_entry(before, "Wait gate")
+        entry_after, others_after = self._split_entry(after, "Wait gate")
+        assert others_after == others_before
+        assert_line_before(f, "TODO Alpha step", "WAITING Wait gate")
+        assert_line_before(f, "WAITING Wait gate", "TODO Beta step")
+
+    def test_next_to_waiting_with_remaining_prefix_restores_i5(self, org_dir):
+        # The old skip-sort mitigation left a NEXT-entering-WAITING
+        # above the remaining NEXT prefix (I5 violation). §4.1: it
+        # lands immediately below the prefix.
+        f = self._write(org_dir, """\
+* TODO Prefix project
+** NEXT Front gate
+** NEXT Front other
+** TODO Beta step
+""")
+        stdout, stderr, rc = run_cli(
+            "set-state", "Front gate", "WAITING", org_dir=org_dir)
+        assert rc == 0
+        assert_line_before(f, "NEXT Front other", "WAITING Front gate")
+        assert_line_before(f, "WAITING Front gate", "TODO Beta step")
+
+    def test_set_next_mid_list_moves_to_top_of_active_zone(self, org_dir):
+        # §4.1: entering NEXT from within the active zone takes the top
+        # of the active zone — directly below the completed block.
+        f = self._write(org_dir, """\
+* TODO Front project
+** DONE Ancient
+** TODO Alpha step
+** TODO Front target
+** TODO Beta step
+""")
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("set-next", "Front target", org_dir=org_dir)
+        assert rc == 0
+        after = f.read_text()
+        _, others_before = self._split_entry(before, "Front target")
+        _, others_after = self._split_entry(after, "Front target")
+        assert others_after == others_before
+        assert_line_before(f, "DONE Ancient", "NEXT Front target")
+        assert_line_before(f, "NEXT Front target", "TODO Alpha step")
+        assert_line_before(f, "TODO Alpha step", "TODO Beta step")
+
+    def test_refile_next_lands_at_top_of_destination_active_zone(self, org_dir):
+        # §4.1 arrival rule: a refiled NEXT enters at the end of the
+        # destination's (empty) NEXT prefix — the top of the active
+        # zone, below the completed block.
+        f = self._write(org_dir, """\
+* TODO Dest project
+** DONE Ancient
+** TODO Alpha step
+** DEFER Sleepy end
+* TODO Src project
+** NEXT Move front
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Move front", "--to", "Dest project", org_dir=org_dir)
+        assert rc == 0
+        assert_line_before(f, "DONE Ancient", "NEXT Move front")
+        assert_line_before(f, "NEXT Move front", "TODO Alpha step")
+        assert_line_before(f, "TODO Alpha step", "DEFER Sleepy end")
+
+    def test_set_done_in_category_bucket_joins_completed_block(self, org_dir):
+        # §4.1 zones apply to any uniform group — lone tasks under a
+        # keyword-less category heading included.
+        f = self._write(org_dir, """\
+* Bucket shelf
+** TODO Alpha chore
+** TODO Bucket close
+** TODO Beta chore
+""")
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("set-done", "Bucket close", org_dir=org_dir)
+        assert rc == 0
+        after = f.read_text()
+        _, others_before = self._split_entry(before, "Bucket close")
+        _, others_after = self._split_entry(after, "Bucket close")
+        assert others_after == others_before
+        assert_line_before(f, "DONE Bucket close", "TODO Alpha chore")
+        assert_line_before(f, "TODO Alpha chore", "TODO Beta chore")
+
+    def test_set_state_defer_moves_to_top_of_defer_block(self, org_dir):
+        # §4.1: entering DEFER moves to the top of the DEFER block;
+        # open siblings' relative order unchanged.
+        f = self._write(org_dir, """\
+* TODO Shelf project
+** TODO Shelf target
+** TODO Beta step
+** DEFER Sleepy end
+""")
+        before = f.read_text()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Shelf target", "DEFER", org_dir=org_dir)
+        assert rc == 0
+        after = f.read_text()
+        _, others_before = self._split_entry(before, "Shelf target")
+        _, others_after = self._split_entry(after, "Shelf target")
+        assert others_after == others_before
+        assert_line_before(f, "TODO Beta step", "DEFER Shelf target")
+        assert_line_before(f, "DEFER Shelf target", "DEFER Sleepy end")
+
+    def test_toplevel_uniform_group_places_like_a_bucket(self, org_dir):
+        # Ex-§7 row 14 (ruling 2026-08-02): the level-1 guard is gone —
+        # a uniform top-level group is an implicit category bucket.
+        f = self._write(org_dir, """\
+* TODO Aaa chore
+* TODO Level target
+* DEFER Zzz shelf
+""")
+        stdout, stderr, rc = run_cli(
+            "set-state", "Level target", "DEFER", org_dir=org_dir)
+        assert rc == 0
+        assert_line_before(f, "TODO Aaa chore", "DEFER Level target")
+        assert_line_before(f, "DEFER Level target", "DEFER Zzz shelf")
+
+    def test_mixed_toplevel_group_never_moves(self, org_dir):
+        # A keyword-less sibling makes the group mixed: no movement,
+        # top level included.
+        f = self._write(org_dir, """\
+* TODO Mixed target
+* Plain notes
+* DEFER Zzz shelf
+""")
+        stdout, stderr, rc = run_cli("set-done", "Mixed target", org_dir=org_dir)
+        assert rc == 0
+        assert_line_before(f, "DONE Mixed target", "Plain notes")
+        assert_line_before(f, "Plain notes", "DEFER Zzz shelf")
+
+    def test_add_subtask_todo_arrives_at_end_of_active_zone(self, org_dir):
+        # §4.1 arrival rule: a new TODO enters at the end of the active
+        # zone — above the DEFER block, never blindly appended.
+        f = self._write(org_dir, """\
+* TODO Arrive project
+** TODO Alpha step
+** DEFER Sleepy end
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Arrive project", "Fresh arrival", org_dir=org_dir)
+        assert rc == 0
+        assert_line_before(f, "TODO Alpha step", "TODO Fresh arrival")
+        assert_line_before(f, "TODO Fresh arrival", "DEFER Sleepy end")
+
+    def test_auto_promotion_is_zone_consistent_and_byte_minimal(self, org_dir):
+        # §4.1: closing the NEXT front promotes the first open TODO —
+        # already atop the active zone, so nothing moves; the diff is
+        # two keyword lines (+ close/log lines), no repositioning.
+        f = self._write(org_dir, """\
+* TODO Promo project
+** NEXT Promo front
+** TODO Alpha step
+** TODO Beta step
+""")
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("set-done", "Promo front", org_dir=org_dir)
+        assert rc == 0
+        after = f.read_text()
+        # No heading changed position.
+        headings = [l for l in after.splitlines() if l.startswith("*")]
+        assert [h.split()[-2:] for h in headings] == [
+            h.split()[-2:] for h in before.splitlines() if h.startswith("*")]
+        assert_line_before(f, "DONE Promo front", "NEXT Alpha step")
+        assert_line_before(f, "NEXT Alpha step", "TODO Beta step")
+        # Beta untouched byte-for-byte.
+        _, others_before = self._split_entry(before, "Beta step")
+        _, others_after = self._split_entry(after, "Beta step")
+        entry_before, _ = self._split_entry(before, "Beta step")
+        entry_after, _ = self._split_entry(after, "Beta step")
+        assert entry_after == entry_before
+
+
+# ===========================================================================
 # 19b. refile: GTD structural invariants at destination (Issue #21)
 # ===========================================================================
 
