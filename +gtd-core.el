@@ -1,7 +1,8 @@
 ;;; pkgs/org-gtd-cli/+gtd-core.el -*- lexical-binding: t; -*-
 
-;; Shared GTD core: TODO keywords, tag triggers, project detection, skip
-;; functions, agenda views. Loaded by both Doom (+gtd.el) and org-gtd-cli.
+;; Shared GTD core: TODO keywords, tag triggers, project detection, the §4.1
+;; minimal-move sibling placement, skip functions, agenda views. Loaded by
+;; both Doom (+gtd.el) and org-gtd-cli.
 ;; Canonical copy lives here, with the org-gtd-cli package, so that tool's
 ;; standalone subflake (./flake.nix) is self-contained.
 ;;
@@ -206,6 +207,183 @@ TODO keywords, priority cookies, tags, and comment markers are stripped."
       (while (org-up-heading-safe)
         (push (org-get-heading t t t t) path)))
     (mapconcat #'identity path "/")))
+
+;; ── §4.1 minimal-move sibling placement ─────────────────────────────────────
+;; The SEMANTICS.md §4.1 placement primitive, shared between the CLI's batch
+;; mutations and Doom's interactive hooks. Pure elisp + org.el only: no
+;; cl-lib/seq, no CLI symbols, no load-time calls.
+
+(defun gtd/reorder--state-zone (state)
+  "Return the SEMANTICS.md §2 zone STATE belongs to.
+One of the symbols `completed' (DONE/CANCELLED, top block), `defer'
+(DEFER, bottom block), or `active' (everything else — TODO/NEXT/WAITING
+today; any later open keyword falls here by default)."
+  (cond
+   ((member state org-done-keywords) 'completed)
+   ((string= state "DEFER") 'defer)
+   (t 'active)))
+
+(defun gtd/reorder--boundary-class (state)
+  "Return the §4.1 boundary class of STATE.
+`closed' (completed block), `next' (the NEXT prefix), `defer' (DEFER
+block), or `active-rest' — the free interior of the active zone
+(TODO/WAITING today; the never-move set, so a later addition such as
+ONGOING lands here without further changes). A transition that stays
+within one class never moves anything."
+  (cond
+   ((member state org-done-keywords) 'closed)
+   ((string= state "NEXT") 'next)
+   ((string= state "DEFER") 'defer)
+   (t 'active-rest)))
+
+(defun gtd/reorder--dest-index (new-state old-state states)
+  "Destination index for an entry with NEW-STATE among sibling STATES.
+STATES is the ordered state list of the sibling group WITHOUT the
+moving entry; the returned index is the position to insert before.
+OLD-STATE is the keyword before the change; nil means the entry newly
+arrived in the group (add-task/add-subtask/refile). Mirrors
+`gtd_reference_model.Model._reorder' exactly (SEMANTICS.md §4.1)."
+  (let* ((n (length states))
+         (states (vconcat states))
+         (completed-run
+          (let ((i 0))
+            (while (and (< i n)
+                        (eq (gtd/reorder--state-zone (aref states i))
+                            'completed))
+              (setq i (1+ i)))
+            i))
+         (next-prefix-end
+          (let ((i completed-run))
+            (while (and (< i n) (string= (aref states i) "NEXT"))
+              (setq i (1+ i)))
+            i)))
+    (cond
+     ((eq (gtd/reorder--state-zone new-state) 'completed)
+      ;; Closed → bottom of the completed block (all paths).
+      completed-run)
+     ((string= new-state "NEXT")
+      ;; Entering NEXT from within the active zone → top of the active
+      ;; zone (§2: NEXT always at the top); arrivals, reopens out of
+      ;; the completed block, and releases out of the DEFER block →
+      ;; the end of the NEXT prefix (§4.1 arrival/reopen rules).
+      (if (and old-state (eq (gtd/reorder--state-zone old-state) 'active))
+          completed-run
+        next-prefix-end))
+     ((string= new-state "DEFER")
+      ;; DEFER → top of the DEFER block; arrivals → the end of it.
+      (if old-state
+          (let ((i 0))
+            (while (and (< i n)
+                        (not (eq (gtd/reorder--state-zone (aref states i))
+                                 'defer)))
+              (setq i (1+ i)))
+            i)
+        n))
+     (t
+      ;; TODO/WAITING: leaving NEXT while staying in the active zone →
+      ;; immediately below the remaining NEXT prefix; arrivals, reopens
+      ;; out of the completed block, and DEFER releases → the end of
+      ;; the active zone.
+      (if (and old-state (string= old-state "NEXT"))
+          next-prefix-end
+        (let ((i n))
+          (while (and (> i 0)
+                      (eq (gtd/reorder--state-zone (aref states (1- i)))
+                          'defer))
+            (setq i (1- i)))
+          i))))))
+
+(defun gtd/reorder-place-entry (old-state)
+  "Place the entry at point within its sibling group per SEMANTICS.md §4.1.
+
+Call with point anywhere inside the changed entry; the entry's current
+TODO keyword is read from the buffer.  OLD-STATE is the keyword the
+entry carried before the mutating state change (a string); nil means
+the entry newly arrived in this group (add-task/add-subtask/refile
+placement — the §4.1 arrival rule, end of its zone).
+
+Minimal move: only the entry at point may move — cut and reinserted at
+its zone boundary — leaving every other sibling's bytes untouched.  An
+entry already at a consistent position is a strict no-op (the buffer is
+not modified at all).  Mixed sibling groups (any keyword-less sibling)
+are never reordered.  Top-level groups place like any other — a uniform
+top-level group is an implicit category bucket (ruling 2026-08-02,
+ex-§7 row 14).
+
+Does not save the buffer.  Leaves point on the entry's heading (at its
+new location when moved).  Returns non-nil iff the entry moved."
+  (org-back-to-heading 'invisible-ok)
+  (let* ((level (org-current-level))
+         (my-beg (point))
+         (new-state (org-get-todo-state))
+         (moved nil))
+    (unless (and old-state new-state
+                 (eq (gtd/reorder--boundary-class old-state)
+                     (gtd/reorder--boundary-class new-state)))
+      ;; Collect the sibling group: (BOL . STATE) per sibling, in
+      ;; document order, plus the group's end position (the first
+      ;; heading shallower than LEVEL, or point-max).
+      (let ((group-end (point-max))
+            (sibs '()))
+        (save-excursion
+          (if (> level 1)
+              (progn (org-up-heading-safe) (forward-line 1))
+            (goto-char (point-min)))
+          (catch 'group-done
+            (while (re-search-forward org-heading-regexp nil t)
+              (let ((this-level (org-current-level)))
+                (cond
+                 ((< this-level level)
+                  (setq group-end (line-beginning-position))
+                  (throw 'group-done nil))
+                 ((= this-level level)
+                  (push (cons (line-beginning-position)
+                              (org-get-todo-state))
+                        sibs)))))))
+        (setq sibs (nreverse sibs))
+        ;; Mixed group (a keyword-less sibling) → never reordered (§2).
+        (let ((mixed nil))
+          (dolist (s sibs)
+            (when (null (cdr s)) (setq mixed t)))
+          (unless mixed
+            (let ((my-index nil)
+                  (others '())
+                  (i 0))
+              (dolist (s sibs)
+                (if (= (car s) my-beg)
+                    (setq my-index i)
+                  (push s others))
+                (setq i (1+ i)))
+              (setq others (nreverse others))
+              (unless my-index
+                (error "reorder: entry at %d not in its sibling group" my-beg))
+              (let ((dest (gtd/reorder--dest-index
+                           new-state old-state (mapcar #'cdr others))))
+                (unless (= dest my-index)
+                  ;; Cut the entry's region — its heading line through
+                  ;; the next sibling's heading line (or the group end)
+                  ;; — and reinsert it at the destination boundary.
+                  ;; Markers keep the insertion point valid across the
+                  ;; deletion.
+                  (let* ((region-end (if (< (1+ my-index) (length sibs))
+                                         (car (nth (1+ my-index) sibs))
+                                       group-end))
+                         (text (buffer-substring my-beg region-end))
+                         (insert-marker
+                          (copy-marker (if (< dest (length others))
+                                           (car (nth dest others))
+                                         group-end))))
+                    (unless (string-suffix-p "\n" text)
+                      (setq text (concat text "\n")))
+                    (delete-region my-beg region-end)
+                    (goto-char insert-marker)
+                    (unless (bolp) (insert "\n"))
+                    (let ((entry-beg (point)))
+                      (insert text)
+                      (goto-char entry-beg))
+                    (set-marker insert-marker nil)
+                    (setq moved t)))))))))
+    moved))
 
 ;; ── Agenda skip functions ───────────────────────────────────────────────────
 
