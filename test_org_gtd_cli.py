@@ -1449,6 +1449,116 @@ class TestDone:
         assert data["task"]["state"] == "DONE"
         assert "** DONE Prepare onboarding guide" in (org_dir / "tasks.org").read_text()
 
+    # --- §4.5 step 3: the whole-group scan (#38) -------------------------
+
+    def _write_earlier_todo_project(self, org_dir):
+        # The stranding shape of #38: the only open TODO sits *before* the
+        # task being driven (a legitimate NEXT -> WAITING -> TODO history
+        # leaves the front behind the earlier work). Distinctive headings
+        # avoid collisions with the other agenda files.
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Gscan Area\n"
+            "** TODO Gscan root project\n"
+            "*** TODO Gscan earlier todo\n"
+            "*** NEXT Gscan current step\n"
+        )
+
+    def _write_mixed_group_project(self, org_dir):
+        # [TODO a, stuck subproject, DONE, NEXT b]: closing the NEXT must
+        # promote the *first* open TODO in document order and leave the
+        # stuck subproject completely alone.
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Gscan Area\n"
+            "** TODO Gscan root project\n"
+            "*** TODO Gscan earlier todo\n"
+            "*** TODO Gscan stuck subproject\n"
+            "**** TODO Gscan subproject child\n"
+            "*** DONE Gscan already finished\n"
+            "*** NEXT Gscan current step\n"
+        )
+
+    def _write_all_done_subproject_project(self, org_dir):
+        # An all-done-but-open subproject sits between the closed task's
+        # group start and the promotable TODO: the scan passes it, reports
+        # it for review (olli ruling E5) and promotes the later leaf.
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Gscan Area\n"
+            "** TODO Gscan root project\n"
+            "*** TODO Gscan finished subproject\n"
+            "**** DONE Gscan subproject child\n"
+            "*** TODO Gscan later step\n"
+            "*** NEXT Gscan current step\n"
+        )
+
+    def test_promotion_scans_whole_group_backwards(self, org_dir):
+        # §4.5 step 3 scans the whole sibling group in document order, so an
+        # open TODO *earlier* than the closed task is promoted instead of
+        # leaving the project stranded (#38).
+        self._write_earlier_todo_project(org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-done", "Gscan current step", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Auto-progressed" in stdout
+        assert "Gscan earlier todo" in stdout
+        text = (org_dir / "tasks.org").read_text()
+        assert "DONE Gscan current step" in text
+        assert "NEXT Gscan earlier todo" in text
+
+    def test_promotion_scans_whole_group_backwards_dry_run(self, org_dir):
+        # The preview predicts exactly that promotion and mutates nothing.
+        self._write_earlier_todo_project(org_dir)
+        before = (org_dir / "tasks.org").read_text()
+        stdout, stderr, rc = run_cli(
+            "set-done", "Gscan current step", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Would auto-progress: "Gscan earlier todo" -> NEXT' in stdout
+        assert (org_dir / "tasks.org").read_text() == before
+
+    def test_promotion_prefers_first_todo_in_document_order(self, org_dir):
+        # First in document order wins, and the stuck subproject that comes
+        # after it is not entered (no drill-in, no state change).
+        self._write_mixed_group_project(org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-done", "Gscan current step", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "in subproject" not in stdout
+        text = (org_dir / "tasks.org").read_text()
+        assert "NEXT Gscan earlier todo" in text
+        assert "TODO Gscan stuck subproject" in text
+        assert "TODO Gscan subproject child" in text
+        assert "NEXT Gscan subproject child" not in text
+
+    def test_all_done_subproject_reported_and_scan_continues(self, org_dir):
+        # Passing an all-done-but-open subproject reports it for review
+        # (advisory only — it is not closed) and the scan continues to the
+        # next candidate.
+        self._write_all_done_subproject_project(org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-done", "Gscan current step", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "project left open for review" in stdout
+        assert "Gscan finished subproject" in stdout
+        assert 'Auto-progressed: "Gscan later step" -> NEXT' in stdout
+        text = (org_dir / "tasks.org").read_text()
+        assert "TODO Gscan finished subproject" in text
+        assert "DONE Gscan finished subproject" not in text
+        assert "NEXT Gscan later step" in text
+
+    def test_all_done_subproject_reported_dry_run(self, org_dir):
+        # Same advisory and the same promotion in the preview.
+        self._write_all_done_subproject_project(org_dir)
+        before = (org_dir / "tasks.org").read_text()
+        stdout, stderr, rc = run_cli(
+            "set-done", "Gscan current step", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "project would be left open for review" in stdout
+        assert "Gscan finished subproject" in stdout
+        assert 'Would auto-progress: "Gscan later step" -> NEXT' in stdout
+        assert (org_dir / "tasks.org").read_text() == before
+
     def test_dry_run_blocked_parent_reports_blocked_and_mutates_nothing(self, org_dir):
         # Dry-run set-done on a blocked parent must report it WOULD be blocked
         # (rc 1, JSON error on stdout) and change nothing on disk.
@@ -1620,6 +1730,32 @@ class TestSetCancelled:
         assert rc == 0, stderr
         assert "Would auto-progress" in stdout
         assert (org_dir / "tasks.org").read_text() == before
+
+    def test_set_cancelled_promotion_scans_whole_group(self, org_dir):
+        """set-cancelled runs the same §4.5 scan: an open TODO earlier in the
+        group is promoted instead of stranding the project (#38)."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Gcancel Area\n"
+            "** TODO Gcancel root project\n"
+            "*** TODO Gcancel earlier todo\n"
+            "*** NEXT Gcancel current step\n"
+        )
+        data, stderr, rc = run_cli_json(
+            "set-cancelled", "Gcancel current step", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["side_effects"] == [
+            {
+                "action": "state-change",
+                "heading": "Gcancel earlier todo",
+                "old_state": "TODO",
+                "new_state": "NEXT",
+                "file": "tasks.org",
+            }
+        ]
+        text = (org_dir / "tasks.org").read_text()
+        assert "CANCELLED Gcancel current step" in text
+        assert "NEXT Gcancel earlier todo" in text
 
     def test_blocked_parent_does_not_cancel_or_auto_progress(self, org_dir):
         """Blocked project cancellation must fail without side effects."""
@@ -5878,6 +6014,66 @@ class TestJsonMutations:
             e.get("action") == "state-change" and e.get("new_state") == "DONE"
             for e in data["side_effects"]
         )
+
+    def _write_whole_group_project(self, org_dir):
+        # §4.5 step 3 (#38): an all-done-but-open subproject and a promotable
+        # leaf both sit *before* the closed task in document order.
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Jscan Area\n"
+            "** TODO Jscan root project\n"
+            "*** TODO Jscan finished subproject\n"
+            "**** DONE Jscan subproject child\n"
+            "*** TODO Jscan later step\n"
+            "*** NEXT Jscan current step\n"
+        )
+
+    def test_set_done_whole_group_scan_side_effects_json(self, org_dir):
+        """The whole-group scan reports, in scan order, a project-needs-review
+        for every all-done-but-open subproject it passes plus the single
+        promotion it makes (#38; olli ruling E5 for the review entry)."""
+        self._write_whole_group_project(org_dir)
+        data, stderr, rc = run_cli_json(
+            "set-done", "Jscan current step", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["side_effects"] == [
+            {
+                "action": "project-needs-review",
+                "heading": "Jscan finished subproject",
+                "file": "tasks.org",
+            },
+            {
+                "action": "state-change",
+                "heading": "Jscan later step",
+                "old_state": "TODO",
+                "new_state": "NEXT",
+                "file": "tasks.org",
+            },
+        ]
+
+    def test_set_done_whole_group_scan_dry_run_side_effects_json(self, org_dir):
+        """Dry-run previews exactly the same envelope, mutating nothing."""
+        self._write_whole_group_project(org_dir)
+        before = (org_dir / "tasks.org").read_text()
+        data, stderr, rc = run_cli_json(
+            "set-done", "Jscan current step", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["dry_run"] is True
+        assert data["side_effects"] == [
+            {
+                "action": "project-needs-review",
+                "heading": "Jscan finished subproject",
+                "file": "tasks.org",
+            },
+            {
+                "action": "state-change",
+                "heading": "Jscan later step",
+                "old_state": "TODO",
+                "new_state": "NEXT",
+                "file": "tasks.org",
+            },
+        ]
+        assert (org_dir / "tasks.org").read_text() == before
 
     def test_set_state_json(self, org_dir):
         # pins §7 row 5 (#39)
