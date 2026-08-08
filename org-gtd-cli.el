@@ -3287,8 +3287,138 @@ always reflects the buffer's current contents."
 
 ;; --- done: auto-progress helpers ---
 
+(defun org-gtd-cli/subproject-all-done-p ()
+  "Non-nil if the subproject at point has task children, all of them closed.
+Direct children only: SEMANTICS.md §4.5 does not pin whether tasks
+below the subproject's *own* category headings count (§2 severing —
+PARKED, awaiting a ruling), and `gtd_reference_model' reads direct
+children here too.  The two must agree, so neither side widens the
+scope unilaterally."
+  (save-excursion
+    (let ((any nil) (all t))
+      (when (org-goto-first-child)
+        (catch 'scanned
+          (while t
+            (let ((state (org-get-todo-state)))
+              (when state
+                (setq any t)
+                (unless (member state org-done-keywords) (setq all nil))))
+            (unless (org-get-next-sibling) (throw 'scanned nil)))))
+      (and any all))))
+
+(defun org-gtd-cli/first-promotable-child ()
+  "Heading of the first TODO non-project child of the heading at point.
+The read-only counterpart of `gtd/promote-first-child-task' — same
+candidate, no mutation (the §4.5 drill-in preview).  Returns nil when
+the subproject has nothing promotable at that level."
+  (save-excursion
+    (when (org-goto-first-child)
+      (catch 'found
+        (while t
+          (when (and (equal (org-get-todo-state) "TODO")
+                     (not (gtd/is-project-p)))
+            (throw 'found (org-get-heading t t t t)))
+          (unless (org-get-next-sibling) (throw 'found nil)))))))
+
+(defun org-gtd-cli/auto-progress--scan (rel-file target-pos target-state dry)
+  "Step 3 of the SEMANTICS.md §4.5 promotion rule; return its messages.
+
+Point is on the just-closed task.  TARGET-POS is that task's heading
+position and TARGET-STATE the keyword to read it as: a dry run runs
+*before* the close, so the buffer still holds the pre-close keyword and
+the caller passes the simulated one instead.
+
+The scan walks the **whole** sibling group from the parent's first
+child, in document order (#38: the old forward-only scan from the
+closed task stranded a project whose only open TODO sat earlier in the
+group — `NEXT → WAITING → TODO' is a legitimate flow, so the open TODO
+need not follow the task being driven).  Steps 1 and 2 of §4.5 — the
+any-position NEXT/WAITING guard and the all-closed parent review —
+are the caller's; by the time this runs, exactly one candidate may be
+promoted.  Per TODO candidate:
+
+  - leaf task → promote TODO→NEXT and stop;
+  - subproject with an active (NEXT/WAITING) descendant → skip it;
+  - all-done-but-open subproject → report it for review and continue
+    (olli ruling E5, 2026-07-28: one `project-needs-review' per such
+    subproject passed, same shape as the end-of-project emission —
+    advisory only, nothing is closed);
+  - stuck subproject → drill exactly one level and stop; if nothing is
+    promotable at that level, continue past it.
+
+With DRY non-nil nothing is mutated and the messages carry the
+dry-run wording, so `--dry-run' predicts the real run exactly."
+  (let ((msgs '()))
+    (save-excursion
+      (org-up-heading-safe)
+      (when (org-goto-first-child)
+        (catch 'promoted
+          (while t
+            (let ((state (if (= (point) target-pos)
+                             target-state
+                           (org-get-todo-state))))
+              (when (equal state "TODO")
+                (cond
+                 ;; Leaf task → promote and stop.
+                 ((not (gtd/is-project-p))
+                  (let ((h (org-get-heading t t t t)))
+                    (unless dry
+                      (org-todo "NEXT")
+                      ;; §4.1: the promoted task enters NEXT from
+                      ;; within the active zone — top of the zone.
+                      (save-excursion
+                        (org-gtd-cli/reorder-siblings-by-state "TODO")))
+                    (push (if dry
+                              (format "  Would auto-progress: \"%s\" -> NEXT\n" h)
+                            (format "  Auto-progressed: \"%s\" -> NEXT (%s)\n"
+                                    h rel-file))
+                          msgs))
+                  (throw 'promoted t))
+                 ;; Subproject already in motion → skip it.
+                 ((gtd/has-active-in-subtree-p) nil)
+                 ;; All-done-but-open subproject → report and continue.
+                 ((org-gtd-cli/subproject-all-done-p)
+                  (let ((h (org-get-heading t t t t)))
+                    (push (if dry
+                              (format "  All subtasks done — project would be left open for review: \"%s\" (%s)\n"
+                                      h rel-file)
+                            (format "  All subtasks done — project left open for review: \"%s\" (%s)\n"
+                                    h rel-file))
+                          msgs)))
+                 ;; Stuck subproject → drill exactly one level.
+                 (t
+                  (let* ((sub-heading (org-get-heading t t t t))
+                         (child-heading
+                          (if dry
+                              (org-gtd-cli/first-promotable-child)
+                            (gtd/promote-first-child-task))))
+                    (when child-heading
+                      (unless dry
+                        ;; §4.1: place the drilled promotion within the
+                        ;; subproject's own sibling group. The drill only
+                        ;; ever promotes when that group had no NEXT, so
+                        ;; the first NEXT child is the one just promoted.
+                        (save-excursion
+                          (when (org-goto-first-child)
+                            (let ((found (equal (org-get-todo-state) "NEXT")))
+                              (while (and (not found) (org-get-next-sibling))
+                                (setq found (equal (org-get-todo-state) "NEXT")))
+                              (when found
+                                (org-gtd-cli/reorder-siblings-by-state "TODO"))))))
+                      (push (if dry
+                                (format "  Would auto-progress: \"%s\" -> NEXT (in subproject \"%s\")\n"
+                                        child-heading sub-heading)
+                              (format "  Auto-progressed: \"%s\" -> NEXT (in subproject \"%s\") (%s)\n"
+                                      child-heading sub-heading rel-file))
+                            msgs)
+                      (throw 'promoted t)))))))
+            (unless (org-get-next-sibling) (throw 'promoted nil))))))
+    (nreverse msgs)))
+
 (defun org-gtd-cli/auto-progress (rel-file)
   "Run project-aware auto-progress from point (a just-completed task).
+The SEMANTICS.md §4.5 promotion rule; step 3 lives in
+`org-gtd-cli/auto-progress--scan', shared with the preview below.
 Returns a list of message strings in printing order."
   (let ((msgs '()))
     (when (gtd/is-project-subtree-p)
@@ -3322,49 +3452,21 @@ Returns a list of message strings in printing order."
                 (setq msgs (nconc msgs
                   (list (format "  All subtasks done — project left open for review: \"%s\" (%s)\n"
                                 (org-get-heading t t t t) rel-file)))))))
-           ;; Default — promote next actionable task (project-aware)
+           ;; Step 3 — scan the whole sibling group in document order
+           ;; and promote the first open TODO candidate (project-aware).
            (t
-            (save-excursion
-              (let ((promoted nil))
-                (while (and (not promoted) (org-get-next-sibling))
-                  (when (equal (org-get-todo-state) "TODO")
-                    (if (not (gtd/is-project-p))
-                        (let ((h (org-get-heading t t t t)))
-                          (org-todo "NEXT")
-                          ;; §4.1: the promoted task enters NEXT from
-                          ;; within the active zone — top of the zone.
-                          (save-excursion
-                            (org-gtd-cli/reorder-siblings-by-state "TODO"))
-                          (setq msgs (nconc msgs
-                            (list (format "  Auto-progressed: \"%s\" -> NEXT (%s)\n"
-                                          h rel-file))))
-                          (setq promoted t))
-                      (if (gtd/has-active-in-subtree-p)
-                          nil
-                        (let* ((sub-heading (org-get-heading t t t t))
-                               (child-heading (gtd/promote-first-child-task)))
-                          (when child-heading
-                            ;; §4.1: place the drilled promotion within
-                            ;; the subproject's own sibling group. The
-                            ;; drill only ever promotes when the group
-                            ;; had no NEXT, so the first NEXT child is
-                            ;; the one just promoted.
-                            (save-excursion
-                              (when (org-goto-first-child)
-                                (let ((found (equal (org-get-todo-state) "NEXT")))
-                                  (while (and (not found) (org-get-next-sibling))
-                                    (setq found (equal (org-get-todo-state) "NEXT")))
-                                  (when found
-                                    (org-gtd-cli/reorder-siblings-by-state "TODO")))))
-                            (setq msgs (nconc msgs
-                              (list (format "  Auto-progressed: \"%s\" -> NEXT (in subproject \"%s\") (%s)\n"
-                                            child-heading sub-heading rel-file))))
-                            (setq promoted t))))))))))))))
+            (setq msgs (nconc msgs
+              (org-gtd-cli/auto-progress--scan
+               rel-file (point) (org-get-todo-state) nil))))))))
     msgs))
 
 (defun org-gtd-cli/auto-progress-preview (rel-file &optional sim-state)
   "Preview auto-progress from point (task simulated as SIM-STATE, default DONE).
-Returns a list of message strings in printing order."
+Mirrors `org-gtd-cli/auto-progress' step for step — steps 1-2 against
+the simulated sibling states, step 3 through the very same
+`org-gtd-cli/auto-progress--scan' in dry mode — so `--dry-run' never
+predicts something the real run would not do.  Returns a list of
+message strings in printing order."
   (let ((msgs '())
         (sim (or sim-state "DONE")))
     (when (gtd/is-project-subtree-p)
@@ -3394,32 +3496,11 @@ Returns a list of message strings in printing order."
               (setq msgs (nconc msgs
                 (list (format "  All subtasks done — project would be left open for review: \"%s\" (%s)\n"
                               (org-get-heading t t t t) rel-file)))))))
-         ;; Default — promotion preview (no state changes)
+         ;; Step 3 — promotion preview (no state changes). Same scan the
+         ;; real path runs, so the preview cannot drift from it.
          (t
-          (save-excursion
-            (let ((found nil))
-              (while (and (not found) (org-get-next-sibling))
-                (when (equal (org-get-todo-state) "TODO")
-                  (if (not (gtd/is-project-p))
-                      (progn
-                        (setq msgs (nconc msgs
-                          (list (format "  Would auto-progress: \"%s\" -> NEXT\n"
-                                        (org-get-heading t t t t)))))
-                        (setq found t))
-                    (unless (gtd/has-active-in-subtree-p)
-                      (let ((sub-heading (org-get-heading t t t t)))
-                        (save-excursion
-                          (when (org-goto-first-child)
-                            (catch 'done
-                              (while t
-                                (when (and (equal (org-get-todo-state) "TODO")
-                                           (not (gtd/is-project-p)))
-                                  (setq msgs (nconc msgs
-                                    (list (format "  Would auto-progress: \"%s\" -> NEXT (in subproject \"%s\")\n"
-                                                  (org-get-heading t t t t) sub-heading))))
-                                  (throw 'done t))
-                                (unless (org-get-next-sibling) (throw 'done nil)))))))
-                      (setq found t)))))))))))
+          (setq msgs (nconc msgs
+            (org-gtd-cli/auto-progress--scan rel-file saved-pos sim t)))))))
     msgs))
 
 ;; --- done ---
