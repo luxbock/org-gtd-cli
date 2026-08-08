@@ -2214,7 +2214,9 @@ class TestMove:
         assert "Moved:" in stdout
 
     def test_move_after_sibling(self, org_dir):
-        stdout, stderr, rc = run_cli("move", "Buy anti-escape coating", "--after", "Research formicarium", org_dir=org_dir)
+        # Within the active zone (both TODO), so the §4.9 zone guard
+        # (#47) does not apply — the order of TODO/WAITING is user data.
+        stdout, stderr, rc = run_cli("move", "Test on actual project", "--after", "Start using it", org_dir=org_dir)
         assert rc == 0
         assert "Moved:" in stdout
 
@@ -2358,10 +2360,11 @@ Body of delta.
 
 class TestMoveCompletedBlockGuard:
     """§4.9 completed-block guard (#37): move refuses to cross the
-    completed block in a uniform sibling group.  Interim subset of the
-    full zone guard (#47) — the NEXT-prefix and DEFER-block boundaries
-    are deliberately NOT guarded here.  A rejection is exit 1 with an
-    {error, hint} pair and leaves the file byte-identical (I12)."""
+    completed block in a uniform sibling group.  This class pins the
+    completed-block boundary alone; the NEXT-prefix and DEFER-block
+    boundaries of the full zone guard (#47) live in
+    `TestMoveZoneGuard'.  A rejection is exit 1 with an {error, hint}
+    pair and leaves the file byte-identical (I12)."""
 
     FIXTURE = """\
 * TODO Guard project
@@ -2531,6 +2534,265 @@ class TestMoveCompletedBlockGuard:
         assert self._order(f) == [
             "DONE Old finished", "CANCELLED Old dropped",
             "TODO Second open", "TODO First open"]
+
+
+class TestMoveZoneGuard:
+    """§4.9 full zone guard (#47): move refuses any reordering that would
+    put the *moved* entry on the wrong side of a §6-I5 zone boundary —
+    the completed block on top, the DEFER block at the bottom, and the
+    NEXT prefix at the top of the active zone.
+
+    The guard is moved-entry-relative (olli ruling 2026-08-07): only a
+    violation involving the mover rejects, so a group that is already
+    broken neither blocks unrelated moves nor prevents repair-by-move.
+    Moves *within* a zone are always legal (order among NEXTs, among
+    TODO/WAITING, among closed, among DEFER is user data), and a mixed
+    group carries no zones at all.  A rejection is exit 1 with an
+    {error, hint} pair naming the boundary, and leaves the file
+    byte-identical (I12)."""
+
+    # A uniform project group with all three zones populated and a
+    # two-entry NEXT prefix and DEFER block, so "within the zone" and
+    # "across the boundary" are both expressible.
+    FIXTURE = """\
+* TODO Zone project
+** DONE Old finished
+** NEXT Front task
+** NEXT Second front
+** TODO Middle task
+** WAITING Blocked task
+** DEFER Shelved task
+** DEFER Later shelved
+"""
+
+    def _write(self, org_dir, content=None):
+        f = org_dir / "zones.org"
+        f.write_text(content or self.FIXTURE)
+        return f
+
+    @staticmethod
+    def _order(filepath):
+        return [line[3:] for line in filepath.read_text().splitlines()
+                if line.startswith("** ")]
+
+    # --- completed-block boundary (criterion 1) ---------------------------
+
+    def test_move_up_topmost_active_task_rejected(self, org_dir):
+        # Satisfaction: --up of the topmost active-zone task, with the
+        # completed block above it, fails with the boundary hint and
+        # leaves the file unchanged.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Front task", "--up",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "move rejected" in stderr
+        assert ("already at the top of the active zone — "
+                "the completed block stays above") in stderr
+        assert f.read_text() == before
+
+    # --- NEXT-prefix boundary (criterion 2) -------------------------------
+
+    def test_move_todo_before_next_sibling_rejected(self, org_dir):
+        # Satisfaction: --before a NEXT sibling is rejected — NEXT
+        # entries form the top of the active zone (§2/I5).
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Middle task",
+                                     "--before", "Second front",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "would land above a NEXT sibling" in stderr
+        assert "NEXT entries form the top of the active zone" in stderr
+        assert f.read_text() == before
+
+    def test_move_waiting_before_todo_sibling_allowed(self, org_dir):
+        # Satisfaction: --before a TODO sibling succeeds — the relative
+        # order of TODO/WAITING inside the active zone is user data.
+        f = self._write(org_dir)
+        stdout, stderr, rc = run_cli("move", "Blocked task",
+                                     "--before", "Middle task",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f) == [
+            "DONE Old finished", "NEXT Front task", "NEXT Second front",
+            "WAITING Blocked task", "TODO Middle task",
+            "DEFER Shelved task", "DEFER Later shelved"]
+
+    def test_move_todo_up_into_next_prefix_rejected(self, org_dir):
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Middle task", "--up",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "move rejected" in stderr
+        assert "NEXT entries form the top of the active zone" in stderr
+        assert f.read_text() == before
+
+    def test_move_next_down_out_of_prefix_rejected(self, org_dir):
+        # The mirror case: a NEXT may not sink below a non-NEXT open
+        # sibling.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Second front", "--down",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "NEXT task" in stderr and "non-NEXT open sibling" in stderr
+        assert "NEXT entries form the top of the active zone" in stderr
+        assert f.read_text() == before
+
+    def test_move_within_next_prefix_allowed(self, org_dir):
+        # Order among multiple NEXTs is user data.
+        f = self._write(org_dir)
+        stdout, stderr, rc = run_cli("move", "Second front", "--up",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f)[:3] == [
+            "DONE Old finished", "NEXT Second front", "NEXT Front task"]
+
+    # --- DEFER-block boundary (criterion 3) -------------------------------
+
+    def test_move_down_bottommost_active_task_rejected(self, org_dir):
+        # Satisfaction: --down of the bottommost active-zone task into
+        # the DEFER block fails.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Blocked task", "--down",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "would land inside the DEFER block" in stderr
+        assert ("already at the bottom of the active zone — "
+                "the DEFER block stays below") in stderr
+        assert f.read_text() == before
+
+    def test_move_within_defer_block_allowed(self, org_dir):
+        # Satisfaction: moving a DEFER task within the DEFER block
+        # succeeds.
+        f = self._write(org_dir)
+        stdout, stderr, rc = run_cli("move", "Later shelved", "--up",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f)[-2:] == [
+            "DEFER Later shelved", "DEFER Shelved task"]
+
+    def test_move_defer_up_out_of_block_rejected(self, org_dir):
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Shelved task", "--up",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "deferred task" in stderr
+        assert ("the DEFER block stays at the bottom of the group — "
+                "deferred tasks move only within it") in stderr
+        assert f.read_text() == before
+
+    def test_move_todo_after_defer_rejected_generic_hint(self, org_dir):
+        # An active task that is NOT at the bottom of the active zone
+        # gets the corrective hint, not the "already at the bottom" one.
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("move", "Middle task",
+                                     "--after", "Shelved task",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "already at the bottom" not in stderr
+        assert ("the DEFER block stays at the bottom of the group — "
+                "the bottom of the active zone is directly above it") in stderr
+        assert f.read_text() == before
+
+    def test_move_defer_after_active_rejected_json(self, org_dir):
+        # JSON mode carries the same {error, hint} pair (I12: unchanged).
+        f = self._write(org_dir)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli("--json", "move", "Later shelved",
+                                     "--after", "Middle task",
+                                     org_dir=org_dir)
+        assert rc == 1
+        data = json.loads(stdout)
+        assert "move rejected" in data["error"]
+        assert "DEFER block" in data["hint"]
+        assert f.read_text() == before
+
+    # --- mixed groups stay unrestricted (criterion 4) ---------------------
+
+    MIXED = """\
+* TODO Mixed parent
+** DONE Done sib
+** NEXT Front sib
+** Reference notes
+** TODO Open sib
+** DEFER Shelved sib
+"""
+
+    def test_mixed_group_all_four_forms_unrestricted(self, org_dir):
+        # Satisfaction: a category heading among the siblings makes the
+        # group mixed — no zones, so all four forms behave as today.
+        f = self._write(org_dir, self.MIXED)
+        # --before a NEXT (NEXT-prefix boundary in a uniform group)
+        _, _, rc = run_cli("move", "Open sib", "--before", "Front sib",
+                           org_dir=org_dir)
+        assert rc == 0
+        # --after a DEFER (DEFER-block boundary in a uniform group)
+        _, _, rc = run_cli("move", "Open sib", "--after", "Shelved sib",
+                           org_dir=org_dir)
+        assert rc == 0
+        # --up across the DEFER block
+        _, _, rc = run_cli("move", "Open sib", "--up", org_dir=org_dir)
+        assert rc == 0
+        # --down back into it
+        _, _, rc = run_cli("move", "Open sib", "--down", org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f) == [
+            "DONE Done sib", "NEXT Front sib", "Reference notes",
+            "DEFER Shelved sib", "TODO Open sib"]
+
+    # --- moved-entry-relative scope (olli ruling 2026-08-07) --------------
+
+    BROKEN = """\
+* TODO Broken project
+** TODO Stray todo
+** NEXT Front task
+** DEFER Shelved task
+** TODO Sunk todo
+"""
+
+    def test_repair_by_move_in_already_broken_group_allowed(self, org_dir):
+        # The guard is moved-entry-relative: a pre-existing violation
+        # among unmoved siblings (here NEXT below a TODO, and a TODO
+        # below the DEFER block) neither blocks the move nor gets
+        # repaired.  Lifting the sunk TODO out of the DEFER block is a
+        # repair and must stay possible.
+        f = self._write(org_dir, self.BROKEN)
+        stdout, stderr, rc = run_cli("move", "Sunk todo",
+                                     "--before", "Shelved task",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert self._order(f) == [
+            "TODO Stray todo", "NEXT Front task",
+            "TODO Sunk todo", "DEFER Shelved task"]
+
+    def test_batch_zone_guard_rejects_per_item(self, org_dir):
+        # A violating batch item gets the per-item error + hint without
+        # aborting the batch; the legal item still lands.
+        f = self._write(org_dir)
+        data, stderr, rc = run_batch(
+            "move",
+            [{"heading": "Middle task", "direction": "before",
+              "sibling": "Front task"},
+             {"heading": "Blocked task", "direction": "before",
+              "sibling": "Middle task"}],
+            org_dir=org_dir,
+        )
+        assert rc == 0  # at least one item succeeded
+        assert data["summary"] == {"total": 2, "succeeded": 1, "failed": 1}
+        assert data["results"][0]["success"] is False
+        assert "move rejected" in data["results"][0]["error"]
+        assert "NEXT entries form the top" in data["results"][0]["hint"]
+        assert data["results"][1]["success"] is True
+        assert self._order(f) == [
+            "DONE Old finished", "NEXT Front task", "NEXT Second front",
+            "WAITING Blocked task", "TODO Middle task",
+            "DEFER Shelved task", "DEFER Later shelved"]
 
 
 # ===========================================================================
@@ -8966,15 +9228,17 @@ class TestBatchExtendedCommands:
 
     def test_batch_move(self, org_dir):
         """--batch move reorders a task among its siblings."""
+        # Both siblings are TODO, so the move stays inside the active
+        # zone and the §4.9 zone guard (#47) does not apply.
         data, stderr, rc = run_batch(
             "move",
-            [{"heading": "Add more test cases", "direction": "down"}],
+            [{"heading": "Test on actual project", "direction": "down"}],
             org_dir=org_dir,
         )
         assert rc == 0
         assert data["results"][0]["success"] is True
         assert_line_before(org_dir / "tasks.org",
-                           "Test on actual project", "Add more test cases")
+                           "Start using it", "Test on actual project")
 
     # --- Reads (mixed `batch` only) ---
 

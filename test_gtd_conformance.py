@@ -322,10 +322,9 @@ def test_s7row8_next_guard_rejects_subproject_heading(cli):
     assert rc != 0
 
 
-# §7 row 9 interim subset landed 2026-08-07 (#37): the completed-block
-# boundary is guarded, so this witness now pins the agreeing behavior.
-# The rest of row 9 (NEXT-prefix and DEFER-block boundaries) keeps its
-# xfail witness below until #47 lands the full zone guard.
+# §7 row 9 retired 2026-08-07 (#47, after the #37 interim subset): move
+# guards the full §4.9 zone invariant, so both witnesses now pin
+# agreeing behavior.
 def test_s7row9_completed_block_guard(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("done1", "DONE"), Node("aa", "TODO"),
@@ -338,17 +337,25 @@ def test_s7row9_completed_block_guard(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-@pytest.mark.xfail(reason="§7 row 9 (#47): only the completed-block "
-                          "boundary is guarded — the NEXT-prefix and "
-                          "DEFER-block boundaries still cross unguarded",
-                   strict=True)
 def test_s7row9_full_zone_guard(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("nn", "NEXT"), Node("aa", "TODO"),
     ])], Divergences.normative())
     _, rc, result = run_normative(
         cli, model, "move", ("aa",), {"direction": "up"})
-    # Normative: crossing above the NEXT prefix is rejected.
+    # Crossing above the NEXT prefix is rejected, file unchanged.
+    assert result.ok is False
+    assert rc != 0
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row9_defer_block_guard(cli):
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "TODO"), Node("dd", "DEFER"),
+    ])], Divergences.normative())
+    _, rc, result = run_normative(
+        cli, model, "move", ("aa",), {"direction": "down"})
+    # Sinking an open task into the DEFER block is rejected.
     assert result.ok is False
     assert rc != 0
     assert cli.read_skeleton() == model.skeleton()
