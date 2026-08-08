@@ -261,9 +261,10 @@ A project is any task that has sub-tasks (child TODO headings). There is no spec
 Every project should have at least one `NEXT` subtask — this is the concrete next physical action. A project with only `TODO` subtasks and no `NEXT` is considered "stuck" (nothing is actively being worked on).
 
 `set-done` enforces this automatically with project-aware promotion:
-- When you complete a subtask, the next TODO sibling is promoted to NEXT
-- If the next sibling is itself a subproject with no active child (stuck), `set-done` drills in and promotes the first actionable task inside it
-- If the next sibling is a subproject that already has an active child (NEXT or WAITING), it is skipped
+- When you complete a subtask, the **first open TODO sibling in document order** is promoted to NEXT — the whole sibling group is scanned, so the promoted task may sit *earlier* in the list than the one you just completed
+- If that candidate is itself a subproject with no active child (stuck), `set-done` drills in and promotes the first actionable task inside it
+- If the candidate is a subproject that already has an active child (NEXT or WAITING), it is skipped
+- If the candidate is a subproject whose own subtasks are all done but which is still open, it is reported for review (a `project-needs-review` side effect naming the subproject — advisory only, nothing is closed) and the scan continues past it
 - **If all siblings are now done, the parent project is left open for review** — it is *not* auto-completed. The CLI emits an advisory ("All subtasks done — project left open for review: ..."), which in JSON surfaces as a side effect `{"action": "project-needs-review", ...}`. Closing the project is an explicit, separate `set-done` on the project heading — do that only when the project is genuinely complete, not just because the side effect appeared.
 
 `set-state` does not do any of this — it only changes the keyword.
@@ -280,7 +281,7 @@ org-gtd-cli --json set-state "old task" CANCELLED
 
 Valid states: `TODO`, `NEXT`, `DONE`, `WAITING`, `DEFER`, `CANCELLED`.
 
-`set-done` is the only state-specific command. All other state changes use `set-state`. `set-done` does more than just changing the keyword — it adds a CLOSED timestamp, reorders the completed task, and auto-promotes the next actionable sibling to NEXT (project-aware: skips subprojects with active children, drills into stuck subprojects). If all siblings are done, the parent project is left open and a `project-needs-review` side effect is reported; closing the project requires an explicit `set-done` on the project heading. You SHOULD use `set-done` rather than `set-state DONE` when completing tasks. `set-next` is a convenience alias for `set-state SUBSTR NEXT`.
+`set-done` is the only state-specific command. All other state changes use `set-state`. `set-done` does more than just changing the keyword — it adds a CLOSED timestamp, reorders the completed task, and auto-promotes the first actionable sibling in document order to NEXT (project-aware: skips subprojects with active children, drills into stuck subprojects, reports all-done-but-open subprojects for review). If all siblings are done, the parent project is left open and a `project-needs-review` side effect is reported; closing the project requires an explicit `set-done` on the project heading. You SHOULD use `set-done` rather than `set-state DONE` when completing tasks. `set-next` is a convenience alias for `set-state SUBSTR NEXT`.
 
 State changes automatically log timestamps in the task's LOGBOOK drawer. Do not add these manually.
 

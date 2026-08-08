@@ -254,9 +254,9 @@ def test_s7row2_refile_places_arrival_in_zone(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-@pytest.mark.xfail(reason="§7 row 3 (#38): promotion scans forward from "
-                          "the closed task only, not the whole group",
-                   strict=True)
+# §7 rows 3 and 4 retired 2026-08-08 (#38): the promotion scan walks the
+# whole sibling group in document order and reports every all-done-but-open
+# subproject it passes, so both witnesses now pin agreeing behavior.
 def test_s7row3_promotion_scans_whole_group(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"), Node("bb", "TODO"),
@@ -269,9 +269,6 @@ def test_s7row3_promotion_scans_whole_group(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-@pytest.mark.xfail(reason="§7 row 4 (#38): no per-subproject "
-                          "project-needs-review is emitted",
-                   strict=True)
 def test_s7row4_subproject_review_emitted(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"),

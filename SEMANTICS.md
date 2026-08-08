@@ -265,12 +265,6 @@ it has its own conditional wake, §4.6). In order:
    - **all-done-but-open subproject** → emit `project-needs-review` for
      it and continue past it.
 
-*Divergences: today the scan starts at the closed task and walks
-forward only (not the whole group) — #38; the per-subproject
-`project-needs-review` of step 3 is not yet emitted (the pass is
-silent) — #38. Step 3's skip/drill behavior and steps 1–2 match
-today's code.*
-
 ### 4.6 set-state
 
 Changes a keyword and what the transition itself implies, nothing
@@ -593,7 +587,7 @@ exists — row 5.*
 - **I6** Promotion never mints a second front: if any sibling is NEXT
   or WAITING (any position), no promotion occurs.
 - **I7** Promotion is always TODO→NEXT, on a leaf task, chosen as the
-  first open TODO in document order (#38), drilling exactly **one
+  first open TODO in document order, drilling exactly **one
   level** into a stuck subproject candidate; deeper nesting yields no
   promotion and is surfaced by the stuck view (I11).
 - **I8** Completing the last open sibling never auto-closes the parent;
@@ -627,8 +621,8 @@ the issue that closes the gap (strictly doc → tests → implementation).
 |---|---|---|---|
 | 1 | *Retired 2026-08-07: the reorder primitive is the §4.1 minimal move — arrivals, NEXT-exit, and the WAITING no-move rule included; the full stable state-sort, the append-last arrivals, and the skip-sort mitigation's I5 leak are gone (#34).* | — | — |
 | 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
-| 3 | Promotion scans forward from the closed task only, not the whole group in document order | §4.5 | #38 |
-| 4 | Promotion passes an all-done-but-open subproject silently — no per-subproject `project-needs-review` | §4.5 | #38 |
+| 3 | *Retired 2026-08-08: the promotion scan walks the whole sibling group in document order — the first open TODO is promoted wherever it sits relative to the closed task, so a project whose only open TODO precedes the task being driven is no longer stranded (#38).* | — | — |
+| 4 | *Retired 2026-08-08: promotion reports every all-done-but-open subproject it passes as `project-needs-review` and continues past it — advisory only, nothing is closed (#38, olli ruling E5).* | — | — |
 | 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no blocker-side delete guard, no waiting-side delete unwind, no archive blocker-eligibility criterion, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.11, §4.12, §5.5 | #39 |
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state; and the Waiting block has no DEFER-ancestor exclusion at all (its matcher's tag part cannot use the inherited `:WAITING:` tag, which the row itself carries) | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |

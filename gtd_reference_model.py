@@ -15,8 +15,8 @@ two modes:
 
 - ``Divergences.normative()`` — the document's semantics, exactly.
 - ``Divergences.current()`` — reproduces today's CLI behavior by enabling
-  one named flag per applicable §7 row (``d3_scan_from_closed`` = §7 row
-  3, and so on). The tier-2 conformance harness runs the model in this
+  one named flag per applicable §7 row (``d5_no_waiting_reason`` = §7
+  row 5, and so on). The tier-2 conformance harness runs the model in this
   mode and expects an exact match against the real CLI; per-row
   expected-failure tests run the normative mode and flip green as each
   stage-2c fix lands (2026-07-31 ruling on #45).
@@ -109,8 +109,12 @@ class Divergences:
     # placing arrivals in the destination's zones) does NOT reproduce on
     # 2026-07-31 master — the destination reorder runs unconditionally.
     # Row flagged to olli for re-examination when #34 lands.
-    d3_scan_from_closed: bool = False   # §7 row 3 → #38
-    d4_no_subproject_review: bool = False   # §7 row 4 → #38
+    # §7 rows 3 and 4 (#38, retired 2026-08-08 with the whole-group
+    # promotion scan): ``d3_scan_from_closed`` and
+    # ``d4_no_subproject_review`` are gone — the CLI now scans the whole
+    # sibling group in document order and emits a per-subproject
+    # ``project-needs-review`` when it passes an all-done-but-open
+    # subproject (olli ruling E5, 2026-07-28).
     d5_no_waiting_reason: bool = False  # §7 row 5 → #39
     d7_no_priority_rules: bool = False  # §7 row 7 → #41
     d8_lax_state_guards: bool = False   # §7 row 8 → #46
@@ -128,8 +132,7 @@ class Divergences:
 
     @classmethod
     def current(cls):
-        return cls(d3_scan_from_closed=True, d4_no_subproject_review=True,
-                   d5_no_waiting_reason=True, d7_no_priority_rules=True,
+        return cls(d5_no_waiting_reason=True, d7_no_priority_rules=True,
                    d8_lax_state_guards=True,
                    dx_setnext_rejects_closed_leaf=True)
 
@@ -371,8 +374,9 @@ class Model:
     def _promotion_rule(self, closed_child):
         """§4.5: runs only from a just-closed project child.
 
-        Returns the side-effect list. Steps 1-3 as specified; §7 rows
-        3-4 switch the divergent scan behavior.
+        Returns the side-effect list. Steps 1-3 exactly as specified —
+        the two scan divergences (ex-§7 rows 3-4) were retired with #38,
+        so there is nothing left to switch here.
         """
         effects = []
         if not self.is_project_child(closed_child):
@@ -392,15 +396,9 @@ class Model:
                 effects.append(SideEffect(
                     "project-needs-review", parent.heading))
             return effects
-        # Step 3 — scan for the first open TODO candidate.
-        if self.div.d3_scan_from_closed:
-            # §7 row 3: forward from the closed task only.
-            start = group.index(closed_child) + 1
-            candidates = group[start:]
-        else:
-            # Normative: the whole group in document order (I7).
-            candidates = group
-        for candidate in candidates:
+        # Step 3 — scan for the first open TODO candidate: the whole
+        # group in document order (I7).
+        for candidate in group:
             if candidate.keyword != "TODO":
                 continue
             if not self.is_project(candidate):
@@ -414,18 +412,24 @@ class Model:
             if self.active(candidate):
                 # Subproject with an active descendant → skip it.
                 continue
-            # PARKED: direct children here vs descendants in active()
-            # above — with a category heading inside the subproject, an
-            # all-done-but-open subproject is passed silently. §4.5 does
-            # not pin the scope; awaiting olli's ruling.
+            # PARKED (scope of "all-done-but-open"): direct children
+            # here vs descendants in active() above. With a category
+            # heading inside the subproject, an open TODO below it does
+            # not stop the emission — the subproject still reads as
+            # all-done-but-open and gets a review side effect; and a
+            # subproject whose only tasks live below such a heading has
+            # no direct task children at all, so it falls through to the
+            # drill and is passed silently. §4.5 does not pin the scope
+            # (§2 severing, ex-§7 row 13's territory); awaiting olli's
+            # ruling. `org-gtd-cli/subproject-all-done-p' matches this
+            # choice exactly — neither side widens it unilaterally.
             subproject_tasks = [c for c in candidate.children
                                 if self.is_task(c)]
             if subproject_tasks and all(c.keyword in CLOSED_STATES
                                         for c in subproject_tasks):
                 # All-done-but-open subproject → emit review, continue.
-                if not self.div.d4_no_subproject_review:  # §7 row 4
-                    effects.append(SideEffect(
-                        "project-needs-review", candidate.heading))
+                effects.append(SideEffect(
+                    "project-needs-review", candidate.heading))
                 continue
             # Stuck subproject → drill exactly one level (I7): promote
             # its first TODO non-project child; else continue past it.
