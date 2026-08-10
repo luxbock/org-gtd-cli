@@ -151,6 +151,8 @@ row: the promotion tests exercise scenarios where forward-only scan and
 whole-group scan agree, and blocked-parent handling is normative for the
 dedicated `set-done` command (row 8 divergence lives on `set-state`).*
 
+*Row 5 retired 2026-08-10 (#39 landed).* All thirteen row-5 pins below are resolved: each one's WAITING call now carries the `--reason` the §4.6 guardrail requires, or was retargeted, and no `pins §7 row 5 (#39)` marker remains in `test_org_gtd_cli.py`. The classifications are kept as the historical record of what row 5 touched; the per-test notes below describe the pre-#39 state.
+
 ### TestSetState (11 tests) — MIXED
 - test_changes_state — **KEEP+ANNOTATE row 5 (#39)** (reasonless `set-state WAITING` asserts rc 0 + the arrow text; flips to failure under #39)
 - test_waiting_reason_adds_logbook_state_note — **KEEP** (LOGBOOK format)
@@ -651,7 +653,8 @@ Daemon-mode variant of sync-conflict warnings.
   - Row 1 (#34): 2 — TestSiblingReordering::test_next_to_waiting_
     preserves_sibling_position (also row 5), TestAddSubtaskStateReorder::
     test_add_waiting_preserves_end_position
-  - Row 5 (#39): 13 — TestSetState::test_changes_state,
+  - Row 5 (#39): 13 — **all retired 2026-08-10 when #39 landed** —
+    TestSetState::test_changes_state,
     test_without_reason_does_not_add_reason_note,
     test_waiting_adds_tag (also row 6), test_preserves_priority_cookie,
     test_defer_to_waiting_cleans_defer_tag (also row 6),
@@ -661,7 +664,18 @@ Daemon-mode variant of sync-conflict warnings.
     test_set_state_dry_run_json; TestBatchExtendedCommands::
     test_batch_set_state; TestStableIdAddressing::
     test_lazy_create_on_substring_mutation, test_lazy_id_round_trips,
-    test_dry_run_does_not_create_id
+    test_dry_run_does_not_create_id.
+    Two of them changed subject rather than gaining a `--reason`:
+    `test_without_reason_does_not_add_reason_note` moved to DEFER (the
+    reasonless-note shape needs a state with no entry requirement), and
+    `TestAddSubtaskStateReorder::test_add_waiting_preserves_end_position`
+    (a row-1 pin whose vehicle was `add-subtask --state WAITING`, now a
+    rejection) split into `test_add_waiting_is_rejected` plus a
+    `refile`-driven `test_refiled_waiting_preserves_end_position` that
+    keeps the §4.1 WAITING-arrival coverage. #46's
+    `TestSetStateProjectHeadingGuards::test_waiting_on_leaf_still_
+    succeeds_without_reason` was renamed to
+    `test_waiting_on_leaf_still_succeeds` for the same reason.
   - Row 6 (#40): 2 — TestSetState::test_waiting_adds_tag,
     TestSetState::test_defer_to_waiting_cleans_defer_tag (both also
     row 5)

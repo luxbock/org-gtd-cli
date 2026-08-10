@@ -275,11 +275,52 @@ Every project should have at least one `NEXT` subtask — this is the concrete n
 
 ```bash
 org-gtd-cli --json set-done "buy milk"                 # mark DONE + auto-progress project
-org-gtd-cli --json set-state "call dentist" WAITING    # any other state change
 org-gtd-cli --json set-state "old task" CANCELLED
+org-gtd-cli --json set-state "call dentist" DEFER      # any other state change
+
+# WAITING needs a concrete blocker — at least one of these three:
+org-gtd-cli --json set-state "call dentist" WAITING --reason "surgery has not called back"
+org-gtd-cli --json set-state "ship the box" WAITING --blocked-by "pack the box"
+org-gtd-cli --json set-state "ship the box" WAITING --blocked-by-id f95d…
 ```
 
 Valid states: `TODO`, `NEXT`, `DONE`, `WAITING`, `DEFER`, `CANCELLED`.
+
+### WAITING means a concrete external blocker
+
+`set-state ... WAITING` is the **only** way into WAITING (`add-task` and
+`add-subtask` reject `--state WAITING`), and it requires at least one of
+`--reason TEXT`, `--blocked-by SUBSTR`, `--blocked-by-id ID`. Both blocker
+flags are repeatable and combine with `--reason`.
+
+- **`--reason`** is the right tool when the blocker is not an org task (a
+  vendor, a delivery, a person). It writes a single-line `:REASON:`
+  property *and* the usual LOGBOOK note. Multi-line reasons are rejected
+  here — put the detail in the task body.
+- **`--blocked-by` / `--blocked-by-id`** is the stronger, machine-checkable
+  form and what you should reach for when the blocker *is* a task. It links
+  the pair (`BLOCKER:` on the waiter, `TRIGGER:` on the blocker), so
+  **closing the blocker automatically wakes the waiter** — to NEXT when it
+  was standing in for its project's front, TODO otherwise — and reports an
+  `unblocked` side effect. With several blockers the wake is AND-gated: it
+  fires only when the last one closes.
+- Rejected at entry: blocking a task on **itself**, on a task that already
+  waits on it (a **cycle**), or on an **already-closed** task.
+- A second `set-state ... WAITING` on an already-WAITING task **amends** it:
+  the old reason and links are unwound and the new ones written — it
+  replaces, never accumulates. A flagless re-entry is still rejected.
+- **Leaving WAITING by any route** — another `set-state`, `set-next`, a
+  close, or the automatic wake — removes `:REASON:` and unwinds the link
+  pair, reporting one `blocker-link-removed` side effect per link. The
+  LOGBOOK record stays.
+- `delete` **refuses** a task something is waiting on (cancel it instead, or
+  take the waiter out of WAITING first); deleting the *waiter* succeeds and
+  unwinds its own links. `archive` holds a blocker back while an open task
+  still waits on it.
+- `show` / `search --full` / `agenda` / `agenda-view` rows carry
+  `waiting_reason` and `blocked_by` (both `null` when absent). A link-only
+  WAITING task derives its displayed reason from the blocker's heading and
+  current state, so you can see whether the blocker is still open.
 
 `set-done` is the only state-specific command. All other state changes use `set-state`. `set-done` does more than just changing the keyword — it adds a CLOSED timestamp, reorders the completed task, and auto-promotes the first actionable sibling in document order to NEXT (project-aware: skips subprojects with active children, drills into stuck subprojects, reports all-done-but-open subprojects for review). If all siblings are done, the parent project is left open and a `project-needs-review` side effect is reported; closing the project requires an explicit `set-done` on the project heading. You SHOULD use `set-done` rather than `set-state DONE` when completing tasks — **because it promotes**. `set-state DONE`/`CANCELLED` is a genuine close too (CLOSED timestamp, LOGBOOK, reorder into the completed block, same blocked-by-open-subtask rejection); the promotion scan is the only thing it does not run. Use it when you deliberately want to close without moving the project's front.
 
@@ -387,7 +428,7 @@ echo '[
 
 ```bash
 echo '["task 1","task 2"]' | org-gtd-cli --json --batch set-done
-echo '[{"heading":"task 1","state":"WAITING"},{"id":"f95d…","state":"DEFER"}]' | org-gtd-cli --json --batch set-state
+echo '[{"heading":"task 1","state":"WAITING","blocked_by":["task 2"]},{"id":"f95d…","state":"DEFER"}]' | org-gtd-cli --json --batch set-state
 echo '[{"title":"Step 1","state":"NEXT"},{"title":"Step 2"}]' | org-gtd-cli --json --batch add-subtask "parent task"
 echo '["item 1","item 2"]' | org-gtd-cli --json --batch refile --category "Work"
 ```
