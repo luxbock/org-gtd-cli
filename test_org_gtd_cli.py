@@ -12402,6 +12402,29 @@ class TestWaitingExitCleanup:
         assert rc == 0, stderr
         self._assert_unwound(f, data)
 
+    # `set-next' has no --dry-run, so it is the one entry with dry=False
+    # only; every other command is exercised in both modes.
+    @pytest.mark.parametrize("args,dry", [
+        (a, d)
+        for a in (("set-state", "Wwaiter", "TODO"), ("set-next", "Wwaiter"),
+                  ("set-done", "Wwaiter"), ("set-cancelled", "Wwaiter"),
+                  ("delete", "Wwaiter"))
+        for d in ((False,) if a[0] == "set-next" else (False, True))
+    ])
+    def test_no_command_leaks_the_action_slug_in_text_mode(
+            self, org_dir, args, dry):
+        # The slug leak was fixed three times on PR #77, one site at a
+        # time, because each fix was scoped to the site the reviewer
+        # named. This pins the invariant across every command that can
+        # emit the WAITING vocabulary, so a fourth site cannot regress
+        # quietly: text mode is for humans, `action' values are for JSON.
+        self._linked(org_dir)
+        stdout, stderr, rc = run_cli(
+            *args, *(("--dry-run",) if dry else ()), org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "blocker-link-removed" not in stdout, stdout
+        assert "unblocked:" not in stdout, stdout
+
     def test_set_state_text_mode_uses_human_wording(self, org_dir):
         # The real path used to print the raw `action' slug here, which
         # leaked the machine vocabulary and disagreed with every other

@@ -5072,10 +5072,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                     heading)
                  (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file))
                  (dolist (e link-effects)
-                   (princ (format "  %s: \"%s\" (%s)\n"
-                                  (cdr (assq 'action e))
-                                  (cdr (assq 'heading e))
-                                  (cdr (assq 'file e))))))))))
+                   (org-gtd-cli/princ-waiting-effect e)))))))
           (existing-next
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
@@ -6233,9 +6230,7 @@ simply stops waiting, and the §4.4 gate is never consulted."
                                  (org-gtd-cli/waiting-exit-cleanup t)))))
                  (princ (format "Would delete: \"%s\" (%s)\n" task-heading rel-file))
                  (dolist (e (org-gtd-cli/waiting-exit-cleanup t))
-                   (princ (format "  Would remove blocker link: \"%s\" (%s)\n"
-                                  (cdr (assq 'heading e))
-                                  (cdr (assq 'file e))))))
+                   (org-gtd-cli/princ-waiting-effect e t)))
                (kill-emacs 0))
            ;; §4.12 waiting side: the deleted task's id is scrubbed from
            ;; each blocker's `TRIGGER'.  Runs before the cut, while the
@@ -6251,10 +6246,7 @@ simply stops waiting, and the §4.4 gate is never consulted."
                     (side_effects . ,(apply #'vector link-effects))))
                (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file))
                (dolist (e link-effects)
-                 (princ (format "  %s: \"%s\" (%s)\n"
-                                (cdr (assq 'action e))
-                                (cdr (assq 'heading e))
-                                (cdr (assq 'file e)))))))))))
+                 (org-gtd-cli/princ-waiting-effect e))))))))
     (kill-emacs 0)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
