@@ -4574,10 +4574,19 @@ behaviour, multi-line tolerance included."
                       (side_effects . ,(apply #'vector preview))))
                  (princ (format "Would change: \"%s\" %s -> %s (%s)\n"
                                 heading old-state new-state rel-file))
+                 ;; `preview' mixes both vocabularies — the wake's
+                 ;; `unblocked' followed by the `blocker-link-removed'
+                 ;; entries its cleanup emits — so format by `action'.
+                 ;; Wording matches `org-gtd-cli/auto-unblock's own dry
+                 ;; message, which is what `set-done --dry-run' prints.
                  (dolist (e preview)
-                   (princ (format "  Would remove blocker link: \"%s\" (%s)\n"
-                                  (cdr (assq 'heading e))
-                                  (cdr (assq 'file e)))))))
+                   (if (equal (cdr (assq 'action e)) "unblocked")
+                       (princ (format "  Would unblock: \"%s\" -> %s\n"
+                                      (cdr (assq 'heading e))
+                                      (cdr (assq 'new_state e))))
+                     (princ (format "  Would remove blocker link: \"%s\" (%s)\n"
+                                    (cdr (assq 'heading e))
+                                    (cdr (assq 'file e))))))))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
            ;; Response integrity: `org-todo' on an entry blocked by

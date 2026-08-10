@@ -12244,6 +12244,23 @@ class TestWaitingAutoUnblock:
                    and e["new_state"] == "NEXT" for e in data["side_effects"])
         assert f.read_bytes() == before
 
+    def test_text_dry_run_labels_the_wake_as_a_wake(self, org_dir):
+        # Regression (review-bot on PR #77): the text-mode preview looped
+        # over every effect with the `blocker-link-removed' wording, so a
+        # `set-state ... CANCELLED --dry-run' told the user the woken task
+        # was a *removed blocker link* and never that it would be
+        # unblocked. JSON mode was unaffected. Format by `action'.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wblocker", "CANCELLED", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Would unblock: "Wwaiter" -> NEXT' in stdout, stdout
+        # The waiter must never be described as a removed blocker link.
+        assert 'Would remove blocker link: "Wwaiter"' not in stdout, stdout
+        assert f.read_bytes() == before
+
 
 class TestWaitingConditionalWake:
     """§4.6 criteria 13-16: the conditional wake, and its residual."""
