@@ -56,7 +56,7 @@ Common commands:
 | `agenda` / `agenda-view` | List tasks by state/tag/date, or run a pre-built view |
 | `search` / `show` | Find tasks by heading substring; show full detail |
 | `add-task` / `add-subtask` / `add-event` | Capture into inbox / under a parent / calendar |
-| `set-state` / `set-next` / `set-done` / `set-cancelled` | Move a task through the state machine |
+| `set-state` / `set-next` / `set-done` / `set-cancelled` | Move a task through the state machine (entering WAITING needs `--reason` or `--blocked-by`/`--blocked-by-id`; a blocker link wakes the task when the blocker closes) |
 | `set-schedule` / `set-deadline` / `set-priority` | Set timestamps and priority |
 | `set-tags` / `add-tags` / `remove-tags` / `refile` / `move` / `rename` | Organize and edit |
 | `projects` / `subtasks` / `categories` / `list-tags` | Inspect structure |

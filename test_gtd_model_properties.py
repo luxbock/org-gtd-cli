@@ -24,10 +24,20 @@ from gtd_reference_model import (
 # Strategies: valid GTD states by construction
 # ---------------------------------------------------------------------------
 
-# Keywords legal per structural position (§3 legality matrix).
+# Keywords legal per structural position (§3 legality matrix). These
+# describe what may legally be *on disk*, WAITING included — a WAITING
+# task written by Emacs is legal everywhere (§4.6's tolerance).
 LONE_TASK_STATES = ("TODO", "WAITING", "DEFER", "DONE", "CANCELLED")
 LEAF_CHILD_STATES = ("TODO", "NEXT", "WAITING", "DEFER", "DONE", "CANCELLED")
 PROJECT_HEADING_STATES = ("TODO", "DEFER")  # closed handled post-hoc (I4)
+
+# What `add-task` / `add-subtask` may *create* (§4.2/§4.3, #39): create
+# never mints WAITING — its guardrail lives on the `set-state` entry, so
+# a generated `--state WAITING` create would only ever exercise the
+# rejection. Kept separate from the on-disk sets above rather than
+# narrowing them, so forests still generate WAITING freely.
+CREATE_LONE_STATES = tuple(s for s in LONE_TASK_STATES if s != "WAITING")
+CREATE_CHILD_STATES = tuple(s for s in LEAF_CHILD_STATES if s != "WAITING")
 
 
 def _zone_sort(group):
@@ -131,11 +141,11 @@ def operations(draw, model):
     if op == "set_next":
         return (op, (node.heading,), {})
     if op == "add_subtask":
-        state = draw(st.sampled_from(LEAF_CHILD_STATES))
+        state = draw(st.sampled_from(CREATE_CHILD_STATES))
         return (op, (node.heading, f"new{draw(st.integers(0, 999)):03d}",
                      state), {})
     if op == "add_task":
-        state = draw(st.sampled_from(LONE_TASK_STATES))
+        state = draw(st.sampled_from(CREATE_LONE_STATES))
         return (op, (f"new{draw(st.integers(0, 999)):03d}", state), {})
     if op == "move":
         direction = draw(st.sampled_from(("up", "down")))
@@ -592,3 +602,220 @@ def test_org_text_round_trip(model):
     """to_org_text ∘ parse_org_text is the identity on the skeleton."""
     parsed = Model(parse_org_text(model.to_org_text()))
     assert parsed.skeleton() == model.skeleton()
+
+
+# ---------------------------------------------------------------------------
+# The WAITING mechanism (§4.4/§4.6 normative, issue #39)
+# ---------------------------------------------------------------------------
+
+def _linked(waiter_state="WAITING"):
+    """proj/[bb, aa] with aa waiting on bb, both link sides wired."""
+    blocker = Node("bb", "TODO", triggers=("aa",))
+    waiter = Node("aa", waiter_state, blockers=("bb",))
+    return Model([Node("proj", "TODO", children=[blocker, waiter])],
+                 Divergences.normative())
+
+
+def test_waiting_entry_requires_reason_or_link():
+    """§4.6 guardrail: a bare WAITING entry is rejected, nothing changes."""
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
+                  Divergences.normative())
+    before = model.skeleton()
+    result = model.set_state("aa", "WAITING")
+    assert result.ok is False
+    assert model.skeleton() == before
+    # Either flag alone satisfies it.
+    assert model.set_state("aa", "WAITING", reason="because").ok
+    assert model.roots[0].children[0].waiting_reason == "because"
+
+
+def test_waiting_entry_edge_case_rulings():
+    """§4.6 rulings 2026-08-10 (a)/(b)/(d), all atomic (I12)."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("bb", "TODO"), Node("cc", "DONE"), Node("aa", "TODO"),
+    ])], Divergences.normative())
+    aa = model.roots[0].children[2]
+    # (a) self-block
+    assert model.set_state("aa", "WAITING", blocked_by=["aa"]).ok is False
+    # (b) an already-closed blocker, and one closed among several
+    assert model.set_state("aa", "WAITING", blocked_by=["cc"]).ok is False
+    assert model.set_state(
+        "aa", "WAITING", blocked_by=["bb", "cc"]).ok is False
+    # (d) a multi-line reason
+    assert model.set_state("aa", "WAITING", reason="one\ntwo").ok is False
+    # Nothing was written by any of them.
+    assert aa.keyword == "TODO" and aa.blockers == ()
+    assert model.roots[0].children[0].triggers == ()
+
+
+def test_waiting_entry_rejects_cycles_and_accepts_diamonds():
+    """§4.6 ruling (a): a link closing a cycle is rejected; a diamond is not."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("root", "TODO"), Node("left", "TODO"),
+        Node("right", "TODO"), Node("top", "TODO"),
+    ])], Divergences.normative())
+    assert model.set_state("left", "WAITING", blocked_by=["root"]).ok
+    assert model.set_state("right", "WAITING", blocked_by=["root"]).ok
+    # A diamond: two disjoint paths to "root", no cycle.
+    assert model.set_state(
+        "top", "WAITING", blocked_by=["left", "right"]).ok
+    # And a cycle: root may not wait on top.
+    assert model.set_state("root", "WAITING", blocked_by=["top"]).ok is False
+    # Cycle-safe even when the graph already holds one (visited set).
+    model.roots[0].children[0].blockers = ("top",)
+    assert model.set_state("root", "WAITING", blocked_by=["top"]).ok is False
+
+
+def test_waiting_reentry_amends_by_replacing():
+    """§4.6 ruling (c): the amend unwinds first, then writes."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("b1", "TODO"), Node("b2", "TODO"), Node("aa", "TODO"),
+    ])], Divergences.normative())
+    assert model.set_state("aa", "WAITING", reason="r1", blocked_by=["b1"]).ok
+    result = model.set_state("aa", "WAITING", blocked_by=["b2"])
+    assert result.ok
+    assert result.old_state == "WAITING" and result.new_state == "WAITING"
+    b1, b2, aa = model.roots[0].children
+    assert aa.blockers == ("b2",)          # replaced, never accumulated
+    assert aa.waiting_reason is None       # r1 is not carried over
+    assert b1.triggers == () and b2.triggers == ("aa",)
+    assert [(e.action, e.heading) for e in result.side_effects] == [
+        ("blocker-link-removed", "b1")]
+    # A bare re-entry is still the guardrail's rejection, and atomic.
+    assert model.set_state("aa", "WAITING").ok is False
+    assert aa.blockers == ("b2",)
+
+
+def test_and_gate_fires_only_when_all_closed():
+    """§4.4: the wake fires on the last close, never the first."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("b1", "TODO", triggers=("aa",)),
+        Node("b2", "TODO", triggers=("aa",)),
+        Node("aa", "WAITING", waiting_reason="r", blockers=("b1", "b2")),
+    ])], Divergences.normative())
+    aa = model.roots[0].children[2]
+    result = model.set_done("b1")
+    assert result.ok
+    # Completely untouched while an open blocker remains.
+    assert aa.keyword == "WAITING"
+    assert aa.waiting_reason == "r" and aa.blockers == ("b1", "b2")
+    assert [e for e in result.side_effects if e.heading == "aa"] == []
+    result = model.set_done("b2")
+    assert ("unblocked", "aa") in [(e.action, e.heading)
+                                   for e in result.side_effects]
+    assert aa.keyword in ("NEXT", "TODO")
+    assert aa.waiting_reason is None and aa.blockers == ()
+
+
+def test_and_gate_tolerates_dangling_links():
+    """§4.4/§4.6: an id that no longer resolves is skipped silently."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("bb", "TODO", triggers=("aa", "gone")),
+        Node("aa", "WAITING", blockers=("bb", "also-gone")),
+    ])], Divergences.normative())
+    result = model.set_done("bb")
+    assert result.ok
+    # The dangling trigger is dropped, the live one still wakes; the
+    # dangling blocker neither wedges the gate nor emits an effect.
+    assert ("unblocked", "aa") in [(e.action, e.heading)
+                                   for e in result.side_effects]
+    assert [(e.action, e.heading) for e in result.side_effects
+            if e.action == "blocker-link-removed"] == [
+        ("blocker-link-removed", "bb")]
+
+
+@pytest.mark.parametrize("group,expected", [
+    # leaf project child, first open, no NEXT in the group → NEXT
+    ([("done1", "DONE"), ("aa", "WAITING"), ("later", "TODO")], "NEXT"),
+    # an open sibling precedes it → TODO
+    ([("earlier", "TODO"), ("aa", "WAITING")], "TODO"),
+    # the group already holds a NEXT → TODO ((b) without (a))
+    ([("aa", "WAITING"), ("front", "NEXT")], "TODO"),
+    # a DEFER sibling before it is ignored by the "precedes" test → NEXT
+    ([("dd", "DEFER"), ("aa", "WAITING")], "NEXT"),
+])
+def test_conditional_wake_state(group, expected):
+    """§4.6 conditional wake, on a project child leaf."""
+    model = Model([
+        Node("other", "TODO", children=[Node("bb", "TODO", triggers=("aa",))]),
+        Node("proj", "TODO",
+             children=[Node(h, k, blockers=("bb",) if h == "aa" else ())
+                       for h, k in group]),
+    ], Divergences.normative())
+    order_before = [n.heading for n in model.roots[1].children]
+    result = model.set_done("bb")
+    assert result.ok
+    woken = [e for e in result.side_effects if e.action == "unblocked"]
+    assert len(woken) == 1 and woken[0].new_state == expected
+    # Position never changes, and no §4.5 promotion runs from the wake.
+    assert [n.heading for n in model.roots[1].children] == order_before
+
+
+@pytest.mark.parametrize("shape", ["lone", "grown"])
+def test_conditional_wake_is_todo_off_the_leaf_child_shape(shape):
+    """§4.6/I3: a lone task, or one that grew children, wakes as TODO."""
+    waiter = Node("aa", "WAITING", blockers=("bb",))
+    if shape == "grown":
+        waiter.children = [Node("kid", "TODO")]
+        roots = [Node("other", "TODO",
+                      children=[Node("bb", "TODO", triggers=("aa",))]),
+                 Node("proj", "TODO", children=[waiter])]
+    else:
+        roots = [Node("other", "TODO",
+                      children=[Node("bb", "TODO", triggers=("aa",))]),
+                 waiter]
+    model = Model(roots, Divergences.normative())
+    result = model.set_done("bb")
+    woken = [e for e in result.side_effects if e.action == "unblocked"]
+    assert len(woken) == 1 and woken[0].new_state == "TODO"
+
+
+@pytest.mark.parametrize("exit_op", ["set_state", "set_next", "set_done",
+                                     "set_cancelled"])
+def test_every_waiting_exit_unwinds_the_link_pair(exit_op):
+    """§4.6: the exit cleanup runs from every CLI-driven exit site."""
+    model = _linked()
+    model.roots[0].children[1].waiting_reason = "r"
+    args = ("aa", "TODO") if exit_op == "set_state" else ("aa",)
+    result = getattr(model, exit_op)(*args)
+    assert result.ok, result.error
+    blocker, waiter = model.roots[0].children
+    assert waiter.waiting_reason is None and waiter.blockers == ()
+    assert blocker.triggers == ()
+    assert ("blocker-link-removed", "bb") in [
+        (e.action, e.heading) for e in result.side_effects]
+
+
+def test_create_never_mints_waiting():
+    """§4.2/§4.3: add-task and add-subtask reject WAITING; NEXT stays legal
+    on add-subtask (the deliberate asymmetry)."""
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
+                  Divergences.normative())
+    before = model.skeleton()
+    assert model.add_task("new1", state="WAITING").ok is False
+    assert model.add_subtask("proj", "new2", state="WAITING").ok is False
+    assert model.skeleton() == before
+    assert model.add_subtask("proj", "new3", state="NEXT").ok
+
+
+@given(models_and_ops())
+def test_waiting_state_stays_consistent_under_any_sequence(model_and_ops):
+    """No operation may leave a task WAITING-linked but not WAITING, nor a
+    blocker pointing at a task that is not waiting on it back.
+
+    Structural invariants are the main property's subject (and carry its
+    PARKED-gap filter); this one asserts only the link pairing, which no
+    documented gap touches.
+    """
+    model, ops = model_and_ops
+    for op, args, kwargs in ops:
+        getattr(model, op)(*args, **kwargs)
+        for node in model.all_nodes():
+            if node.blockers:
+                assert node.keyword == "WAITING", (
+                    f"{node.heading} carries blockers but is {node.keyword}")
+            for heading in node.triggers:
+                waiter = model.resolve_link(heading)
+                if waiter is not None:
+                    assert node.heading in waiter.blockers, (
+                        "one-sided link pair survived an operation")

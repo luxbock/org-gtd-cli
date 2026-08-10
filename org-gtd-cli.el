@@ -1341,7 +1341,10 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                      (push (list state heading priority-char
                                  (vconcat (mapcar #'identity tags))
                                  tags-str rel-file scheduled deadline
-                                 parent-heading is-project body-text props id)
+                                 parent-heading is-project body-text props id
+                                 ;; §5.5 WAITING surfacing: computed here,
+                                 ;; while point is still on the row.
+                                 (org-gtd-cli/waiting-fields-at-point))
                            results))))))))))
     (setq results (nreverse results))
     (if org-gtd-cli/json-mode
@@ -1382,7 +1385,8 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
                     (deadline . ,(or (nth 7 r) :null))
                     (parent . ,(or (nth 8 r) :null))
                     (is_project . ,(if (nth 9 r) t :false))
-                    (properties . ,(nth 11 r)))))
+                    (properties . ,(nth 11 r))
+                    ,@(nth 13 r))))
         (when org-gtd-cli/full-mode
           (setq task (append task `((body . ,(or (nth 10 r) :null))))))
         (push task tasks)))
@@ -1487,7 +1491,10 @@ FILE-NAME restricts search to a single file in org-directory."
                          (id (org-entry-get nil "ID")))
                      (push (list state heading rel-file
                                  (vconcat (mapcar #'identity tags))
-                                 parent-heading is-project body-text props id)
+                                 parent-heading is-project body-text props id
+                                 ;; §5.5 WAITING surfacing: computed here,
+                                 ;; while point is still on the row.
+                                 (org-gtd-cli/waiting-fields-at-point))
                            matches))))))))))
     (setq matches (nreverse matches))
     (if org-gtd-cli/json-mode
@@ -1511,7 +1518,8 @@ FILE-NAME restricts search to a single file in org-directory."
                            (file . ,rel-file)
                            (parent . ,(or parent :null))
                            (is_project . ,(if is-project t :false))
-                           (properties . ,props))))
+                           (properties . ,props)
+                           ,@(nth 9 m))))
               (when org-gtd-cli/full-mode
                 (setq task (append task `((body . ,(or body :null))))))
               (push task tasks)
@@ -1841,6 +1849,9 @@ minus the version/command wrapper."
         (parent . ,(or parent-heading :null))
         (is_project . ,(if is-project t :false))
         (properties . ,(org-gtd-cli/properties-at-point))
+        ;; §5.5 WAITING surfacing: null-safe on every row, not only
+        ;; WAITING ones, so consumers never have to branch on state.
+        ,@(org-gtd-cli/waiting-fields-at-point)
         (body . ,(or body :null))
         (sessions . ,(apply #'vector sessions))
         (subtasks . ,(apply #'vector (nreverse children)))
@@ -2790,6 +2801,10 @@ any state (including DONE) and plain category/note headings."
     ;; standalone NEXT. Use `add-subtask' + `set-next' to make a project's NEXT.
     (when (equal todo-state "NEXT")
       (org-gtd-cli/reject-next title))
+    ;; §4.2: create never mints WAITING — its guardrail lives on the
+    ;; `set-state' entry (§4.6).
+    (when (equal todo-state "WAITING")
+      (org-gtd-cli/reject-waiting-at-create title))
     (unless (file-exists-p target-file)
       (org-gtd-cli/error "Error: file not found: %s" target-file)
       (kill-emacs 1))
@@ -2945,6 +2960,12 @@ any state (including DONE) and plain category/note headings."
          (priority (when (and priority (not (string-empty-p priority))
                               (not (equal priority "nil")))
                      priority))
+         ;; §4.3: create never mints WAITING — its guardrail lives on the
+         ;; `set-state' entry (§4.6).  Checked before the parent is even
+         ;; resolved, so a rejected call touches nothing.  `--state NEXT'
+         ;; stays legal here: a hand-declared parallel front (§3).
+         (_ (when (equal todo-state "WAITING")
+              (org-gtd-cli/reject-waiting-at-create title)))
          (buf-pos (org-gtd-cli/find-task parent-substring idx t)))
     (when body (setq body (org-gtd-cli/fill-text body)))
     (org-gtd-cli/validate-body-text body)
@@ -3503,6 +3524,353 @@ message strings in printing order."
             (org-gtd-cli/auto-progress--scan rel-file saved-pos sim t)))))))
     msgs))
 
+;; --- §4.6 the WAITING mechanism: blocker links, wake, exit cleanup (#39) ---
+;;
+;; The property syntax is byte-compatible with org-depend (`TRIGGER:
+;; <waiting-id>(TODO)' on the blocker, `BLOCKER: <blocker-id>' on the
+;; waiting task) so the links stay readable and editable in Emacs, but
+;; org-depend is deliberately NOT loaded: the AND-gate (§4.4), the
+;; conditional wake and the exit cleanup (§4.6) are implemented here.
+;; Ids resolve by scanning `org-agenda-files' — this CLI keeps
+;; `org-id-track-globally' nil, so `org-id-find' raises rather than
+;; resolving.
+
+(defun org-gtd-cli/locate-id (id)
+  "Return a marker on the first heading whose org `:ID:' is ID, or nil.
+The non-fatal counterpart of `org-gtd-cli/find-task-by-id' (which exits
+1 on a miss): blocker/trigger resolution must be able to *not* find an
+id — §4.4 drops unresolvable `TRIGGER' ids silently and §4.6 skips
+unresolvable `BLOCKER' ids.  A marker, not a position, because callers
+hold the location across edits that shift it."
+  (when (and id (stringp id) (not (string-empty-p id)))
+    (catch 'found
+      (dolist (file (org-agenda-files))
+        (when (file-exists-p file)
+          (with-current-buffer (find-file-noselect file)
+            (org-with-wide-buffer
+             (goto-char (point-min))
+             (while (re-search-forward org-heading-regexp nil t)
+               (when (equal (org-entry-get nil "ID") id)
+                 (throw 'found (copy-marker (line-beginning-position)))))))))
+      nil)))
+
+(defun org-gtd-cli/call-at-marker (marker fn)
+  "Call FN with point on MARKER's heading, in MARKER's buffer.
+Buffer, point and narrowing are restored; FN's value is returned."
+  (with-current-buffer (marker-buffer marker)
+    (org-with-wide-buffer
+     (goto-char marker)
+     (funcall fn))))
+
+(defun org-gtd-cli/prop-values (key)
+  "The multivalued org property KEY at point as a list of strings."
+  (let ((raw (org-entry-get nil key)))
+    (when (and raw (not (string-empty-p raw)))
+      (split-string raw "[ \t\n]+" t))))
+
+(defun org-gtd-cli/prop-set-values (key values)
+  "Write VALUES as the multivalued property KEY at point (nil deletes it)."
+  (if values
+      (org-entry-put nil key (mapconcat #'identity values " "))
+    (org-entry-delete nil key)))
+
+(defun org-gtd-cli/trigger-id (entry)
+  "The id part of the org-depend TRIGGER ENTRY \"<id>(STATE)\".
+A bare id (no parenthesised state) is returned unchanged."
+  (if (string-match "\\`\\([^(]+\\)(" entry)
+      (match-string 1 entry)
+    entry))
+
+(defun org-gtd-cli/heading-and-file-at-marker (marker)
+  "Return (HEADING RELFILE STATE) for the heading at MARKER."
+  (org-gtd-cli/call-at-marker
+   marker
+   (lambda ()
+     (list (org-get-heading t t t t)
+           (org-gtd-cli/relative-filename (buffer-file-name))
+           (org-get-todo-state)))))
+
+(defun org-gtd-cli/resolving-triggers ()
+  "Tasks blocked by the heading at point, per its `TRIGGER' property.
+Returns a list of (MARKER HEADING RELFILE STATE), one per `TRIGGER'
+entry whose id resolves; unresolvable ids are skipped — §4.12: dangling
+debris never trips the delete guard, and §4.11 never holds a record back
+for it."
+  (let ((out '()))
+    (dolist (entry (org-gtd-cli/prop-values "TRIGGER"))
+      (let ((m (org-gtd-cli/locate-id (org-gtd-cli/trigger-id entry))))
+        (when m
+          (push (cons m (org-gtd-cli/heading-and-file-at-marker m)) out))))
+    (nreverse out)))
+
+(defun org-gtd-cli/blocked-open-tasks ()
+  "Open tasks blocked by the heading at point (§4.11/§4.12).
+The subset of `org-gtd-cli/resolving-triggers' still open; empty means
+nothing actually waits on this record."
+  (cl-remove-if (lambda (r) (member (nth 3 r) org-done-keywords))
+                (org-gtd-cli/resolving-triggers)))
+
+(defun org-gtd-cli/scrub-trigger (blocker-marker waiter-id)
+  "Drop WAITER-ID's `TRIGGER' entry from the blocker at BLOCKER-MARKER.
+Saves the blocker's buffer; returns non-nil when an entry was removed."
+  (org-gtd-cli/call-at-marker
+   blocker-marker
+   (lambda ()
+     (let* ((entries (org-gtd-cli/prop-values "TRIGGER"))
+            (kept (cl-remove-if
+                   (lambda (e) (equal (org-gtd-cli/trigger-id e) waiter-id))
+                   entries)))
+       (unless (equal kept entries)
+         (org-gtd-cli/prop-set-values "TRIGGER" kept)
+         (save-buffer)
+         t)))))
+
+(defun org-gtd-cli/waiting-exit-cleanup (&optional dry)
+  "SEMANTICS.md §4.6 WAITING exit cleanup for the task at point.
+Removes `:REASON:', removes the `BLOCKER' property, and scrubs the
+exiting task's id from every listed blocker's `TRIGGER' entry; a blocker
+id that does not resolve is skipped silently.  The LOGBOOK record is
+left alone (I10).  Returns one `blocker-link-removed' side-effect alist
+per unwound link (§4.0: the same vocabulary §4.12's waiting-side delete
+unwind emits).  With DRY non-nil nothing is written and the effects are
+predicted instead — `--dry-run' parity.
+
+Callable from every WAITING exit site, so #56's keyword-outgrown
+demotion wires in without duplication."
+  (let* ((self-id (org-entry-get nil "ID"))
+         (blockers (org-gtd-cli/prop-values "BLOCKER"))
+         (effects '()))
+    (unless dry
+      (org-entry-delete nil "REASON")
+      (org-entry-delete nil "BLOCKER"))
+    (when self-id
+      (dolist (bid blockers)
+        (let ((m (org-gtd-cli/locate-id bid)))
+          (when m
+            (let* ((info (org-gtd-cli/heading-and-file-at-marker m))
+                   (removed
+                    (if dry
+                        (org-gtd-cli/call-at-marker
+                         m (lambda ()
+                             (and (cl-some
+                                   (lambda (e)
+                                     (equal (org-gtd-cli/trigger-id e) self-id))
+                                   (org-gtd-cli/prop-values "TRIGGER"))
+                                  t)))
+                      (org-gtd-cli/scrub-trigger m self-id))))
+              (when removed
+                (push `((action . "blocker-link-removed")
+                        (heading . ,(nth 0 info))
+                        (file . ,(nth 1 info)))
+                      effects)))
+            (set-marker m nil)))))
+    (nreverse effects)))
+
+(defun org-gtd-cli/wake-state (&optional closing-id)
+  "The §4.6 conditional-wake target state for the WAITING task at point.
+NEXT iff the task is a leaf project child, no open sibling (NEXT/TODO/
+WAITING) precedes it in document order within its sibling group, and the
+group contains no NEXT; TODO otherwise.  The DEFER block is excluded
+from the `precedes' test by construction — DEFER is not in the open set
+scanned here — as is the completed block.  The wake never moves the task
+and never runs the §4.5 promotion rule (I9).
+
+CLOSING-ID is the id of the task whose close is firing this wake: it
+counts as closed even when the buffer still shows it open, because
+`--dry-run' asks before `org-todo' has run.  Without it a previewed
+`set-done' would read its own still-open blocker as an open sibling and
+predict TODO where the real call wakes to NEXT (§4.0 dry-run parity)."
+  (if (not (and (gtd/is-task-p) (gtd/is-subproject-p)))
+      ;; A lone task, or one that has grown task children of its own
+      ;; (I3 / the §3 matrix): plain TODO.
+      "TODO"
+    (let ((my-pos (line-beginning-position))
+          (open-before nil)
+          (group-next nil))
+      (save-excursion
+        (when (org-up-heading-safe)
+          (when (org-goto-first-child)
+            (catch 'scanned
+              (while t
+                (let ((s (org-get-todo-state))
+                      (here (line-beginning-position))
+                      (closing (and closing-id
+                                    (equal (org-entry-get nil "ID")
+                                           closing-id))))
+                  (when (and (equal s "NEXT") (not closing))
+                    (setq group-next t))
+                  (when (and (< here my-pos) (not closing)
+                             (member s '("NEXT" "TODO" "WAITING")))
+                    (setq open-before t)))
+                (unless (org-get-next-sibling) (throw 'scanned nil)))))))
+      (if (or open-before group-next) "TODO" "NEXT"))))
+
+(defun org-gtd-cli/blockers-all-closed-p (closing-id)
+  "The §4.4 AND-gate for the WAITING task at point.
+Non-nil when every id in its `BLOCKER' property is closed.  CLOSING-ID
+counts as closed even when the buffer still shows it open — the dry-run
+path asks before `org-todo' has run.  A `BLOCKER' id that does not
+resolve is ignored rather than treated as open: dangling debris must not
+wedge a waiter forever (the same tolerance §4.6's cleanup and §4.4's
+close-time `TRIGGER' drop already apply)."
+  (cl-every
+   (lambda (bid)
+     (or (equal bid closing-id)
+         (let ((bm (org-gtd-cli/locate-id bid)))
+           (or (null bm)
+               (org-gtd-cli/call-at-marker
+                bm (lambda ()
+                     (and (member (org-get-todo-state) org-done-keywords)
+                          t)))))))
+   (org-gtd-cli/prop-values "BLOCKER")))
+
+(defun org-gtd-cli/auto-unblock (&optional dry)
+  "SEMANTICS.md §4.4 auto-unblock, from the just-closed task at point.
+Reads the closed task's `TRIGGER' entries and applies them natively.
+For each entry whose id resolves to a WAITING task the flip is AND-gated
+on that task's `BLOCKER' property: it fires only when every listed
+blocker is closed; while any remains open the waiting task is left
+completely untouched — no state change, no property edit, no side
+effect.  A firing flip wakes the task per §4.6's conditional wake, runs
+the §4.6 exit cleanup, and is reported as an `unblocked' side effect.  A
+`TRIGGER' id that no longer resolves is dropped silently (§4.4's
+close-time defensive cover).
+
+The §4.5 promotion rule is never invoked from here (I9).
+
+Returns (MESSAGES . EFFECTS): advisory text-mode lines, and the
+structured side-effect alists.  With DRY non-nil nothing is mutated and
+the same prediction comes back — `set-done --dry-run' parity."
+  (let ((self-id (org-entry-get nil "ID"))
+        (entries (org-gtd-cli/prop-values "TRIGGER"))
+        (msgs '())
+        (effects '()))
+    (dolist (entry entries)
+      (let ((m (org-gtd-cli/locate-id (org-gtd-cli/trigger-id entry))))
+        (when m
+          (let ((fires (org-gtd-cli/call-at-marker
+                        m (lambda ()
+                            (and (equal (org-get-todo-state) "WAITING")
+                                 (org-gtd-cli/blockers-all-closed-p self-id))))))
+            (when fires
+              (let* ((info (org-gtd-cli/heading-and-file-at-marker m))
+                     (heading (nth 0 info))
+                     (rel (nth 1 info))
+                     (new-state (org-gtd-cli/call-at-marker
+                                 m (lambda ()
+                                     (org-gtd-cli/wake-state self-id))))
+                     (cleanup
+                      (org-gtd-cli/call-at-marker
+                       m (lambda ()
+                           (if dry
+                               (org-gtd-cli/waiting-exit-cleanup t)
+                             (let ((org-inhibit-logging nil))
+                               (org-todo new-state))
+                             (prog1 (org-gtd-cli/waiting-exit-cleanup)
+                               (save-buffer)))))))
+                (push (if dry
+                          (format "  Would unblock: \"%s\" -> %s\n"
+                                  heading new-state)
+                        (format "  Unblocked: \"%s\" -> %s (%s)\n"
+                                heading new-state rel))
+                      msgs)
+                (setq effects
+                      (append effects
+                              (list `((action . "unblocked")
+                                      (heading . ,heading)
+                                      (old_state . "WAITING")
+                                      (new_state . ,new-state)
+                                      (file . ,rel)))
+                              cleanup)))))
+          (set-marker m nil))))
+    (cons (nreverse msgs) effects)))
+
+(defun org-gtd-cli/princ-waiting-effect (e &optional dry)
+  "Print the §4.6 side effect E as one human text-mode line.
+DRY selects the preview wording.  Text mode has no structured channel,
+so every command that can emit the WAITING vocabulary prints through
+here — otherwise `set-done' and `set-state' describe the same repair in
+different words, or (as review-bot found on PR #77) not at all.
+
+The `unblocked' wording is `org-gtd-cli/auto-unblock's own, verbatim, so
+a caller that already printed that function's message list must not also
+print its `unblocked' effects — it would say the same thing twice."
+  (let ((action (cdr (assq 'action e)))
+        (heading (cdr (assq 'heading e)))
+        (file (cdr (assq 'file e))))
+    (if (equal action "unblocked")
+        (princ (if dry
+                   (format "  Would unblock: \"%s\" -> %s\n"
+                           heading (cdr (assq 'new_state e)))
+                 (format "  Unblocked: \"%s\" -> %s (%s)\n"
+                         heading (cdr (assq 'new_state e)) file)))
+      (princ (format (if dry
+                         "  Would remove blocker link: \"%s\" (%s)\n"
+                       "  Removed blocker link: \"%s\" (%s)\n")
+                     heading file)))))
+
+(defun org-gtd-cli/princ-link-removals (effects &optional dry)
+  "Print only the `blocker-link-removed' entries of EFFECTS.
+For callers that already printed `org-gtd-cli/auto-unblock's message
+list — the `unblocked' lines are in there, so replaying them from the
+effect list would duplicate them."
+  (dolist (e effects)
+    (unless (equal (cdr (assq 'action e)) "unblocked")
+      (org-gtd-cli/princ-waiting-effect e dry))))
+
+(defun org-gtd-cli/waiting-fields-at-point ()
+  "SEMANTICS.md §5.5 WAITING surfacing for the heading at point.
+Returns the two first-class fields every task row carries, on top of the
+raw `properties' drawer:
+
+  `waiting_reason' — the `:REASON:' value, or, when `:REASON:' is absent
+  but blocker links exist, a reason derived from each resolving
+  blocker's heading and current state; `:null' when there is neither.
+
+  `blocked_by' — one object per `BLOCKER:' id (`id', `heading', `state',
+  `file'; the last three `:null' for an id that no longer resolves), or
+  `:null' when the task carries no links.
+
+Null-safe by construction: a reason-less WAITING task, or any task with
+no links at all, yields `:null' rather than an error (§4.6's tolerance).
+Cost is paid only by tasks that actually carry `BLOCKER:' — the id scan
+never runs for the overwhelming majority of rows."
+  (let* ((reason (org-entry-get nil "REASON"))
+         (blockers (org-gtd-cli/prop-values "BLOCKER"))
+         (entries '()))
+    (dolist (bid blockers)
+      (let ((m (org-gtd-cli/locate-id bid)))
+        (if (null m)
+            (push `((id . ,bid) (heading . :null) (state . :null)
+                    (file . :null))
+                  entries)
+          (let ((info (org-gtd-cli/heading-and-file-at-marker m)))
+            (push `((id . ,bid)
+                    (heading . ,(nth 0 info))
+                    (state . ,(or (nth 2 info) :null))
+                    (file . ,(nth 1 info)))
+                  entries)
+            (set-marker m nil)))))
+    (setq entries (nreverse entries))
+    `((waiting_reason
+       . ,(cond ((and reason (not (string-empty-p reason))) reason)
+                ((null entries) :null)
+                (t (let ((named
+                          (delq nil
+                                (mapcar
+                                 (lambda (e)
+                                   (let ((h (cdr (assq 'heading e)))
+                                         (s (cdr (assq 'state e))))
+                                     (when (stringp h)
+                                       (format "\"%s\" (%s)" h
+                                               (if (stringp s) s "no state")))))
+                                 entries))))
+                     (if named
+                         (concat "Blocked by "
+                                 (mapconcat #'identity named ", "))
+                       :null)))))
+      (blocked_by . ,(if entries (apply #'vector entries) :null)))))
+
 ;; --- close: the shared §4.4 / §4.6 machinery ---
 ;;
 ;; SEMANTICS.md §4.6 (amended by PR #68): a transition *into* DONE or
@@ -3556,34 +3924,77 @@ and the JSON envelope carries `dry_run'."
 POS is the just-closed task's heading position and OLD-STATE the
 keyword it left.  The CLOSED timestamp and the LOGBOOK stamp (I10) are
 already written by `org-todo' (`org-log-done'); this helper adds the
-rest and returns the auto-progress message list (nil when PROMOTE is
-nil).
+rest.
 
 PROMOTE runs the §4.5 promotion rule.  I9 admits it from
 `set-done'/`set-cancelled' only — a close driven through `set-state'
 passes nil.
 
 This is the single seam for the close post-conditions still to land:
-#41 (§7 row 7) adds the priority-cookie strip here, and #39 (§7 row 5)
-adds the §4.4 auto-unblock AND-gate here.  Because all three commands
-route through this helper, each lands once and reaches `set-state' for
-free — which is how issue #46's criterion A14 is satisfied
-structurally.  A14's *behavioral* check (auto-unblock firing from a
-`set-state CANCELLED') belongs to #39's implementer: auto-unblock does
-not exist on master at all."
+#41 (§7 row 7) adds the priority-cookie strip here.  #39 (§7 row 5)
+landed the §4.4 auto-unblock AND-gate and the §4.6 WAITING exit cleanup
+here — a close is a WAITING exit site like any other.  Because all three
+commands route through this helper, each lands once and reaches
+`set-state' for free — which is how issue #46's criterion A14 is
+satisfied structurally (its behavioral check is #39's
+`TestWaitingAutoUnblock::test_set_state_cancelled_fires_auto_unblock').
+
+Returns (MESSAGES . EFFECTS): the advisory message strings in printing
+order (auto-progress's, then auto-unblock's) and the structured
+`unblocked'/`blocker-link-removed' side-effect alists.  The messages
+still feed `org-gtd-cli/parse-side-effects' for the auto-progress
+vocabulary; the WAITING effects are structured from the start and are
+appended, never string-matched."
   (let* ((done-marker (copy-marker pos))
          ;; Track the closed task with a marker: auto-progress may move
-         ;; the promoted sibling above it (§4.1 placement), which would
-         ;; leave the raw position stale.
-         (auto-msgs (when promote (org-gtd-cli/auto-progress rel-file))))
+         ;; the promoted sibling above it (§4.1 placement), and
+         ;; auto-unblock may edit a waiter's drawer earlier in the same
+         ;; file — both would leave the raw position stale.
+         ;;
+         ;; Ordering: the §4.5 promotion rule runs FIRST, on the state as
+         ;; the close left it, so #39 changes nothing about §4.5.  It
+         ;; matters in exactly one shape — a waiter that is a sibling of
+         ;; the closed task: promotion's step-1 guard sees it still
+         ;; WAITING and mints nothing, and the wake then reads a group
+         ;; with no NEXT.  That is precisely §4.6's *accepted residual*
+         ;; (a woken task that is not first leaves the project with no
+         ;; front, surfaced by the stuck view, never guessed at).  Waking
+         ;; first would instead let promotion mint a front behind the
+         ;; wake's back — a §4.5 behaviour change this issue is not
+         ;; allowed to make.
+         (auto-msgs (when promote
+                      (save-excursion
+                        (goto-char done-marker)
+                        (org-gtd-cli/auto-progress rel-file))))
+         (unblock (save-excursion
+                    (goto-char done-marker)
+                    (org-gtd-cli/auto-unblock)))
+         ;; §4.6: a close is a WAITING exit site — the closed task's own
+         ;; reason and link pair are unwound here, which is what makes
+         ;; `set-done'/`set-cancelled' on a WAITING task behave like
+         ;; every other exit (and what frees its blockers for §4.11).
+         (exit-effects (when (equal old-state "WAITING")
+                         (save-excursion
+                           (goto-char done-marker)
+                           (org-gtd-cli/waiting-exit-cleanup)))))
     (save-excursion
       (goto-char done-marker)
       (org-gtd-cli/reorder-siblings-by-state old-state))
     (set-marker done-marker nil)
     (save-buffer)
-    auto-msgs))
+    (cons (append auto-msgs (car unblock))
+          (append (cdr unblock) exit-effects))))
 
 ;; --- done ---
+
+(defun org-gtd-cli/close-waiting-preview (old-state)
+  "Predict a close's §4.6/§4.4 WAITING side effects for the task at point.
+The dry-run counterpart of what `org-gtd-cli/run-close-post-conditions'
+would emit: the §4.4 auto-unblock wake, plus the closed task's own §4.6
+exit unwind when it is leaving WAITING.  Mutates nothing."
+  (append (cdr (org-gtd-cli/auto-unblock t))
+          (when (equal old-state "WAITING")
+            (org-gtd-cli/waiting-exit-cleanup t))))
 
 (defun org-gtd-cli/set-done (substring &optional index dry-run)
   "Mark a task as DONE."
@@ -3612,13 +4023,25 @@ not exist on master at all."
                                    (old_state . ,old-state)
                                    (new_state . "DONE")
                                    (dry_run . t)
-                                   (side_effects . ,(org-gtd-cli/parse-side-effects-preview
-                                                     (org-gtd-cli/auto-progress-preview rel-file)
-                                                     rel-file)))))
+                                   ;; §4.4/§4.6: the preview predicts the
+                                   ;; auto-unblock wake and the closed
+                                   ;; task's own exit unwind too (#39).
+                                   (side_effects
+                                    . ,(vconcat
+                                        (org-gtd-cli/parse-side-effects-preview
+                                         (org-gtd-cli/auto-progress-preview rel-file)
+                                         rel-file)
+                                        (org-gtd-cli/close-waiting-preview old-state))))))
                      (org-gtd-cli/output result))
                  (princ (format "Would mark done: %s (%s)\n" heading rel-file))
                  (dolist (msg (org-gtd-cli/auto-progress-preview rel-file))
-                   (princ msg))))
+                   (princ msg))
+                 (dolist (msg (car (org-gtd-cli/auto-unblock t)))
+                   (princ msg))
+                 ;; §4.6: the closed task's *own* exit unwind, which the
+                 ;; JSON branch above predicts and text mode used to drop.
+                 (org-gtd-cli/princ-link-removals
+                  (org-gtd-cli/close-waiting-preview old-state) t)))
            ;; Real path
            (let ((org-inhibit-logging nil))
              (org-todo "DONE"))
@@ -3630,8 +4053,10 @@ not exist on master at all."
            ;; run auto-progress, and persist stray changes.
            (if (not (equal (org-get-todo-state) "DONE"))
                (org-gtd-cli/reject-blocked-close heading "DONE")
-             (let ((auto-msgs (org-gtd-cli/run-close-post-conditions
-                               rel-file (cdr buf-pos) old-state t)))
+             (let* ((post (org-gtd-cli/run-close-post-conditions
+                           rel-file (cdr buf-pos) old-state t))
+                    (auto-msgs (car post))
+                    (link-effects (cdr post)))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
                     `((version . 1)
@@ -3640,11 +4065,16 @@ not exist on master at all."
                       (file . ,rel-file)
                       (old_state . ,old-state)
                       (new_state . "DONE")
-                      (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
+                      (side_effects
+                       . ,(vconcat (org-gtd-cli/parse-side-effects auto-msgs)
+                                   link-effects)))
                     heading)
                  (princ (format "Done: %s (%s)\n" heading rel-file))
                  (dolist (msg auto-msgs)
-                   (princ msg))))))))))
+                   (princ msg))
+                 ;; `auto-msgs' already carries the `unblocked' lines; only
+                 ;; the link removals still need printing (§4.6).
+                 (org-gtd-cli/princ-link-removals link-effects)))))))))
   (kill-emacs 0))
 
 ;; --- cancelled ---
@@ -3673,19 +4103,30 @@ not exist on master at all."
                       (old_state . ,old-state)
                       (new_state . "CANCELLED")
                       (dry_run . t)
-                      (side_effects . ,(org-gtd-cli/parse-side-effects-preview
-                                        (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
-                                        rel-file))))
+                      (side_effects
+                       . ,(vconcat
+                           (org-gtd-cli/parse-side-effects-preview
+                            (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
+                            rel-file)
+                           (org-gtd-cli/close-waiting-preview old-state)))))
                  (princ (format "Would cancel: %s (%s)\n" heading rel-file))
                  (dolist (msg (org-gtd-cli/auto-progress-preview rel-file "CANCELLED"))
-                   (princ msg))))
+                   (princ msg))
+                 (dolist (msg (car (org-gtd-cli/auto-unblock t)))
+                   (princ msg))
+                 ;; §4.6: the closed task's *own* exit unwind, which the
+                 ;; JSON branch above predicts and text mode used to drop.
+                 (org-gtd-cli/princ-link-removals
+                  (org-gtd-cli/close-waiting-preview old-state) t)))
            ;; Real path
            (let ((org-inhibit-logging nil))
              (org-todo "CANCELLED"))
            (if (not (equal (org-get-todo-state) "CANCELLED"))
                (org-gtd-cli/reject-blocked-close heading "CANCELLED")
-             (let ((auto-msgs (org-gtd-cli/run-close-post-conditions
-                               rel-file (cdr buf-pos) old-state t)))
+             (let* ((post (org-gtd-cli/run-close-post-conditions
+                           rel-file (cdr buf-pos) old-state t))
+                    (auto-msgs (car post))
+                    (link-effects (cdr post)))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
                     `((version . 1)
@@ -3694,11 +4135,16 @@ not exist on master at all."
                       (file . ,rel-file)
                       (old_state . ,old-state)
                       (new_state . "CANCELLED")
-                      (side_effects . ,(org-gtd-cli/parse-side-effects auto-msgs)))
+                      (side_effects
+                       . ,(vconcat (org-gtd-cli/parse-side-effects auto-msgs)
+                                   link-effects)))
                     heading)
                  (princ (format "Cancelled: %s (%s)\n" heading rel-file))
                  (dolist (msg auto-msgs)
-                   (princ msg))))))))))
+                   (princ msg))
+                 ;; `auto-msgs' already carries the `unblocked' lines; only
+                 ;; the link removals still need printing (§4.6).
+                 (org-gtd-cli/princ-link-removals link-effects)))))))))
   (kill-emacs 0))
 
 (defun org-gtd-cli/parse-side-effects (msgs)
@@ -3843,10 +4289,179 @@ that has no task children of its own; anything else is rejected:
   "Reject WAITING when the heading at point is a project heading.
 SEMANTICS.md §3 admits WAITING on lone tasks and project-child leaves
 only — a project's blocked-ness is read from its children, never
-asserted on its heading.  Structural guard only: the #39 `--reason' /
-blocker-link entry requirement (§7 row 5) is not this function's."
+asserted on its heading.  Structural guard only: the §4.6 `--reason' /
+blocker-link entry requirement is
+`org-gtd-cli/validate-waiting-entry' (#39)."
   (when (gtd/is-project-p)
     (org-gtd-cli/reject-project-heading-state heading "WAITING")))
+
+(defun org-gtd-cli/reject-with-hint (err hint)
+  "Emit ERR and HINT in the current output mode's shape, then exit 1."
+  (if org-gtd-cli/json-mode
+      ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+      (org-gtd-cli/output `((error . ,err) (hint . ,hint) (exit_code . 1)))
+    (org-gtd-cli/error "%s\nHint: %s" err hint))
+  (kill-emacs 1))
+
+(defun org-gtd-cli/reject-waiting-at-create (title)
+  "Emit the \"create never mints WAITING\" rejection for TITLE and exit 1.
+SEMANTICS.md §4.2/§4.3: `set-state' is the only CLI entry into WAITING,
+because WAITING's guardrail (a reason or a blocker link, §4.6) lives on
+that entry.  The asymmetry with `--state NEXT' on `add-subtask' — a
+legal hand-declared parallel front — is deliberate."
+  (org-gtd-cli/reject-with-hint
+   (format (concat "Cannot create \"%s\" as WAITING: create never mints "
+                   "WAITING — WAITING needs a concrete blocker")
+           title)
+   (concat "Create it as TODO, then: set-state \"" title
+           "\" WAITING --reason TEXT (or --blocked-by SUBSTR / "
+           "--blocked-by-id ID).")))
+
+(defun org-gtd-cli/blocker-graph-reaches-p (start-id target-id)
+  "Non-nil when TARGET-ID is reachable from START-ID over `BLOCKER' edges.
+The §4.6 cycle check (ruling 2026-08-10a).  Cycle-safe: the visited set
+means a pre-existing on-disk cycle cannot hang the walk.  A `BLOCKER' id
+that does not resolve is skipped silently — an unresolvable id is not
+itself grounds for rejection."
+  (let ((seen (make-hash-table :test 'equal))
+        (queue (list start-id))
+        (found nil))
+    (while (and queue (not found))
+      (let ((id (pop queue)))
+        (unless (gethash id seen)
+          (puthash id t seen)
+          (if (equal id target-id)
+              (setq found t)
+            (let ((m (org-gtd-cli/locate-id id)))
+              (when m
+                (setq queue
+                      (append queue
+                              (org-gtd-cli/call-at-marker
+                               m (lambda ()
+                                   (org-gtd-cli/prop-values "BLOCKER")))))
+                (set-marker m nil)))))))
+    found))
+
+(defun org-gtd-cli/resolve-blocker (spec by-id)
+  "Resolve one `--blocked-by'/`--blocked-by-id' SPEC to a marker.
+BY-ID non-nil selects org `:ID:' addressing.  The target's own `--id'
+shortcut and its lazy-`:ID:' creation are both shadowed off: `--id'
+names the *target*, never a blocker, and no `:ID:' may be minted while
+validation is still running (I12).  A failed or ambiguous match exits
+non-zero through the shared addressing error, mutating nothing."
+  (let* ((org-gtd-cli/forced-id nil)
+         (org-gtd-cli/forced-create-id nil)
+         (buf-pos (if by-id
+                      (org-gtd-cli/find-task-by-id spec)
+                    (org-gtd-cli/find-task spec nil t))))
+    (with-current-buffer (car buf-pos)
+      (copy-marker (cdr buf-pos)))))
+
+(defun org-gtd-cli/validate-waiting-entry (heading reason blocked-by blocked-by-id)
+  "Run the SEMANTICS.md §4.6 WAITING-entry validation for the task at point.
+Returns the resolved blocker markers in flag order (`--blocked-by' first,
+then `--blocked-by-id').  A repeated blocker is not filtered here —
+`org-gtd-cli/link-blocker' is idempotent, so a duplicate link is written
+once.
+
+Every check here precedes every mutation, so a rejected call leaves the
+target's state, `:REASON:', `BLOCKER:' and every blocker's `TRIGGER:'
+exactly as found and mints no `:ID:' (I12) — and `--dry-run' fails
+identically because it runs the very same validation.
+
+The guardrail (entry needs a reason or a link) plus the four edge cases
+ruled 2026-08-10: (a) no self-block and no cycle, (b) an already-closed
+blocker is rejected — the AND-gate stays close-event-driven and is never
+evaluated at entry, (d) a multi-line `--reason' is rejected rather than
+flattened.  (c), the WAITING→WAITING amend, is the caller's: validation
+first, then the §4.6 exit cleanup, then the new reason and links."
+  (unless (or (and reason (not (string-empty-p reason)))
+              blocked-by blocked-by-id)
+    (org-gtd-cli/reject-with-hint
+     (format (concat "Cannot set WAITING on \"%s\": WAITING requires a "
+                     "concrete blocker") heading)
+     (concat "Give at least one of --reason TEXT, --blocked-by SUBSTR, "
+             "--blocked-by-id ID.")))
+  (when (and reason (string-match-p "\n" reason))
+    (org-gtd-cli/reject-with-hint
+     (format (concat "Cannot set WAITING on \"%s\": --reason must fit on "
+                     "one line") heading)
+     (concat "The :REASON: property is single-line; a flattened or "
+             "truncated note would disagree with the LOGBOOK record. "
+             "Put the detail in the task body instead.")))
+  (let* ((self-pos (line-beginning-position))
+         (self-buf (current-buffer))
+         (self-id (org-entry-get nil "ID"))
+         (markers '()))
+    (dolist (spec blocked-by)
+      (push (org-gtd-cli/resolve-blocker spec nil) markers))
+    (dolist (spec blocked-by-id)
+      (push (org-gtd-cli/resolve-blocker spec t) markers))
+    (setq markers (nreverse markers))
+    (dolist (m markers)
+      ;; (a) self-block: trivially unsatisfiable — the gate can never fire.
+      (when (and (eq (marker-buffer m) self-buf)
+                 (= (marker-position m) self-pos))
+        (org-gtd-cli/reject-with-hint
+         (format "Cannot set WAITING on \"%s\": a task cannot block itself"
+                 heading)
+         "Name the task actually being waited on, or use --reason TEXT."))
+      (let* ((info (org-gtd-cli/heading-and-file-at-marker m))
+             (b-heading (nth 0 info))
+             (b-state (nth 2 info))
+             (b-id (org-gtd-cli/call-at-marker
+                    m (lambda () (org-entry-get nil "ID")))))
+        ;; (b) an already-closed blocker: the wait is already satisfied,
+        ;; and the AND-gate is close-event-driven, so nothing would ever
+        ;; fire.  One closed blocker rejects the whole call.
+        (when (member b-state org-done-keywords)
+          (org-gtd-cli/reject-with-hint
+           (format (concat "Cannot set WAITING on \"%s\": blocker \"%s\" is "
+                           "already %s")
+                   heading b-heading b-state)
+           (concat "A closed blocker can never fire the unblock gate. "
+                   "Name an open blocker, or use --reason TEXT.")))
+        ;; (a) cycles: reject any link that would close one.  Only
+        ;; possible when the target already has an id — nothing can point
+        ;; at an id-less heading.
+        (when (and self-id b-id
+                   (org-gtd-cli/blocker-graph-reaches-p b-id self-id))
+          (org-gtd-cli/reject-with-hint
+           (format (concat "Cannot set WAITING on \"%s\": blocking it on "
+                           "\"%s\" would close a cycle in the blocker graph")
+                   heading b-heading)
+           (concat "\"" b-heading "\" already waits on \"" heading
+             "\" (directly or transitively); a cycle can never unblock.")))))
+    markers))
+
+(defun org-gtd-cli/link-blocker (waiting-marker blocker-marker)
+  "Create the §4.6 blocker link pair between two tasks.
+Mints `:ID:' on both as needed (`org-id-get-create' is idempotent), then
+adds `BLOCKER: <blocker-id>' to the waiting task and `TRIGGER:
+<waiting-id>(TODO)' to the blocker — the multivalued org-depend byte
+format, so Emacs reads the same links.  Re-adding an existing link is a
+no-op rather than a duplicate entry."
+  (let ((waiting-id (org-gtd-cli/call-at-marker
+                     waiting-marker (lambda () (org-id-get-create))))
+        (blocker-id (org-gtd-cli/call-at-marker
+                     blocker-marker (lambda () (org-id-get-create)))))
+    (org-gtd-cli/call-at-marker
+     waiting-marker
+     (lambda ()
+       (let ((vals (org-gtd-cli/prop-values "BLOCKER")))
+         (unless (member blocker-id vals)
+           (org-gtd-cli/prop-set-values
+            "BLOCKER" (append vals (list blocker-id)))))))
+    (org-gtd-cli/call-at-marker
+     blocker-marker
+     (lambda ()
+       (let ((entry (format "%s(TODO)" waiting-id))
+             (vals (org-gtd-cli/prop-values "TRIGGER")))
+         (unless (member entry vals)
+           (org-gtd-cli/prop-set-values
+            "TRIGGER" (append vals (list entry)))))
+       (save-buffer)))
+    blocker-id))
 
 (defun org-gtd-cli/state-note-entry (new-state old-state reason)
   "Return an Org state-change note entry for NEW-STATE, OLD-STATE, and REASON."
@@ -3895,10 +4510,23 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
           (org-end-of-meta-data)
           (when (> (point) subtree-end)
             (goto-char subtree-end))
+          ;; On the LAST entry of a file `org-end-of-meta-data' can land
+          ;; mid-line (after the heading, or after a property drawer's
+          ;; `:END:'), and inserting there merges the drawer into that
+          ;; line — ":END::LOGBOOK:".  Pre-existing since before #39, but
+          ;; #39 makes `--reason' the common WAITING path, so it is fixed
+          ;; here rather than left to corrupt files.
+          (unless (bolp) (insert "\n"))
           (insert ":LOGBOOK:\n" entry "\n:END:\n"))))))
 
-(defun org-gtd-cli/set-state (substring new-state &optional index dry-run reason)
-  "Change a task's TODO state."
+(defun org-gtd-cli/set-state (substring new-state &optional index dry-run reason
+                                        blocked-by blocked-by-id)
+  "Change a task's TODO state.
+BLOCKED-BY and BLOCKED-BY-ID are lists of blocker addresses (substring
+and org `:ID:' respectively) for the SEMANTICS.md §4.6 WAITING entry;
+REASON writes the single-line `:REASON:' property there in addition to
+its LOGBOOK note.  Outside WAITING entry REASON keeps its LOGBOOK-only
+behaviour, multi-line tolerance included."
   ;; Validate state before doing anything
   (let ((all-states (apply #'append
                            (mapcar (lambda (seq)
@@ -3921,13 +4549,27 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))
-         (buf-pos (org-gtd-cli/find-task substring idx t)))
+         (entering-waiting (equal new-state "WAITING"))
+         ;; §4.6 + I12: a WAITING entry may not mint an `:ID:' before its
+         ;; validation has passed, so the addressing layer's lazy create
+         ;; is deferred to the real write below (where it runs exactly as
+         ;; it would have, keeping substring-mutation id stability).
+         (buf-pos (let ((org-gtd-cli/forced-create-id
+                         (and org-gtd-cli/forced-create-id
+                              (not entering-waiting))))
+                    (org-gtd-cli/find-task substring idx t))))
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (old-state (org-get-todo-state))
-              (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
+              (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+              ;; The close post-conditions and the §4.6 exit cleanup both
+              ;; edit other entries (possibly earlier in this very file),
+              ;; which would leave the raw resolved position stale.
+              (target-marker (copy-marker (cdr buf-pos)))
+              (blocker-markers nil)
+              (link-effects '()))
          ;; §3 legality guards.  All of them run before the dry-run branch,
          ;; so a previewed invalid op fails exactly like the real one (§4.0).
          ;;
@@ -3937,9 +4579,15 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
          (when (equal new-state "NEXT")
            (org-gtd-cli/ensure-next-allowed heading))
          ;; WAITING is leaf-only: a project's blocked-ness is read from its
-         ;; children, never asserted on its heading.
-         (when (equal new-state "WAITING")
-           (org-gtd-cli/ensure-waiting-allowed heading))
+         ;; children, never asserted on its heading.  The §4.6 entry
+         ;; guardrail and the 2026-08-10 edge-case rulings follow, all of
+         ;; them before any mutation and before the dry-run branch, so a
+         ;; preview fails exactly like the real call (§4.0).
+         (when entering-waiting
+           (org-gtd-cli/ensure-waiting-allowed heading)
+           (setq blocker-markers
+                 (org-gtd-cli/validate-waiting-entry
+                  heading reason blocked-by blocked-by-id)))
          ;; I4: a close is blocked while any task descendant is open.  The
          ;; dry run cannot call `org-todo', so it uses `org-entry-blocked-p'
          ;; — the same predicate `org-enforce-todo-dependencies' consults,
@@ -3949,17 +4597,37 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
                     (org-entry-blocked-p))
            (org-gtd-cli/reject-blocked-close heading new-state t))
          (if is-dry-run
-             (if org-gtd-cli/json-mode
-                 (org-gtd-cli/output
-                  `((version . 1)
-                    (command . "set-state")
-                    (heading . ,heading)
-                    (file . ,rel-file)
-                    (old_state . ,(or old-state :null))
-                    (new_state . ,new-state)
-                    (dry_run . t)))
-               (princ (format "Would change: \"%s\" %s -> %s (%s)\n"
-                              heading old-state new-state rel-file)))
+             ;; §4.0: the preview predicts the real outcome, the §4.6
+             ;; exit-cleanup unwinds included.
+             (let ((preview
+                    (append
+                     (if (equal old-state "WAITING")
+                         (org-gtd-cli/waiting-exit-cleanup t)
+                       '())
+                     ;; §4.6 close parity: a `set-state' into a closed
+                     ;; state runs the §4.4 auto-unblock, so its preview
+                     ;; predicts the wake (§4.0).
+                     (when (member new-state org-done-keywords)
+                       (cdr (org-gtd-cli/auto-unblock t))))))
+               (if org-gtd-cli/json-mode
+                   (org-gtd-cli/output
+                    `((version . 1)
+                      (command . "set-state")
+                      (heading . ,heading)
+                      (file . ,rel-file)
+                      (old_state . ,(or old-state :null))
+                      (new_state . ,new-state)
+                      (dry_run . t)
+                      (side_effects . ,(apply #'vector preview))))
+                 (princ (format "Would change: \"%s\" %s -> %s (%s)\n"
+                                heading old-state new-state rel-file))
+                 ;; `preview' mixes both vocabularies — the wake's
+                 ;; `unblocked' followed by the `blocker-link-removed'
+                 ;; entries its cleanup emits — so format by `action'.
+                 ;; No message list was printed above, so both are printed
+                 ;; from the effects here.
+                 (dolist (e preview)
+                   (org-gtd-cli/princ-waiting-effect e t))))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
            ;; Response integrity: `org-todo' on an entry blocked by
@@ -3970,15 +4638,37 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
            (if (and (member new-state org-done-keywords)
                     (not (equal (org-get-todo-state) new-state)))
                (org-gtd-cli/reject-blocked-close heading new-state)
+             ;; §4.6 WAITING exit cleanup: *any* CLI-driven exit from
+             ;; WAITING unwinds the reason and the link pair — including
+             ;; the WAITING→WAITING amend, which replaces rather than
+             ;; accumulates (ruling 2026-08-10c).  It runs only after the
+             ;; validation above has passed, so a rejected amend leaves
+             ;; the existing reason and links fully intact.
+             (when (and (equal old-state "WAITING")
+                        (not (member new-state org-done-keywords)))
+               (setq link-effects (org-gtd-cli/waiting-exit-cleanup)))
              (when (and reason (not (string-empty-p reason)))
                (org-gtd-cli/add-state-reason-note new-state old-state reason))
+             (when entering-waiting
+               ;; The deferred lazy `:ID:' create (see BUF-POS above),
+               ;; then the §4.6 property writes.
+               (org-gtd-cli/maybe-create-id (cons (current-buffer) (point)))
+               (when (and reason (not (string-empty-p reason)))
+                 (org-entry-put nil "REASON" reason))
+               (dolist (m blocker-markers)
+                 (org-gtd-cli/link-blocker target-marker m)
+                 (set-marker m nil)))
+             (goto-char target-marker)
              (if (member new-state org-done-keywords)
                  ;; §4.6: a transition *into* a closed state is a genuine
                  ;; close — same §4.4 post-conditions as
                  ;; `set-done'/`set-cancelled', the §4.5 promotion rule
                  ;; alone excepted (I9), hence PROMOTE nil.
-                 (org-gtd-cli/run-close-post-conditions
-                  rel-file (cdr buf-pos) old-state nil)
+                 (setq link-effects
+                       (append link-effects
+                               (cdr (org-gtd-cli/run-close-post-conditions
+                                     rel-file (marker-position target-marker)
+                                     old-state nil))))
                ;; §4.1 minimal move. The primitive itself keeps a
                ;; TODO→WAITING (and any other same-boundary-class
                ;; transition) in place, and sends a NEXT→WAITING below the
@@ -3986,6 +4676,7 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
                ;; violation must not survive.
                (org-gtd-cli/reorder-siblings-by-state old-state)
                (save-buffer))
+             (set-marker target-marker nil)
              (if org-gtd-cli/json-mode
                  (org-gtd-cli/mutation-output
                   `((version . 1)
@@ -3993,10 +4684,19 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
                     (heading . ,heading)
                     (file . ,rel-file)
                     (old_state . ,(or old-state :null))
-                    (new_state . ,new-state))
+                    (new_state . ,new-state)
+                    (side_effects . ,(apply #'vector link-effects)))
                   heading)
                (princ (format "State change: \"%s\" %s -> %s (%s)\n"
-                              heading old-state new-state rel-file)))))))))
+                              heading old-state new-state rel-file))
+               ;; No message list is printed on this path (I9 keeps the
+               ;; promotion rule, and with it `auto-msgs', out of
+               ;; `set-state'), so both vocabularies come from the
+               ;; effects.  Previously this loop printed the raw `action'
+               ;; slug, which leaked the machine vocabulary into text
+               ;; mode and disagreed with every other command's wording.
+               (dolist (e link-effects)
+                 (org-gtd-cli/princ-waiting-effect e)))))))))
   (kill-emacs 0))
 
 ;; --- refile ---
@@ -4286,6 +4986,7 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
               (subtree-end (save-excursion (org-end-of-subtree t) (point)))
               (has-children nil)
               (existing-next nil)
+              (link-effects nil)
               (first-todo-pos nil))
          ;; Scan direct children
          (save-excursion
@@ -4350,6 +5051,11 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
               (t
                (let ((org-inhibit-logging nil))
                  (org-todo "NEXT"))
+               ;; §4.6: `set-next' is one of the WAITING exit sites — the
+               ;; reason and the blocker link pair are unwound here too.
+               (setq link-effects
+                     (when (equal current-state "WAITING")
+                       (org-gtd-cli/waiting-exit-cleanup)))
                ;; §4.1: entering NEXT from within the active zone takes
                ;; the top of the active zone; a DEFER release lands at
                ;; the end of the NEXT prefix.
@@ -4360,11 +5066,13 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                     `((version . 1) (command . "set-next")
                       (heading . ,heading) (file . ,rel-file)
                       (old_state . ,current-state) (new_state . "NEXT")
-                      (side_effects . []))
+                      (side_effects . ,(apply #'vector link-effects)))
                     ;; Re-find by heading — the placement may have moved
                     ;; the entry, leaving buf-pos stale.
                     heading)
-                 (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file)))))))
+                 (princ (format "Set NEXT: \"%s\" (%s)\n" heading rel-file))
+                 (dolist (e link-effects)
+                   (org-gtd-cli/princ-waiting-effect e)))))))
           (existing-next
            (if org-gtd-cli/json-mode
                (org-gtd-cli/mutation-output
@@ -5134,7 +5842,13 @@ TAGS-CSV is a comma-separated string of tags to remove."
 
 (defconst org-gtd-cli/reserved-properties
   '("SCHEDULED" "DEADLINE" "CLOSED" "CLOCK" "TODO" "PRIORITY"
-    "TAGS" "ALLTAGS" "CATEGORY" "ITEM" "BLOCKED" "FILE")
+    "TAGS" "ALLTAGS" "CATEGORY" "ITEM" "BLOCKED" "FILE"
+    ;; SEMANTICS.md §4.6's WAITING mechanism: `:REASON:' and the
+    ;; `BLOCKER'/`TRIGGER' link pair are written and unwound as a unit by
+    ;; `set-state'/`set-next'/the close path/`delete'.  A hand-run
+    ;; `set-property' could write one half of a pair, leaving a wait that
+    ;; never wakes or a guard that never fires (#39).
+    "REASON" "BLOCKER" "TRIGGER")
   "Property names that have dedicated commands or special org semantics.
 `set-property' refuses to write these to avoid corrupting task state;
 use the dedicated command (e.g. set-schedule, set-deadline, set-tags) instead.")
@@ -5286,6 +6000,17 @@ per-property validation belongs in the calling command."
            (org-gtd-cli/error "Not archivable: \"%s\" has recent dates (%s)"
                               heading rel-file)
            (kill-emacs 1))
+         ;; §4.11 Rule 2c: still a blocker for an open task.  Archiving
+         ;; would relocate the record where its id may no longer resolve
+         ;; when the waiter's remaining blockers close and the §4.4
+         ;; AND-gate asks whether *all* of them are closed.  Fails in
+         ;; exactly the shape the age check does — no new machinery.
+         (let ((blocked (org-gtd-cli/blocked-open-tasks)))
+           (when blocked
+             (org-gtd-cli/error
+              "Not archivable: \"%s\" still blocks open task \"%s\" (%s)"
+              heading (nth 1 (car blocked)) rel-file)
+             (kill-emacs 1)))
          ;; Rule 3: not inside active project
          (let ((active-parent (org-gtd-cli/inside-active-project-p)))
            (when active-parent
@@ -5349,6 +6074,10 @@ per-property validation belongs in the calling command."
              (cond
               ;; Rule 3: inside active project → skip silently
               ((org-gtd-cli/inside-active-project-p)
+               (cl-incf skipped))
+              ;; §4.11 Rule 2c: still a blocker for an open task → not
+              ;; selected, silently, like the other structural skips.
+              ((org-gtd-cli/blocked-open-tasks)
                (cl-incf skipped))
               ;; Rule 2b: recent dates → skip silently
               ((org-gtd-cli/subtree-has-recent-dates-p)
@@ -5415,10 +6144,41 @@ per-property validation belongs in the calling command."
 
 ;; --- delete ---
 
+(defun org-gtd-cli/reject-delete-blocker (heading blocked rel-file)
+  "Emit the SEMANTICS.md §4.12 blocker-side delete guard and exit 1.
+BLOCKED is the `org-gtd-cli/resolving-triggers' list — the records that
+are waiting on HEADING.  The guard is role-based, not state-based: what
+it protects is being waited *on*, so a WAITING task that is itself a
+blocker (a chained dependency) is guarded like any other.  Nothing on
+disk changes; the hint names the two careful paths §4.12 documents."
+  (let* ((names (mapconcat (lambda (r) (format "\"%s\"" (nth 1 r)))
+                           blocked ", "))
+         (err (format (concat "Cannot delete: \"%s\" is the blocker %s is "
+                              "waiting on (%s)")
+                      heading names rel-file))
+         (hint (concat "Deleting it would strand the wait. Either "
+                       "`set-state \"" heading "\" CANCELLED' — a close, so "
+                       "it feeds the unblock gate and can wake the waiter — "
+                       "or take the waiting task out of WAITING first "
+                       "(`set-state ... TODO' unwinds the link pair), then "
+                       "delete.")))
+    (if org-gtd-cli/json-mode
+        ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+        (org-gtd-cli/output `((error . ,err) (hint . ,hint) (exit_code . 1)))
+      (org-gtd-cli/error "%s\nHint: %s" err hint)))
+  (kill-emacs 1))
+
 (defun org-gtd-cli/delete (heading &optional index dry-run)
   "Delete a task by exact heading match.
 HEADING must match the full heading text (case-insensitive).
-Refuses to delete projects (tasks with subtasks)."
+Refuses to delete projects (tasks with subtasks).
+
+SEMANTICS.md §4.12 adds the two deliberately asymmetric blocker rules:
+a target that is being waited on is *rejected* (the guard above), while
+a target that is itself waiting deletes normally and unwinds its own
+side of the link pair, reporting one `blocker-link-removed' side effect
+per unwound link.  No wake ever fires on delete — the deleted waiter
+simply stops waiting, and the §4.4 gate is never consulted."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))
@@ -5451,23 +6211,42 @@ Refuses to delete projects (tasks with subtasks)."
            (org-gtd-cli/error "Cannot delete: \"%s\" is a project with subtasks (%s)"
                               task-heading rel-file)
            (kill-emacs 1))
+         ;; §4.12 blocker guard, before every mutation and before the
+         ;; dry-run branch so the preview rejects identically (§4.0).  A
+         ;; `TRIGGER' id that no longer resolves is debris and never
+         ;; trips the guard.
+         (let ((blocked (org-gtd-cli/resolving-triggers)))
+           (when blocked
+             (org-gtd-cli/reject-delete-blocker task-heading blocked rel-file)))
          (if is-dry-run
              (progn
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/output
                     `((version . 1) (command . "delete")
-                      (heading . ,task-heading) (file . ,rel-file) (dry_run . t)))
-                 (princ (format "Would delete: \"%s\" (%s)\n" task-heading rel-file)))
+                      (heading . ,task-heading) (file . ,rel-file) (dry_run . t)
+                      ;; §4.12 waiting-side unwind, predicted.
+                      (side_effects
+                       . ,(apply #'vector
+                                 (org-gtd-cli/waiting-exit-cleanup t)))))
+                 (princ (format "Would delete: \"%s\" (%s)\n" task-heading rel-file))
+                 (dolist (e (org-gtd-cli/waiting-exit-cleanup t))
+                   (org-gtd-cli/princ-waiting-effect e t)))
                (kill-emacs 0))
-           (org-cut-subtree)
-           (save-buffer)
-           (if org-gtd-cli/json-mode
-               (org-gtd-cli/output
-                `((version . 1) (command . "delete")
-                  (id . ,task-id)
-                  (heading . ,task-heading) (file . ,rel-file)
-                  (side_effects . [])))
-             (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file)))))))
+           ;; §4.12 waiting side: the deleted task's id is scrubbed from
+           ;; each blocker's `TRIGGER'.  Runs before the cut, while the
+           ;; entry's `BLOCKER' property is still readable.
+           (let ((link-effects (org-gtd-cli/waiting-exit-cleanup)))
+             (org-cut-subtree)
+             (save-buffer)
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/output
+                  `((version . 1) (command . "delete")
+                    (id . ,task-id)
+                    (heading . ,task-heading) (file . ,rel-file)
+                    (side_effects . ,(apply #'vector link-effects))))
+               (princ (format "Deleted: \"%s\" (%s)\n" task-heading rel-file))
+               (dolist (e link-effects)
+                 (org-gtd-cli/princ-waiting-effect e))))))))
     (kill-emacs 0)))
 
 ;; ══════════════════════════════════════════════════════════════════════════════
@@ -5512,7 +6291,9 @@ parent, is_project, properties), plus `body' when `--full' is set."
                       (deadline . ,(or deadline :null))
                       (parent . ,(or parent-heading :null))
                       (is_project . ,(if is-project t :false))
-                      (properties . ,(org-gtd-cli/properties-at-point)))))
+                      (properties . ,(org-gtd-cli/properties-at-point))
+                      ;; §5.5 WAITING surfacing (§5.4 rows).
+                      ,@(org-gtd-cli/waiting-fields-at-point))))
          (when org-gtd-cli/full-mode
            (setq task (append task
                               `((body . ,(or (org-gtd-cli/get-body-at-point)
@@ -5821,6 +6602,20 @@ NAME is the field name used in the error message."
   (or (apply #'org-gtd-cli/batch--field item keys)
       (error "Missing required field: %s" name)))
 
+(defun org-gtd-cli/batch--list-field (item &rest keys)
+  "Return ITEM's first present field among KEYS as a list of strings.
+Batch items may give a repeatable flag (`--blocked-by',
+`--blocked-by-id') either as one string or as a JSON array — arrays
+parse to vectors here (see `org-gtd-cli/batch--parse-items').  Absent
+yields nil, so the delegated command sees exactly what the single-call
+path passes."
+  (let ((v (apply #'org-gtd-cli/batch--field item keys)))
+    (cond ((null v) nil)
+          ((stringp v) (list v))
+          ((vectorp v) (append v nil))
+          ((listp v) v)
+          (t (list (format "%s" v))))))
+
 (defun org-gtd-cli/batch--addr (item &rest keys)
   "Return ITEM's heading substring for a task-addressing command.
 KEYS default to (heading).  When ITEM carries an `id' field the task is
@@ -5986,7 +6781,15 @@ index in the batch array."
             (org-gtd-cli/batch--delegate
              #'org-gtd-cli/set-state
              (org-gtd-cli/batch--addr item)
-             (org-gtd-cli/batch--required item "state" 'state)))))
+             (org-gtd-cli/batch--required item "state" 'state)
+             ;; index / dry-run are not batch fields; the §4.6 WAITING
+             ;; entry fields are, so a batch `set-state ... WAITING'
+             ;; satisfies the same guardrail the single call does.
+             nil nil
+             (org-gtd-cli/batch--field item 'reason)
+             (org-gtd-cli/batch--list-field item 'blocked_by 'blockedby)
+             (org-gtd-cli/batch--list-field item 'blocked_by_id
+                                            'blockedbyid)))))
 
     ("set-cancelled"
      (org-gtd-cli/batch--result

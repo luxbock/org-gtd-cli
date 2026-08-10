@@ -188,7 +188,6 @@ enter it via `set-state`, whose §4.6 guardrail applies; rejected at
 entry). Post: task placed in the target group per §4.1's
 arrival rule (end of its zone; in an all-open inbox this coincides
 with append-last); body/tags/schedule/deadline/priority as given.
-*Divergence: `--state WAITING` is accepted at create — row 5.*
 
 ### 4.3 add-subtask
 
@@ -204,8 +203,7 @@ demoted (keyword-outgrown repair; the WAITING case also emits
 *hand-declared* parallel front (§3): the machine never mints a second
 front (I6), but the user may. (An accepted asymmetry: NEXT may be
 minted at create, WAITING may not — WAITING's guardrail lives on its
-`set-state` entry.) *Divergence: `--state WAITING` is accepted at
-create — row 5.*
+`set-state` entry.)
 
 ### 4.4 set-done / set-cancelled
 
@@ -234,8 +232,7 @@ firing flip wakes the task per §4.6's conditional wake and is
 reported as an `unblocked` side effect naming the woken task and its
 new state. A `TRIGGER` id that no longer resolves is dropped silently
 at close time (defensive — it covers on-disk states created outside
-the CLI, which the §4.12 delete guard cannot police). *Divergence: no
-auto-unblock exists — row 5.*
+the CLI, which the §4.12 delete guard cannot police).
 
 *Divergences:
 strip-on-close not yet implemented — #41; the closure guard pierces
@@ -328,9 +325,7 @@ waiting-side unwind (§4.12) emits (§4.0: same vocabulary for the same
 repair).
 
 *Divergence: reopening below closed ancestors runs no closure repair —
-row 10.* *Divergence (#39): none
-of the WAITING mechanism above exists — entry requires no reason or
-link, no blocker links, no wake, no exit cleanup — row 5.*
+row 10.*
 
 ### 4.7 set-next
 
@@ -415,8 +410,6 @@ WAITING exit, so the §4.6 cleanup unwinds the pair — B1 becomes
 eligible with no special casing. A `TRIGGER` id that resolves to a
 *closed* task, or does not resolve at all, never blocks eligibility —
 that is the debris §4.4's close-time silent drop already tolerates.
-*Divergence: the blocker eligibility criterion does not exist — row
-5.*
 
 ### 4.12 delete
 
@@ -462,8 +455,6 @@ take *its* waiter out of WAITING first (§4.6 exit cleanup), or
 better, `set-state CANCELLED` — a close op, so its `TRIGGER` feeds
 the §4.4 gate and can wake its waiter, and a WAITING exit, so the
 §4.6 cleanup unwinds its own `BLOCKER`/`TRIGGER` pair.
-*Divergence: neither the blocker guard nor the waiting-side unwind
-exists — row 5.*
 
 ## 5. Derived views
 
@@ -564,8 +555,7 @@ structural definitions.
 WAITING tasks — null-safe (absent → null; reason-less WAITING never
 errors, §4.6). When `:REASON:` is absent but blocker links exist, the
 displayed reason derives from the blocker task's heading and current
-state. *Divergence: no `waiting_reason`/`blocked_by` surfacing
-exists — row 5.*
+state.
 
 ## 6. Invariants
 
@@ -619,7 +609,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
 | 3 | *Retired 2026-08-08: the promotion scan walks the whole sibling group in document order — the first open TODO is promoted wherever it sits relative to the closed task, so a project whose only open TODO precedes the task being driven is no longer stranded (#38).* | — | — |
 | 4 | *Retired 2026-08-08: promotion reports every all-done-but-open subproject it passes as `project-needs-review` and continues past it — advisory only, nothing is closed (#38, olli ruling E5).* | — | — |
-| 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no blocker-side delete guard, no waiting-side delete unwind, no archive blocker-eligibility criterion, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.11, §4.12, §5.5 | #39 |
+| 5 | *Retired 2026-08-10: the WAITING mechanism landed whole — entry needs a reason or a blocker link (self-blocks, cycles, already-closed blockers and multi-line reasons rejected; a WAITING→WAITING re-entry amends by replacing), `add-task`/`add-subtask` reject `--state WAITING`, closing a blocker fires the AND-gated auto-unblock with its conditional wake, every exit runs the cleanup, `delete` guards the blocker side and unwinds the waiting side, `archive` holds back a blocker for an open task, and `waiting_reason`/`blocked_by` are surfaced (#39).* | — | — |
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state; and the Waiting block has no DEFER-ancestor exclusion at all (its matcher's tag part cannot use the inherited `:WAITING:` tag, which the row itself carries) | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
 | 8 | *Retired 2026-08-10: `set-state` rejects NEXT on a project/subproject heading and WAITING on a project heading (§3 matrix), and a blocked DONE/CANCELLED is the same structured rejection `set-done`/`set-cancelled` produce — a close driven through `set-state` is a genuine close running the §4.4 post-conditions, the promotion rule alone excepted (I9); `set-next`'s project path promotes the first TODO non-project direct child (§4.7) (#46).* | — | — |

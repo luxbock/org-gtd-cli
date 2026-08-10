@@ -146,6 +146,18 @@ def to_elisp(value: str | None) -> str:
     return f'"{escape_elisp(value)}"'
 
 
+def to_elisp_list(values) -> str:
+    """Convert a list of strings to a quoted elisp list literal ('() when empty).
+
+    Used by the repeatable flags (`--blocked-by`, `--blocked-by-id`), whose
+    elisp counterparts take a list of blocker addresses.
+    """
+    items = [v for v in (values or []) if v is not None and v != ""]
+    if not items:
+        return "nil"
+    return "'(" + " ".join(f'"{escape_elisp(v)}"' for v in items) + ")"
+
+
 def validate_target(args):
     """Ensure exactly one of SUBSTR/parent or --id addresses the task (non-batch)."""
     substr = getattr(args, 'substr', None) or getattr(args, 'parent', None)
@@ -1312,7 +1324,9 @@ def cmd_set_state(args):
     expr = (f'(org-gtd-cli/set-state {to_elisp(args.substr)} '
             f'{to_elisp(args.state)} {to_elisp(args.index)} '
             f'{to_elisp("t" if args.dry_run else None)} '
-            f'{to_elisp(args.reason)})')
+            f'{to_elisp(args.reason)} '
+            f'{to_elisp_list(getattr(args, "blocked_by", None))} '
+            f'{to_elisp_list(getattr(args, "blocked_by_id", None))})')
     expr = id_wrap(expr, args, mutation=True)
     return run_elisp(expr, json_mode=args.json)
 
@@ -1740,7 +1754,10 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--priority", help="Priority: A, B, or C")
     p.add_argument("--file", help="Target file (relative to ORG_DIRECTORY)")
     p.add_argument("--category", help="Insert under this heading in tasks.org")
-    p.add_argument("--state", help="Initial state (default: TODO)")
+    p.add_argument("--state",
+                   help="Initial state (default: TODO); NEXT and WAITING are "
+                        "rejected — use set-next, or set-state ... WAITING "
+                        "--reason/--blocked-by")
     p.add_argument("--parent", nargs="?", action=_AddTaskParentAction,
                    default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_add_task)
@@ -1759,7 +1776,11 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--schedule", help="SCHEDULED date")
     p.add_argument("--deadline", help="DEADLINE date")
     p.add_argument("--priority", help="Priority: A, B, or C")
-    p.add_argument("--state", help="Initial state (default: TODO)")
+    p.add_argument("--state",
+                   help="Initial state (default: TODO); NEXT is legal here "
+                        "(a hand-declared parallel front), WAITING is "
+                        "rejected — use set-state ... WAITING "
+                        "--reason/--blocked-by")
     p.add_argument("--index", help="Disambiguate parent with 1-based index")
     p.set_defaults(func=cmd_add_subtask)
 
@@ -1798,7 +1819,11 @@ Run 'org-gtd-cli <command> -h' for command details."""
         description="Change TODO state. Note: `set-state SUBSTR DONE` bypasses "
                     "set-done's auto-progress side effects (sibling NEXT "
                     "promotion, project-needs-review tagging) — prefer "
-                    "set-done for completing tasks.")
+                    "set-done for completing tasks. Entering WAITING requires a "
+                    "concrete blocker: at least one of --reason / --blocked-by / "
+                    "--blocked-by-id. A blocker link makes closing the blocker "
+                    "wake this task automatically; leaving WAITING again unwinds "
+                    "the reason and the links.")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring")
     p.add_argument("state", nargs="?", default=None, metavar="STATE",
@@ -1806,7 +1831,17 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.add_argument("--dry-run", action="store_true", help="Preview without modifying")
-    p.add_argument("--reason", help="Record a LOGBOOK state-change note")
+    p.add_argument("--reason",
+                   help="Record a LOGBOOK state-change note; entering WAITING "
+                        "it also writes the single-line :REASON: property")
+    p.add_argument("--blocked-by", dest="blocked_by", action="append",
+                   metavar="SUBSTR",
+                   help="Entering WAITING: block on the task matching SUBSTR "
+                        "(repeatable; AND-gated)")
+    p.add_argument("--blocked-by-id", dest="blocked_by_id", action="append",
+                   metavar="ID",
+                   help="Entering WAITING: block on the task with this org "
+                        ":ID: (repeatable; AND-gated)")
     p.set_defaults(func=cmd_set_state)
 
     p = sub.add_parser("set-next", help="Promote task/child to NEXT")
@@ -2063,7 +2098,9 @@ take `heading` (substring) OR `id` (org :ID:, matching each command's
                   end_date
   refile          heading|id (required), category OR to (required)
   set-done        heading|id (required)
-  set-state       heading|id (required), state (required)
+  set-state       heading|id (required), state (required), reason,
+                  blocked_by (string or array), blocked_by_id (string or
+                  array) — entering WAITING needs at least one of the three
   set-next        heading|id (required)
   set-cancelled   heading|id (required)
   set-priority    heading|id (required), priority, clear
