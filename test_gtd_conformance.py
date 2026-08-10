@@ -128,6 +128,8 @@ def cli_args(op, args, kwargs):
         out = ["set-state", args[0], args[1]]
         if kwargs.get("reason"):
             out += ["--reason", kwargs["reason"]]
+        for blocker in kwargs.get("blocked_by") or ():
+            out += ["--blocked-by", blocker]
         return out
     if op == "set_next":
         return ["set-next", args[0]]
@@ -308,16 +310,73 @@ def test_s7row4_subproject_review_emitted(cli):
     assert envelope_side_effects(envelope) == model_side_effects(result)
 
 
-@pytest.mark.xfail(reason="§7 row 5 (#39): WAITING entry requires no "
-                          "reason/blocker", strict=True)
+# §7 row 5 retired 2026-08-10 (#39): the whole WAITING mechanism landed —
+# entry guardrail, blocker links, the AND-gated auto-unblock with its
+# conditional wake, and the exit cleanup — so these witnesses now pin
+# agreeing behavior.
 def test_s7row5_waiting_requires_reason(cli):
     model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
                   Divergences.normative())
-    _, rc, result = run_normative(
+    envelope, rc, result = run_normative(
         cli, model, "set_state", ("aa", "WAITING"), {})
-    # Normative: rejected without a reason; today the CLI accepts.
+    # Normative: a bare WAITING entry is rejected on both sides.
     assert result.ok is False
     assert rc != 0
+    # I12: nothing written.
+    assert cli.read_skeleton() == model.skeleton()
+    assert envelope_side_effects(envelope) == []
+
+
+def test_s7row5_blocker_link_and_wake(cli):
+    """The full round trip: link, AND-gate, conditional wake, cleanup."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("bb", "TODO"), Node("aa", "TODO"),
+    ])], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "set_state", ("aa", "WAITING"), {"blocked_by": ["bb"]})
+    assert rc == 0 and result.ok
+    assert cli.read_skeleton() == model.skeleton()
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    # Closing the blocker wakes aa. `run_normative` rewrites the file
+    # from the model, so the links the model now holds are handed back
+    # to the CLI verbatim (headings double as ids in `to_org_text`).
+    envelope, rc, result = run_normative(cli, model, "set_done", ("bb",), {})
+    assert rc == 0 and result.ok
+    assert ("unblocked", "aa", "WAITING", "NEXT") in model_side_effects(result)
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row5_multi_blocker_and_gate(cli):
+    """Two blockers: the first close leaves the waiter untouched."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("b1", "TODO"), Node("b2", "TODO"),
+        Node("aa", "WAITING", blockers=("b1", "b2")),
+    ])], Divergences.normative())
+    # Wire the blockers' trigger sides the way a linked state is on disk.
+    for node in model.all_nodes():
+        if node.heading in ("b1", "b2"):
+            node.triggers = ("aa",)
+    envelope, rc, result = run_normative(cli, model, "set_done", ("b1",), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == []  # gate did not fire
+    assert envelope_side_effects(envelope) == []
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row5_create_never_mints_waiting(cli):
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
+                  Divergences.normative())
+    _, rc, result = run_normative(
+        cli, model, "add_task", ("new950", "WAITING"), {})
+    assert result.ok is False
+    assert rc != 0
+    assert cli.read_skeleton() == model.skeleton()
+    _, rc, result = run_normative(
+        cli, model, "add_subtask", ("proj", "new951", "WAITING"), {})
+    assert result.ok is False
+    assert rc != 0
+    assert cli.read_skeleton() == model.skeleton()
 
 
 @pytest.mark.xfail(reason="§7 row 7 (#41): set-priority accepts any "

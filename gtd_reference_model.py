@@ -15,8 +15,8 @@ two modes:
 
 - ``Divergences.normative()`` — the document's semantics, exactly.
 - ``Divergences.current()`` — reproduces today's CLI behavior by enabling
-  one named flag per applicable §7 row (``d5_no_waiting_reason`` = §7
-  row 5, and so on). The tier-2 conformance harness runs the model in this
+  one named flag per applicable §7 row (``d7_no_priority_rules`` = §7
+  row 7, and so on). The tier-2 conformance harness runs the model in this
   mode and expects an exact match against the real CLI; per-row
   expected-failure tests run the normative mode and flip green as each
   stage-2c fix lands (2026-07-31 ruling on #45).
@@ -63,12 +63,20 @@ class Node:
     priority: str | None = None  # §3: '[#A]' is the only legal cookie
     tags: tuple = ()
     waiting_reason: str | None = None  # §3/§4.6: required at WAITING entry
+    # §4.6 blocker links, org-depend byte-compatible on disk
+    # (``BLOCKER: <id>`` on the waiter, ``TRIGGER: <id>(TODO)`` on the
+    # blocker). The model has no ids, so both sides address by heading —
+    # headings are globally unique in every generated and hand-written
+    # state, which is the same uniqueness §4.0 addressing already needs.
+    blockers: tuple = ()   # headings this task waits on
+    triggers: tuple = ()   # headings waiting on this task
     logbook: int = 0  # I10: count of state-change records
     children: list = field(default_factory=list)
 
     def clone(self):
         return replace(
             self, tags=tuple(self.tags),
+            blockers=tuple(self.blockers), triggers=tuple(self.triggers),
             children=[c.clone() for c in self.children])
 
 
@@ -77,6 +85,7 @@ class SideEffect:
     """§4.0: one machine-made change beyond the addressed heading."""
 
     action: str  # "state-change" | "project-needs-review"
+    #              | "unblocked" | "blocker-link-removed"  (§4.0, #39)
     heading: str
     old_state: str | None = None
     new_state: str | None = None
@@ -115,7 +124,11 @@ class Divergences:
     # sibling group in document order and emits a per-subproject
     # ``project-needs-review`` when it passes an all-done-but-open
     # subproject (olli ruling E5, 2026-07-28).
-    d5_no_waiting_reason: bool = False  # §7 row 5 → #39
+    # §7 row 5 (#39, retired 2026-08-10 with the WAITING mechanism):
+    # ``d5_no_waiting_reason`` is gone — WAITING entry now requires a
+    # reason or a blocker link, ``add-task``/``add-subtask`` reject
+    # ``WAITING``, and the blocker links, the AND-gated auto-unblock with
+    # its conditional wake, and the exit cleanup all exist.
     d7_no_priority_rules: bool = False  # §7 row 7 → #41
     # §7 row 8 (#46, retired 2026-08-10 with the set-state/set-next
     # legality guards and close-path parity): ``d8_lax_state_guards`` is
@@ -138,7 +151,7 @@ class Divergences:
 
     @classmethod
     def current(cls):
-        return cls(d5_no_waiting_reason=True, d7_no_priority_rules=True,
+        return cls(d7_no_priority_rules=True,
                    dx_setnext_rejects_closed_leaf=True)
 
 
@@ -455,6 +468,138 @@ class Model:
                 return effects
         return effects
 
+    # ── §4.6 the WAITING mechanism (blocker links, gate, wake) ────────
+
+    def resolve_link(self, heading):
+        """The other end of a blocker link, or None when it no longer
+        resolves. Both §4.4's close-time drop and §4.6's cleanup skip a
+        dangling link silently, so this never raises."""
+        for node in self.all_nodes():
+            if node.keyword is not None and node.heading == heading:
+                return node
+        return None
+
+    def blocker_graph_reaches(self, start, target):
+        """§4.6 ruling (a): is TARGET reachable from START over
+        ``blockers`` edges? Cycle-safe (visited set), and a link that no
+        longer resolves is skipped rather than treated as a rejection."""
+        seen, queue = set(), [start]
+        while queue:
+            node = queue.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if node is target:
+                return True
+            for heading in node.blockers:
+                nxt = self.resolve_link(heading)
+                if nxt is not None:
+                    queue.append(nxt)
+        return False
+
+    def validate_waiting_entry(self, node, reason, blocked_by):
+        """§4.6 WAITING-entry validation. Returns (blockers, error).
+
+        The guardrail (at least one of reason / blocker link) plus the
+        four edge cases ruled 2026-08-10: (a) no self-block and no cycle,
+        (b) an already-closed blocker is rejected — the AND-gate stays
+        close-event-driven and is never evaluated at entry, (d) a
+        multi-line reason is rejected rather than flattened. (c), the
+        WAITING→WAITING amend, is the caller's: every check here precedes
+        every mutation (I12), so a rejected amend leaves the existing
+        reason and links untouched.
+        """
+        blocked_by = list(blocked_by or ())
+        if not reason and not blocked_by:
+            return None, "WAITING requires a reason or a blocker link"
+        if reason and "\n" in reason:
+            return None, "WAITING --reason must be a single line"
+        resolved = []
+        for spec in blocked_by:
+            blocker, error = self.find(spec)
+            if blocker is None:
+                return None, error
+            if blocker is node:
+                return None, "a task cannot block itself"
+            if blocker.keyword in CLOSED_STATES:
+                return None, (f"blocker {blocker.heading!r} is already "
+                              f"{blocker.keyword}")
+            if self.blocker_graph_reaches(blocker, node):
+                return None, "would close a cycle in the blocker graph"
+            resolved.append(blocker)
+        return resolved, None
+
+    def waiting_exit_cleanup(self, node):
+        """§4.6 exit cleanup, shared by every WAITING exit site.
+
+        Drops the reason, drops the node's own ``blockers``, and scrubs
+        the node from each blocker's ``triggers``; a link that no longer
+        resolves is skipped silently. The LOGBOOK record stays (I10).
+        Returns one ``blocker-link-removed`` effect per unwound link,
+        naming the blocker — the record actually edited — which is the
+        same shape §4.12's waiting-side delete unwind emits.
+        """
+        effects = []
+        node.waiting_reason = None
+        blockers, node.blockers = node.blockers, ()
+        for heading in blockers:
+            blocker = self.resolve_link(heading)
+            if blocker is None or node.heading not in blocker.triggers:
+                continue
+            blocker.triggers = tuple(h for h in blocker.triggers
+                                     if h != node.heading)
+            effects.append(SideEffect("blocker-link-removed",
+                                      blocker.heading))
+        return effects
+
+    def wake_state(self, node):
+        """§4.6 conditional wake (ruling 2026-08-06): NEXT iff the woken
+        task is a leaf project child, no open sibling precedes it in
+        document order (the completed and DEFER blocks ignored), and the
+        group holds no NEXT; TODO otherwise."""
+        if not (self.is_project_child(node) and self.is_leaf_task(node)):
+            return "TODO"  # a lone task, or one that grew children (I3)
+        group = self.sibling_group(node)
+        for sibling in group:
+            if sibling is node:
+                break
+            if sibling.keyword in ("NEXT", "TODO", "WAITING"):
+                return "TODO"
+        if any(s.keyword == "NEXT" for s in group):
+            return "TODO"
+        return "NEXT"
+
+    def auto_unblock(self, closed):
+        """§4.4 auto-unblock from a just-closed task.
+
+        Each ``triggers`` entry that still resolves to a WAITING task is
+        AND-gated on that task's own ``blockers``: the flip fires only
+        when every one of them is closed, and while any remains open the
+        waiting task is left completely untouched. A firing flip wakes
+        the task per §4.6's conditional wake, runs the exit cleanup, and
+        reports an ``unblocked`` effect. Position never changes and the
+        §4.5 promotion rule is never invoked from here (I9).
+        """
+        effects = []
+        for heading in tuple(closed.triggers):
+            waiter = self.resolve_link(heading)
+            if waiter is None or waiter.keyword != "WAITING":
+                continue  # close-time silent drop of a dangling trigger
+            gate = []
+            for blocker_heading in waiter.blockers:
+                blocker = self.resolve_link(blocker_heading)
+                gate.append(blocker is None
+                            or blocker.keyword in CLOSED_STATES)
+            if not all(gate):
+                continue  # an open blocker remains: untouched, no effect
+            new_state = self.wake_state(waiter)
+            waiter.keyword = new_state
+            waiter.logbook += 1  # I10
+            effects.append(SideEffect("unblocked", waiter.heading,
+                                      "WAITING", new_state))
+            effects.extend(self.waiting_exit_cleanup(waiter))
+        return effects
+
     # ── §4.2 add-task ─────────────────────────────────────────────────
 
     def add_task(self, heading, state="TODO", category=None, priority=None):
@@ -462,6 +607,10 @@ class Model:
         §4.1's arrival rule (end of its zone)."""
         if state == "NEXT":
             return Result(False, "NEXT is only valid inside a project")
+        if state == "WAITING":
+            # §4.2: create never mints WAITING — its guardrail lives on
+            # the set-state entry (§4.6).
+            return Result(False, "create never mints WAITING")
         if state not in KEYWORDS:
             return Result(False, f"Unknown state: {state}")
         node = Node(heading, state, priority=priority)
@@ -486,6 +635,11 @@ class Model:
         if not self.is_task(parent):
             # Category headings never match as add-subtask parents.
             return Result(False, f"Not a task: {parent_substr}")
+        if state == "WAITING":
+            # §4.3: create never mints WAITING (the asymmetry with the
+            # legal `--state NEXT` here is deliberate — WAITING's
+            # guardrail lives on the set-state entry, §4.6).
+            return Result(False, "create never mints WAITING")
         if state not in KEYWORDS:
             return Result(False, f"Unknown state: {state}")
         effects = []
@@ -546,7 +700,18 @@ class Model:
         node.logbook += 1  # I10 (CLOSED stamp + LOGBOOK)
         if not self.div.d7_no_priority_rules:
             node.priority = None  # §4.4: strip cookie on close (§7 row 7)
+        # Ordering: §4.5 promotion runs on the state the close left, so
+        # #39 changes nothing about it. It matters in one shape only — a
+        # waiter that is a sibling of the closed task: promotion's step-1
+        # guard sees it still WAITING and mints nothing, and the wake
+        # then reads a group with no NEXT. That is exactly §4.6's
+        # accepted residual (a woken task that is not first leaves the
+        # project with no front, surfaced by the stuck view, I11).
         effects = self._promotion_rule(node)
+        # §4.6: a close is itself a WAITING exit site.
+        if old_state == "WAITING":
+            effects.extend(self.waiting_exit_cleanup(node))
+        effects.extend(self.auto_unblock(node))  # §4.4
         self._reorder(self.sibling_group(node), node,
                       old_keyword=old_state)
         return Result(True, old_state=old_state, new_state=new_state,
@@ -554,8 +719,13 @@ class Model:
 
     # ── §4.6 set-state ────────────────────────────────────────────────
 
-    def set_state(self, substring, new_state, reason=None):
-        """§4.6: change a keyword, nothing more — no promotion (I9)."""
+    def set_state(self, substring, new_state, reason=None, blocked_by=None):
+        """§4.6: change a keyword, nothing more — no promotion (I9).
+
+        REASON and BLOCKED_BY (a list of blocker headings) are the §4.6
+        WAITING-entry arguments; on any other transition REASON is a
+        LOGBOOK note only and BLOCKED_BY is unused.
+        """
         node, error = self.find(substring)
         if node is None:
             return Result(False, error)
@@ -569,19 +739,31 @@ class Model:
             if not (self.is_project_child(node)
                     and self.is_leaf_task(node)):
                 return Result(False, "NEXT is only valid on a project child leaf")
+        blockers = []
         if new_state == "WAITING":
             if self.is_project(node):
                 # §3: WAITING requires a leaf; project headings rejected.
                 return Result(False, "WAITING is not valid on a project heading")
-            if not self.div.d5_no_waiting_reason and not reason:
-                # §7 row 5 → #39: reason or blocker link required at entry.
-                return Result(False, "WAITING requires a reason")
+            # §4.6 entry guardrail + the 2026-08-10 rulings. All of it
+            # runs before any mutation (I12), which is what makes a
+            # rejected WAITING→WAITING amend leave the existing reason
+            # and links fully intact.
+            blockers, error = self.validate_waiting_entry(
+                node, reason, blocked_by)
+            if blockers is None:
+                return Result(False, error, old_state=old_state)
         if new_state in CLOSED_STATES and self.is_project(node):
             open_descendants = [n for n in self.task_descendants(node)
                                 if n.keyword not in CLOSED_STATES]
             if open_descendants:
                 return Result(False, "blocked by an incomplete subtask",
                               old_state=old_state)
+        effects = []
+        # §4.6 exit cleanup: *any* CLI-driven exit from WAITING, the
+        # WAITING→WAITING amend included — it replaces, never
+        # accumulates (ruling 2026-08-10c).
+        if old_state == "WAITING":
+            effects.extend(self.waiting_exit_cleanup(node))
         node.keyword = new_state
         node.logbook += 1  # I10
         if new_state in CLOSED_STATES and not self.div.d7_no_priority_rules:
@@ -592,14 +774,25 @@ class Model:
             # ``_close``'s strip so #41 (§7 row 7) retires it in one
             # place.
             node.priority = None
-        if reason and new_state == "WAITING":
+        if new_state == "WAITING":
             node.waiting_reason = reason
+            for blocker in blockers:
+                if blocker.heading not in node.blockers:
+                    node.blockers += (blocker.heading,)
+                if node.heading not in blocker.triggers:
+                    blocker.triggers += (node.heading,)
+        if new_state in CLOSED_STATES:
+            # §4.6 (PR #68): a close driven through set-state runs the
+            # §4.4 post-conditions, the promotion rule alone excepted
+            # (I9) — auto-unblock included.
+            effects.extend(self.auto_unblock(node))
         # §4.6/§4.1: minimal move. The primitive itself keeps a
         # TODO→WAITING in place (same boundary class) and sends a
         # NEXT→WAITING immediately below the remaining NEXT prefix.
         self._reorder(self.sibling_group(node), node,
                       old_keyword=old_state)
-        return Result(True, old_state=old_state, new_state=new_state)
+        return Result(True, old_state=old_state, new_state=new_state,
+                      side_effects=effects)
 
     # ── §4.7 set-next ─────────────────────────────────────────────────
 
@@ -648,12 +841,16 @@ class Model:
         old_state = node.keyword
         node.keyword = "NEXT"
         node.logbook += 1
+        # §4.6: set-next is one of the WAITING exit sites.
+        effects = (self.waiting_exit_cleanup(node)
+                   if old_state == "WAITING" else [])
         # §2/§4.1: entering NEXT from within the active zone takes the
         # top of the active zone; a DEFER release lands at the end of
         # the NEXT prefix.
         self._reorder(self.sibling_group(node), node,
                       old_keyword=old_state)
-        return Result(True, old_state=old_state, new_state="NEXT")
+        return Result(True, old_state=old_state, new_state="NEXT",
+                      side_effects=effects)
 
     # ── §4.8 refile ───────────────────────────────────────────────────
 
@@ -850,7 +1047,14 @@ class Model:
     # ── org-text projection (tier-2 harness only) ─────────────────────
 
     def to_org_text(self):
-        """Serialize the forest to org text the CLI can operate on."""
+        """Serialize the forest to org text the CLI can operate on.
+
+        A node carrying §4.6 WAITING state also gets a `:PROPERTIES:`
+        drawer: `:REASON:`, and the org-depend link pair. The model has
+        no ids, so a node's *heading* is used as its `:ID:` — org ids are
+        opaque strings, and headings are already globally unique here, so
+        the CLI reads exactly the links the model holds.
+        """
         lines = []
         def emit(node, level):
             keyword = f"{node.keyword} " if node.keyword else ""
@@ -858,6 +1062,20 @@ class Model:
             tags = f" :{':'.join(node.tags)}:" if node.tags else ""
             lines.append(f"{'*' * level} {keyword}{priority}"
                          f"{node.heading}{tags}")
+            props = []
+            if node.blockers or node.triggers:
+                props.append(("ID", node.heading))
+            if node.waiting_reason:
+                props.append(("REASON", node.waiting_reason))
+            if node.blockers:
+                props.append(("BLOCKER", " ".join(node.blockers)))
+            if node.triggers:
+                props.append(("TRIGGER",
+                              " ".join(f"{h}(TODO)" for h in node.triggers)))
+            if props:
+                lines.append(":PROPERTIES:")
+                lines.extend(f":{key}: {value}" for key, value in props)
+                lines.append(":END:")
             for child in node.children:
                 emit(child, level + 1)
         for root in self.roots:
