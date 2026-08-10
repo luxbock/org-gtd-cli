@@ -3503,6 +3503,86 @@ message strings in printing order."
             (org-gtd-cli/auto-progress--scan rel-file saved-pos sim t)))))))
     msgs))
 
+;; --- close: the shared §4.4 / §4.6 machinery ---
+;;
+;; SEMANTICS.md §4.6 (amended by PR #68): a transition *into* DONE or
+;; CANCELLED on a legal target runs the same §4.4 close post-conditions
+;; regardless of which command drove it — the close machinery keys on
+;; the state transition, not the command name.  `set-done',
+;; `set-cancelled' and `set-state's closing transition therefore share
+;; the two helpers below: one answers "is this close blocked, and by
+;; what?", the other runs the post-conditions.  Only the §4.5 promotion
+;; rule differs (I9: `set-done'/`set-cancelled' only), which is the
+;; PROMOTE flag.
+
+(defun org-gtd-cli/close-blocker-name ()
+  "Name of the entry blocking the close at point, or nil when unknown.
+`org-enforce-todo-dependencies' records it in `org-block-entry-blocking'."
+  (and (boundp 'org-block-entry-blocking)
+       (stringp org-block-entry-blocking)
+       org-block-entry-blocking))
+
+(defun org-gtd-cli/reject-blocked-close (heading new-state &optional dry-run)
+  "Emit the blocked-close rejection for HEADING → NEW-STATE and exit 1.
+I4: a project may only close once every task descendant is closed.
+Shared by `set-done', `set-cancelled' and `set-state' so all three
+produce the identical rejection shape (and so #58's row-13 fix lands
+once).  With DRY-RUN non-nil the plain-text wording is the preview's
+and the JSON envelope carries `dry_run'."
+  (let* ((blocker (org-gtd-cli/close-blocker-name))
+         (hint (if blocker
+                   (format "Complete or cancel \"%s\" first, then retry." blocker)
+                 "Complete or cancel its open subtasks first, then retry.")))
+    (if org-gtd-cli/json-mode
+        ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+        (org-gtd-cli/output
+         (append
+          `((error . ,(format "Cannot mark \"%s\" %s: blocked by an incomplete subtask"
+                              heading new-state))
+            (hint . ,hint))
+          (when dry-run '((dry_run . t)))
+          '((exit_code . 1))))
+      (if dry-run
+          (org-gtd-cli/error
+           "Would be blocked: cannot mark \"%s\" %s — blocked by an incomplete subtask\nHint: %s"
+           heading new-state hint)
+        (org-gtd-cli/error
+         "Cannot mark \"%s\" %s: blocked by an incomplete subtask\nHint: %s"
+         heading new-state hint))))
+  (kill-emacs 1))
+
+(defun org-gtd-cli/run-close-post-conditions (rel-file pos old-state promote)
+  "Run the SEMANTICS.md §4.4 close post-conditions and save the buffer.
+POS is the just-closed task's heading position and OLD-STATE the
+keyword it left.  The CLOSED timestamp and the LOGBOOK stamp (I10) are
+already written by `org-todo' (`org-log-done'); this helper adds the
+rest and returns the auto-progress message list (nil when PROMOTE is
+nil).
+
+PROMOTE runs the §4.5 promotion rule.  I9 admits it from
+`set-done'/`set-cancelled' only — a close driven through `set-state'
+passes nil.
+
+This is the single seam for the close post-conditions still to land:
+#41 (§7 row 7) adds the priority-cookie strip here, and #39 (§7 row 5)
+adds the §4.4 auto-unblock AND-gate here.  Because all three commands
+route through this helper, each lands once and reaches `set-state' for
+free — which is how issue #46's criterion A14 is satisfied
+structurally.  A14's *behavioral* check (auto-unblock firing from a
+`set-state CANCELLED') belongs to #39's implementer: auto-unblock does
+not exist on master at all."
+  (let* ((done-marker (copy-marker pos))
+         ;; Track the closed task with a marker: auto-progress may move
+         ;; the promoted sibling above it (§4.1 placement), which would
+         ;; leave the raw position stale.
+         (auto-msgs (when promote (org-gtd-cli/auto-progress rel-file))))
+    (save-excursion
+      (goto-char done-marker)
+      (org-gtd-cli/reorder-siblings-by-state old-state))
+    (set-marker done-marker nil)
+    (save-buffer)
+    auto-msgs))
+
 ;; --- done ---
 
 (defun org-gtd-cli/set-done (substring &optional index dry-run)
@@ -3523,25 +3603,7 @@ message strings in printing order."
              ;; `org-enforce-todo-dependencies' uses).  A blocked parent must
              ;; NOT preview success.
              (if (org-entry-blocked-p)
-                 (let ((blocker (and (boundp 'org-block-entry-blocking)
-                                     (stringp org-block-entry-blocking)
-                                     org-block-entry-blocking)))
-                   (if org-gtd-cli/json-mode
-                       (org-gtd-cli/output
-                        `((error . ,(format "Cannot mark \"%s\" DONE: blocked by an incomplete subtask" heading))
-                          (hint . ,(if blocker
-                                       (format "Complete or cancel \"%s\" first, then retry." blocker)
-                                     "Complete or cancel its open subtasks first, then retry."))
-                          (dry_run . t)
-                          (exit_code . 1)))
-                     (if blocker
-                         (org-gtd-cli/error
-                          "Would be blocked: cannot mark \"%s\" DONE — blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
-                          heading blocker)
-                       (org-gtd-cli/error
-                        "Would be blocked: cannot mark \"%s\" DONE — blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
-                        heading)))
-                   (kill-emacs 1))
+                 (org-gtd-cli/reject-blocked-close heading "DONE" t)
                (if org-gtd-cli/json-mode
                    (let ((result `((version . 1)
                                    (command . "set-done")
@@ -3567,36 +3629,9 @@ message strings in printing order."
            ;; before reporting success, otherwise we would falsely claim DONE,
            ;; run auto-progress, and persist stray changes.
            (if (not (equal (org-get-todo-state) "DONE"))
-               (let ((blocker (and (boundp 'org-block-entry-blocking)
-                                   (stringp org-block-entry-blocking)
-                                   org-block-entry-blocking)))
-                 (if org-gtd-cli/json-mode
-                     ;; JSON: error+hint object goes to stdout (see
-                     ;; `org-gtd-cli/error').
-                     (org-gtd-cli/output
-                      `((error . ,(format "Cannot mark \"%s\" DONE: blocked by an incomplete subtask" heading))
-                        (hint . ,(if blocker
-                                     (format "Complete or cancel \"%s\" first, then retry." blocker)
-                                   "Complete or cancel its open subtasks first, then retry."))
-                        (exit_code . 1)))
-                   (if blocker
-                       (org-gtd-cli/error
-                        "Cannot mark \"%s\" DONE: blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
-                        heading blocker)
-                     (org-gtd-cli/error
-                      "Cannot mark \"%s\" DONE: blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
-                      heading)))
-                 (kill-emacs 1))
-             ;; Track the closed task with a marker: auto-progress may
-             ;; move the promoted sibling above it (§4.1 placement),
-             ;; which would leave the raw position stale.
-             (let* ((done-marker (copy-marker (cdr buf-pos)))
-                    (auto-msgs (org-gtd-cli/auto-progress rel-file)))
-               (save-excursion
-                 (goto-char done-marker)
-                 (org-gtd-cli/reorder-siblings-by-state old-state))
-               (set-marker done-marker nil)
-               (save-buffer)
+               (org-gtd-cli/reject-blocked-close heading "DONE")
+             (let ((auto-msgs (org-gtd-cli/run-close-post-conditions
+                               rel-file (cdr buf-pos) old-state t)))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
                     `((version . 1)
@@ -3628,25 +3663,7 @@ message strings in printing order."
               (old-state (org-get-todo-state)))
          (if is-dry-run
              (if (org-entry-blocked-p)
-                 (let ((blocker (and (boundp 'org-block-entry-blocking)
-                                     (stringp org-block-entry-blocking)
-                                     org-block-entry-blocking)))
-                   (if org-gtd-cli/json-mode
-                       (org-gtd-cli/output
-                        `((error . ,(format "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask" heading))
-                          (hint . ,(if blocker
-                                       (format "Complete or cancel \"%s\" first, then retry." blocker)
-                                     "Complete or cancel its open subtasks first, then retry."))
-                          (dry_run . t)
-                          (exit_code . 1)))
-                     (if blocker
-                         (org-gtd-cli/error
-                          "Would be blocked: cannot mark \"%s\" CANCELLED — blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
-                          heading blocker)
-                       (org-gtd-cli/error
-                        "Would be blocked: cannot mark \"%s\" CANCELLED — blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
-                        heading)))
-                   (kill-emacs 1))
+                 (org-gtd-cli/reject-blocked-close heading "CANCELLED" t)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/output
                     `((version . 1)
@@ -3666,34 +3683,9 @@ message strings in printing order."
            (let ((org-inhibit-logging nil))
              (org-todo "CANCELLED"))
            (if (not (equal (org-get-todo-state) "CANCELLED"))
-               (let ((blocker (and (boundp 'org-block-entry-blocking)
-                                   (stringp org-block-entry-blocking)
-                                   org-block-entry-blocking)))
-                 (if org-gtd-cli/json-mode
-                     (org-gtd-cli/output
-                      `((error . ,(format "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask" heading))
-                        (hint . ,(if blocker
-                                     (format "Complete or cancel \"%s\" first, then retry." blocker)
-                                   "Complete or cancel its open subtasks first, then retry."))
-                        (exit_code . 1)))
-                   (if blocker
-                       (org-gtd-cli/error
-                        "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask\nHint: Complete or cancel \"%s\" first, then retry."
-                        heading blocker)
-                     (org-gtd-cli/error
-                      "Cannot mark \"%s\" CANCELLED: blocked by an incomplete subtask\nHint: Complete or cancel its open subtasks first, then retry."
-                      heading)))
-                 (kill-emacs 1))
-             ;; Track the closed task with a marker: auto-progress may
-             ;; move the promoted sibling above it (§4.1 placement),
-             ;; which would leave the raw position stale.
-             (let* ((done-marker (copy-marker (cdr buf-pos)))
-                    (auto-msgs (org-gtd-cli/auto-progress rel-file)))
-               (save-excursion
-                 (goto-char done-marker)
-                 (org-gtd-cli/reorder-siblings-by-state old-state))
-               (set-marker done-marker nil)
-               (save-buffer)
+               (org-gtd-cli/reject-blocked-close heading "CANCELLED")
+             (let ((auto-msgs (org-gtd-cli/run-close-post-conditions
+                               rel-file (cdr buf-pos) old-state t)))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
                     `((version . 1)
@@ -3789,13 +3781,72 @@ not nested inside a project) must never be NEXT.  Used by `add-task',
       (org-gtd-cli/error "%s\nHint: %s" err hint)))
   (kill-emacs 1))
 
+(defun org-gtd-cli/leaf-hint-child ()
+  "Heading of a concrete child to point the user at, or nil.
+Used only to make the project-heading rejections concrete; falls back
+to nil when the heading at point has no promotable child."
+  (org-gtd-cli/first-promotable-child))
+
+(defun org-gtd-cli/reject-project-heading-state (heading new-state)
+  "Emit the \"NEW-STATE belongs on a leaf\" rejection for HEADING, exit 1.
+SEMANTICS.md §3: a project (or subproject) *heading* only ever carries
+TODO/DEFER/DONE/CANCELLED.  NEXT names a project's front and WAITING
+its blocked-ness; both are read from the project's children and are
+never asserted on the heading itself (I3).  Distinct from
+`org-gtd-cli/reject-next', which rejects a *freestanding* task — that
+message describes a project child as the valid shape and so would be
+actively misleading here."
+  (let* ((child (org-gtd-cli/leaf-hint-child))
+         (err (if (equal new-state "NEXT")
+                  (format (concat "Cannot set NEXT on \"%s\": it is a project heading — "
+                                  "NEXT belongs on a leaf task inside the project")
+                          heading)
+                (format (concat "Cannot set WAITING on \"%s\": it is a project heading — "
+                                "a project's blocked status is read from its children")
+                        heading)))
+         (hint (if (equal new-state "NEXT")
+                   (if child
+                       (format (concat "Mark the child that is actually next (e.g. \"%s\") — "
+                                       "a project's front lives in its leaves.")
+                               child)
+                     (concat "Mark the leaf task that is actually next — "
+                             "a project's front lives in its leaves."))
+                 (if child
+                     (format (concat "Block the child that is actually waiting (e.g. \"%s\") — "
+                                     "a project's blocked status is read from its children.")
+                             child)
+                   (concat "Block the leaf task that is actually waiting — "
+                           "a project's blocked status is read from its children.")))))
+    (if org-gtd-cli/json-mode
+        ;; JSON: error+hint object goes to stdout (see `org-gtd-cli/error').
+        (org-gtd-cli/output `((error . ,err) (hint . ,hint) (exit_code . 1)))
+      (org-gtd-cli/error "%s\nHint: %s" err hint)))
+  (kill-emacs 1))
+
 (defun org-gtd-cli/ensure-next-allowed (heading)
-  "Reject NEXT when the heading at point is not a child of a project.
-Point must be on the target heading.  A valid NEXT target is a task with
-a TODO-keyword ancestor (`gtd/is-subproject-p'); anything else — a
-freestanding category-level task or a top-level task — is rejected."
-  (unless (gtd/is-subproject-p)
-    (org-gtd-cli/reject-next heading)))
+  "Reject NEXT unless the heading at point is a project child that is a leaf.
+Point must be on the target heading.  Per SEMANTICS.md §3 a valid NEXT
+target is a task with a TODO-keyword ancestor (`gtd/is-subproject-p')
+that has no task children of its own; anything else is rejected:
+
+  - a project or subproject *heading* (I3) → the project-heading
+    rejection, which points at the leaf that should carry NEXT;
+  - a freestanding category-level task or a top-level leaf → the
+    long-standing `org-gtd-cli/reject-next' message, byte-identical."
+  (cond
+   ((gtd/is-project-p)
+    (org-gtd-cli/reject-project-heading-state heading "NEXT"))
+   ((not (gtd/is-subproject-p))
+    (org-gtd-cli/reject-next heading))))
+
+(defun org-gtd-cli/ensure-waiting-allowed (heading)
+  "Reject WAITING when the heading at point is a project heading.
+SEMANTICS.md §3 admits WAITING on lone tasks and project-child leaves
+only — a project's blocked-ness is read from its children, never
+asserted on its heading.  Structural guard only: the #39 `--reason' /
+blocker-link entry requirement (§7 row 5) is not this function's."
+  (when (gtd/is-project-p)
+    (org-gtd-cli/reject-project-heading-state heading "WAITING")))
 
 (defun org-gtd-cli/state-note-entry (new-state old-state reason)
   "Return an Org state-change note entry for NEW-STATE, OLD-STATE, and REASON."
@@ -3877,11 +3928,26 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
        (let* ((heading (org-get-heading t t t t))
               (old-state (org-get-todo-state))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name))))
-         ;; NEXT is project-internal: reject (don't silently coerce) when the
-         ;; target isn't an actionable item inside a project. Guard the dry-run
-         ;; preview too, so a previewed invalid op fails the same way.
+         ;; §3 legality guards.  All of them run before the dry-run branch,
+         ;; so a previewed invalid op fails exactly like the real one (§4.0).
+         ;;
+         ;; NEXT is project-internal *and* leaf-only: reject (don't silently
+         ;; coerce) a freestanding task as well as a project/subproject
+         ;; heading.
          (when (equal new-state "NEXT")
            (org-gtd-cli/ensure-next-allowed heading))
+         ;; WAITING is leaf-only: a project's blocked-ness is read from its
+         ;; children, never asserted on its heading.
+         (when (equal new-state "WAITING")
+           (org-gtd-cli/ensure-waiting-allowed heading))
+         ;; I4: a close is blocked while any task descendant is open.  The
+         ;; dry run cannot call `org-todo', so it uses `org-entry-blocked-p'
+         ;; — the same predicate `org-enforce-todo-dependencies' consults,
+         ;; and the same one `set-done'/`set-cancelled' preview with.
+         (when (and is-dry-run
+                    (member new-state org-done-keywords)
+                    (org-entry-blocked-p))
+           (org-gtd-cli/reject-blocked-close heading new-state t))
          (if is-dry-run
              (if org-gtd-cli/json-mode
                  (org-gtd-cli/output
@@ -3896,26 +3962,41 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
                               heading old-state new-state rel-file)))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
-           (when (and reason (not (string-empty-p reason)))
-             (org-gtd-cli/add-state-reason-note new-state old-state reason))
-           ;; §4.1 minimal move. The primitive itself keeps a
-           ;; TODO→WAITING (and any other same-boundary-class
-           ;; transition) in place, and sends a NEXT→WAITING below the
-           ;; remaining NEXT prefix — the old skip-sort mitigation's I5
-           ;; violation must not survive.
-           (org-gtd-cli/reorder-siblings-by-state old-state)
-           (save-buffer)
-           (if org-gtd-cli/json-mode
-               (org-gtd-cli/mutation-output
-                `((version . 1)
-                  (command . "set-state")
-                  (heading . ,heading)
-                  (file . ,rel-file)
-                  (old_state . ,(or old-state :null))
-                  (new_state . ,new-state))
-                heading)
-             (princ (format "State change: \"%s\" %s -> %s (%s)\n"
-                            heading old-state new-state rel-file))))))))
+           ;; Response integrity: `org-todo' on an entry blocked by
+           ;; `org-enforce-todo-dependencies' does NOT signal — it emits a
+           ;; notice and leaves the keyword alone.  Verify the transition
+           ;; actually took before reporting it, or the envelope would
+           ;; claim a `new_state' the file never reached.
+           (if (and (member new-state org-done-keywords)
+                    (not (equal (org-get-todo-state) new-state)))
+               (org-gtd-cli/reject-blocked-close heading new-state)
+             (when (and reason (not (string-empty-p reason)))
+               (org-gtd-cli/add-state-reason-note new-state old-state reason))
+             (if (member new-state org-done-keywords)
+                 ;; §4.6: a transition *into* a closed state is a genuine
+                 ;; close — same §4.4 post-conditions as
+                 ;; `set-done'/`set-cancelled', the §4.5 promotion rule
+                 ;; alone excepted (I9), hence PROMOTE nil.
+                 (org-gtd-cli/run-close-post-conditions
+                  rel-file (cdr buf-pos) old-state nil)
+               ;; §4.1 minimal move. The primitive itself keeps a
+               ;; TODO→WAITING (and any other same-boundary-class
+               ;; transition) in place, and sends a NEXT→WAITING below the
+               ;; remaining NEXT prefix — the old skip-sort mitigation's I5
+               ;; violation must not survive.
+               (org-gtd-cli/reorder-siblings-by-state old-state)
+               (save-buffer))
+             (if org-gtd-cli/json-mode
+                 (org-gtd-cli/mutation-output
+                  `((version . 1)
+                    (command . "set-state")
+                    (heading . ,heading)
+                    (file . ,rel-file)
+                    (old_state . ,(or old-state :null))
+                    (new_state . ,new-state))
+                  heading)
+               (princ (format "State change: \"%s\" %s -> %s (%s)\n"
+                              heading old-state new-state rel-file)))))))))
   (kill-emacs 0))
 
 ;; --- refile ---
@@ -4216,7 +4297,15 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                (let ((child-state (org-get-todo-state)))
                  (when (and child-state (string= child-state "NEXT") (not existing-next))
                    (setq existing-next (org-get-heading t t t t)))
-                 (when (and child-state (string= child-state "TODO") (not first-todo-pos))
+                 ;; §4.7: the project path's candidate is the first TODO
+                 ;; *non-project* direct child — the same candidate rule
+                 ;; the §4.5 promotion drill uses
+                 ;; (`gtd/promote-first-child-task').  A subproject
+                 ;; heading is never promoted (I3), so it is skipped and
+                 ;; the scan continues to the next TODO child.
+                 (when (and child-state (string= child-state "TODO")
+                            (not first-todo-pos)
+                            (not (gtd/is-project-p)))
                    (setq first-todo-pos (point)))))))
          ;; Subproject guard: project headings can't be NEXT.
          ;; A subproject is a heading that has children AND whose parent

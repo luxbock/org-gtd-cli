@@ -117,7 +117,13 @@ class Divergences:
     # subproject (olli ruling E5, 2026-07-28).
     d5_no_waiting_reason: bool = False  # §7 row 5 → #39
     d7_no_priority_rules: bool = False  # §7 row 7 → #41
-    d8_lax_state_guards: bool = False   # §7 row 8 → #46
+    # §7 row 8 (#46, retired 2026-08-10 with the set-state/set-next
+    # legality guards and close-path parity): ``d8_lax_state_guards`` is
+    # gone — the CLI now rejects NEXT on a project/subproject heading and
+    # WAITING on a project heading, rejects a blocked DONE/CANCELLED
+    # through ``set-state`` instead of reporting a false success, and
+    # ``set-next``'s project path promotes the first TODO *non-project*
+    # direct child (§4.7).
     # §7 row 9 (#47, retired 2026-08-07): ``d9_completed_block_only`` is
     # gone — move now guards the full §4.9 zone invariant (completed
     # block, NEXT prefix, DEFER block), so current and normative agree.
@@ -133,7 +139,6 @@ class Divergences:
     @classmethod
     def current(cls):
         return cls(d5_no_waiting_reason=True, d7_no_priority_rules=True,
-                   d8_lax_state_guards=True,
                    dx_setnext_rejects_closed_leaf=True)
 
 
@@ -561,17 +566,11 @@ class Model:
         old_state = node.keyword
         # §3 legality matrix guards.
         if new_state == "NEXT":
-            if self.div.d8_lax_state_guards:
-                # §7 row 8: today the guard only demands a task ancestor,
-                # so a *subproject heading* is (wrongly) admitted.
-                if not self.task_ancestors(node):
-                    return Result(False, "NEXT is only valid inside a project")
-            else:
-                if not (self.is_project_child(node)
-                        and self.is_leaf_task(node)):
-                    return Result(False, "NEXT is only valid on a project child leaf")
+            if not (self.is_project_child(node)
+                    and self.is_leaf_task(node)):
+                return Result(False, "NEXT is only valid on a project child leaf")
         if new_state == "WAITING":
-            if not self.div.d8_lax_state_guards and self.is_project(node):
+            if self.is_project(node):
                 # §3: WAITING requires a leaf; project headings rejected.
                 return Result(False, "WAITING is not valid on a project heading")
             if not self.div.d5_no_waiting_reason and not reason:
@@ -581,15 +580,18 @@ class Model:
             open_descendants = [n for n in self.task_descendants(node)
                                 if n.keyword not in CLOSED_STATES]
             if open_descendants:
-                if self.div.d8_lax_state_guards:
-                    # §7 row 8: today this silently no-ops, reporting
-                    # success with the keyword unchanged.
-                    return Result(True, old_state=old_state,
-                                  new_state=new_state)
                 return Result(False, "blocked by an incomplete subtask",
                               old_state=old_state)
         node.keyword = new_state
         node.logbook += 1  # I10
+        if new_state in CLOSED_STATES and not self.div.d7_no_priority_rules:
+            # §4.6 (PR #68): a transition *into* a closed state runs the
+            # same §4.4 close post-conditions as ``_close`` — the
+            # promotion rule alone excepted (I9), so ``_promotion_rule``
+            # is deliberately NOT called here.  Gated exactly like
+            # ``_close``'s strip so #41 (§7 row 7) retires it in one
+            # place.
+            node.priority = None
         if reason and new_state == "WAITING":
             node.waiting_reason = reason
         # §4.6/§4.1: minimal move. The primitive itself keeps a
@@ -621,9 +623,10 @@ class Model:
             for child in node.children:
                 if child.keyword != "TODO":
                     continue
-                if self.is_project(child) and not self.div.d8_lax_state_guards:
-                    # I3 (§7 row 8): subproject headings are never
-                    # promoted — but today's project path takes them.
+                if self.is_project(child):
+                    # I3 (§4.7): subproject headings are never promoted;
+                    # the candidate is the first TODO *non-project*
+                    # direct child — the promotion drill's rule.
                     continue
                 child.keyword = "NEXT"
                 child.logbook += 1
@@ -640,10 +643,7 @@ class Model:
         if (node.keyword in CLOSED_STATES
                 and self.div.dx_setnext_rejects_closed_leaf):
             return Result(False, "is in done state", old_state=node.keyword)
-        if self.div.d8_lax_state_guards:
-            if not self.task_ancestors(node):
-                return Result(False, "NEXT is only valid inside a project")
-        elif not self.is_project_child(node):
+        if not self.is_project_child(node):
             return Result(False, "NEXT is only valid inside a project")
         old_state = node.keyword
         node.keyword = "NEXT"
