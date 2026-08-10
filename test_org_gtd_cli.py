@@ -12402,6 +12402,17 @@ class TestWaitingExitCleanup:
         assert rc == 0, stderr
         self._assert_unwound(f, data)
 
+    def test_set_state_text_mode_uses_human_wording(self, org_dir):
+        # The real path used to print the raw `action' slug here, which
+        # leaked the machine vocabulary and disagreed with every other
+        # command's wording.
+        self._linked(org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "TODO", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Removed blocker link: "Wblocker"' in stdout, stdout
+        assert "blocker-link-removed" not in stdout, stdout
+
     def test_set_next(self, org_dir):
         f = self._linked(org_dir)
         data, stderr, rc = run_cli_json("set-next", "Wwaiter", org_dir=org_dir)
@@ -12414,6 +12425,24 @@ class TestWaitingExitCleanup:
         data, stderr, rc = run_cli_json(command, "Wwaiter", org_dir=org_dir)
         assert rc == 0, stderr
         self._assert_unwound(f, data)
+
+    @pytest.mark.parametrize("command", ["set-done", "set-cancelled"])
+    @pytest.mark.parametrize("dry", [False, True])
+    def test_close_reports_the_unwind_in_text_mode(self, org_dir, command, dry):
+        # Regression (review-bot on PR #77): text mode reported the §4.4
+        # auto-progress and wake messages but silently dropped the §4.6
+        # link unwind, which JSON mode and `set-state' both carried. A
+        # user closing a WAITING task saw no sign its blocker link went
+        # away.
+        self._linked(org_dir)
+        args = [command, "Wwaiter"] + (["--dry-run"] if dry else [])
+        stdout, stderr, rc = run_cli(*args, org_dir=org_dir)
+        assert rc == 0, stderr
+        expected = ("Would remove blocker link: \"Wblocker\"" if dry
+                    else "Removed blocker link: \"Wblocker\"")
+        assert expected in stdout, stdout
+        # Machine vocabulary must never leak into text mode.
+        assert "blocker-link-removed" not in stdout, stdout
 
     def test_set_state_dry_run_predicts_the_unwind(self, org_dir):
         f = self._linked(org_dir)

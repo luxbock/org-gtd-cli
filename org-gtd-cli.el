@@ -3785,6 +3785,39 @@ the same prediction comes back — `set-done --dry-run' parity."
           (set-marker m nil))))
     (cons (nreverse msgs) effects)))
 
+(defun org-gtd-cli/princ-waiting-effect (e &optional dry)
+  "Print the §4.6 side effect E as one human text-mode line.
+DRY selects the preview wording.  Text mode has no structured channel,
+so every command that can emit the WAITING vocabulary prints through
+here — otherwise `set-done' and `set-state' describe the same repair in
+different words, or (as review-bot found on PR #77) not at all.
+
+The `unblocked' wording is `org-gtd-cli/auto-unblock's own, verbatim, so
+a caller that already printed that function's message list must not also
+print its `unblocked' effects — it would say the same thing twice."
+  (let ((action (cdr (assq 'action e)))
+        (heading (cdr (assq 'heading e)))
+        (file (cdr (assq 'file e))))
+    (if (equal action "unblocked")
+        (princ (if dry
+                   (format "  Would unblock: \"%s\" -> %s\n"
+                           heading (cdr (assq 'new_state e)))
+                 (format "  Unblocked: \"%s\" -> %s (%s)\n"
+                         heading (cdr (assq 'new_state e)) file)))
+      (princ (format (if dry
+                         "  Would remove blocker link: \"%s\" (%s)\n"
+                       "  Removed blocker link: \"%s\" (%s)\n")
+                     heading file)))))
+
+(defun org-gtd-cli/princ-link-removals (effects &optional dry)
+  "Print only the `blocker-link-removed' entries of EFFECTS.
+For callers that already printed `org-gtd-cli/auto-unblock's message
+list — the `unblocked' lines are in there, so replaying them from the
+effect list would duplicate them."
+  (dolist (e effects)
+    (unless (equal (cdr (assq 'action e)) "unblocked")
+      (org-gtd-cli/princ-waiting-effect e dry))))
+
 (defun org-gtd-cli/waiting-fields-at-point ()
   "SEMANTICS.md §5.5 WAITING surfacing for the heading at point.
 Returns the two first-class fields every task row carries, on top of the
@@ -4004,7 +4037,11 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
                  (dolist (msg (org-gtd-cli/auto-progress-preview rel-file))
                    (princ msg))
                  (dolist (msg (car (org-gtd-cli/auto-unblock t)))
-                   (princ msg))))
+                   (princ msg))
+                 ;; §4.6: the closed task's *own* exit unwind, which the
+                 ;; JSON branch above predicts and text mode used to drop.
+                 (org-gtd-cli/princ-link-removals
+                  (org-gtd-cli/close-waiting-preview old-state) t)))
            ;; Real path
            (let ((org-inhibit-logging nil))
              (org-todo "DONE"))
@@ -4034,7 +4071,10 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
                     heading)
                  (princ (format "Done: %s (%s)\n" heading rel-file))
                  (dolist (msg auto-msgs)
-                   (princ msg))))))))))
+                   (princ msg))
+                 ;; `auto-msgs' already carries the `unblocked' lines; only
+                 ;; the link removals still need printing (§4.6).
+                 (org-gtd-cli/princ-link-removals link-effects)))))))))
   (kill-emacs 0))
 
 ;; --- cancelled ---
@@ -4073,7 +4113,11 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
                  (dolist (msg (org-gtd-cli/auto-progress-preview rel-file "CANCELLED"))
                    (princ msg))
                  (dolist (msg (car (org-gtd-cli/auto-unblock t)))
-                   (princ msg))))
+                   (princ msg))
+                 ;; §4.6: the closed task's *own* exit unwind, which the
+                 ;; JSON branch above predicts and text mode used to drop.
+                 (org-gtd-cli/princ-link-removals
+                  (org-gtd-cli/close-waiting-preview old-state) t)))
            ;; Real path
            (let ((org-inhibit-logging nil))
              (org-todo "CANCELLED"))
@@ -4097,7 +4141,10 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
                     heading)
                  (princ (format "Cancelled: %s (%s)\n" heading rel-file))
                  (dolist (msg auto-msgs)
-                   (princ msg))))))))))
+                   (princ msg))
+                 ;; `auto-msgs' already carries the `unblocked' lines; only
+                 ;; the link removals still need printing (§4.6).
+                 (org-gtd-cli/princ-link-removals link-effects)))))))))
   (kill-emacs 0))
 
 (defun org-gtd-cli/parse-side-effects (msgs)
@@ -4577,16 +4624,10 @@ behaviour, multi-line tolerance included."
                  ;; `preview' mixes both vocabularies — the wake's
                  ;; `unblocked' followed by the `blocker-link-removed'
                  ;; entries its cleanup emits — so format by `action'.
-                 ;; Wording matches `org-gtd-cli/auto-unblock's own dry
-                 ;; message, which is what `set-done --dry-run' prints.
+                 ;; No message list was printed above, so both are printed
+                 ;; from the effects here.
                  (dolist (e preview)
-                   (if (equal (cdr (assq 'action e)) "unblocked")
-                       (princ (format "  Would unblock: \"%s\" -> %s\n"
-                                      (cdr (assq 'heading e))
-                                      (cdr (assq 'new_state e))))
-                     (princ (format "  Would remove blocker link: \"%s\" (%s)\n"
-                                    (cdr (assq 'heading e))
-                                    (cdr (assq 'file e))))))))
+                   (org-gtd-cli/princ-waiting-effect e t))))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
            ;; Response integrity: `org-todo' on an entry blocked by
@@ -4648,11 +4689,14 @@ behaviour, multi-line tolerance included."
                   heading)
                (princ (format "State change: \"%s\" %s -> %s (%s)\n"
                               heading old-state new-state rel-file))
+               ;; No message list is printed on this path (I9 keeps the
+               ;; promotion rule, and with it `auto-msgs', out of
+               ;; `set-state'), so both vocabularies come from the
+               ;; effects.  Previously this loop printed the raw `action'
+               ;; slug, which leaked the machine vocabulary into text
+               ;; mode and disagreed with every other command's wording.
                (dolist (e link-effects)
-                 (princ (format "  %s: \"%s\" (%s)\n"
-                                (cdr (assq 'action e))
-                                (cdr (assq 'heading e))
-                                (cdr (assq 'file e))))))))))))
+                 (org-gtd-cli/princ-waiting-effect e)))))))))
   (kill-emacs 0))
 
 ;; --- refile ---
