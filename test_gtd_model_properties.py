@@ -295,6 +295,108 @@ def test_failed_match_mutates_nothing(model_and_ops):
 
 
 # ---------------------------------------------------------------------------
+# Response integrity (#46, A18)
+# ---------------------------------------------------------------------------
+
+@given(models_and_ops())
+def test_reported_new_state_is_actually_reached(model_and_ops):
+    """§4.0 response integrity: a reported ``new_state`` implies the
+    state actually changed.
+
+    Generalizes the #46 symptom — ``set-state DONE`` on a blocked
+    project reporting ``"new_state": "DONE"`` while the keyword stayed
+    TODO. No operation may report a state it did not reach.
+
+    The addressed node is resolved by *identity*: the creating ops
+    report the new child's state, and generated sequences may create
+    two same-named siblings, which the substring addressing layer
+    (§4.0) then reports as ambiguous — an addressing question, not a
+    response-integrity one.
+    """
+    model, ops = model_and_ops
+    for op, args, kwargs in ops:
+        if hits_parked_spec_gap(model, op, args, kwargs):
+            continue
+        before = {id(n) for n in model.all_nodes()}
+        result = getattr(model, op)(*args, **kwargs)
+        if not (result.ok and result.new_state):
+            continue
+        if op in ("add_task", "add_subtask"):
+            created = [n for n in model.all_nodes() if id(n) not in before]
+            assert len(created) == 1, f"{op}{args} created {len(created)} nodes"
+            node = created[0]
+        else:
+            node, error = model.find(args[0])
+            if node is None:
+                continue  # ambiguous/missing addressing — I12's business
+        assert node.keyword == result.new_state, (
+            f"{op}{args} reported new_state={result.new_state!r} but "
+            f"{node.heading!r} is {node.keyword!r}")
+
+
+def test_blocked_close_via_set_state_is_not_reported_as_success():
+    """The #46 witness, deterministic: a project with an open task
+    descendant cannot be closed through ``set-state`` — and the failure
+    is reported as one (§7 row 8, retired 2026-08-10)."""
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])])
+    before = model.skeleton()
+    for state in ("DONE", "CANCELLED"):
+        result = model.set_state("proj", state)
+        assert result.ok is False
+        assert result.new_state is None
+        assert model.skeleton() == before  # I12
+
+
+def test_set_state_legality_guards_reject_project_headings():
+    """§3 matrix: NEXT needs a project-child leaf, WAITING a leaf — a
+    project or subproject *heading* takes neither (I3)."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("sub", "TODO", children=[Node("s1", "TODO")]),
+        Node("a1", "TODO"),
+    ])])
+    before = model.skeleton()
+    for target, state in (("sub", "NEXT"), ("proj", "NEXT"),
+                          ("proj", "WAITING"), ("sub", "WAITING")):
+        result = model.set_state(target, state, reason="because")
+        assert result.ok is False, f"set_state({target}, {state}) accepted"
+        assert model.skeleton() == before  # I12
+    # The leaf still takes both.
+    assert model.set_state("a1", "NEXT").ok
+    assert model.set_state("a1", "WAITING", reason="because").ok
+
+
+def test_set_state_close_runs_the_close_post_conditions():
+    """§4.6: a close driven through set-state is a genuine close — the
+    §4.4 post-conditions run (LOGBOOK stamp, reorder into the completed
+    block) but the §4.5 promotion rule does not (I9)."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "NEXT"), Node("bb", "TODO"),
+    ])])
+    result = model.set_state("aa", "DONE")
+    assert result.ok and result.new_state == "DONE"
+    aa, _ = model.find("aa")
+    assert aa.logbook == 1  # I10
+    # I9: no promotion — bb stays TODO and nothing is reported.
+    assert result.side_effects == []
+    assert model.find("bb")[0].keyword == "TODO"
+    # §4.1: aa sits in the completed block, at the top of the group.
+    assert [h for _, h, _, _ in model.skeleton()] == ["proj", "aa", "bb"]
+
+
+def test_set_state_close_strips_priority_like_close_does():
+    """A13: the model's set_state close path gates the cookie strip on
+    ``d7_no_priority_rules`` exactly as ``_close`` does, so #41 (§7 row
+    7) retires it in one place."""
+    for divs, expected in ((Divergences.normative(), None),
+                           (Divergences.current(), "A")):
+        model = Model([Node("proj", "TODO", children=[
+            Node("aa", "TODO", priority="A")])], divs)
+        # Close the leaf so the project is not blocked.
+        assert model.set_state("aa", "DONE").ok
+        assert model.find("aa")[0].priority == expected
+
+
+# ---------------------------------------------------------------------------
 # Promotion-rule properties (§4.5)
 # ---------------------------------------------------------------------------
 

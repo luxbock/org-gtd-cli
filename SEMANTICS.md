@@ -327,10 +327,8 @@ pair (the LOGBOOK record stays, I10). The unwind is reported as a
 waiting-side unwind (§4.12) emits (§4.0: same vocabulary for the same
 repair).
 
-*Divergences (#46): today the NEXT guard admits subproject headings,
-WAITING is accepted on project headings, and a blocked DONE/CANCELLED
-silently no-ops while reporting success. Reopening below closed
-ancestors runs no closure repair — row 10.* *Divergence (#39): none
+*Divergence: reopening below closed ancestors runs no closure repair —
+row 10.* *Divergence (#39): none
 of the WAITING mechanism above exists — entry requires no reason or
 link, no blocker links, no wake, no exit cleanup — row 5.*
 
@@ -345,9 +343,7 @@ direct child is already NEXT, report it and change nothing; otherwise
 promote the project's first eligible TODO child — same candidate rule
 as the promotion scan's drill (first TODO *non-project* direct child);
 subproject headings are never promoted (I3). On a subproject heading
-target: rejected. *Divergences: today the project path promotes the
-first TODO direct child even when that child is a subproject heading —
-minting NEXT on a subproject (#46); a closed leaf is rejected instead
+target: rejected. *Divergence: a closed leaf is rejected instead
 of reopened — row 10.*
 
 ### 4.8 refile
@@ -626,7 +622,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 5 | WAITING entry requires no reason/blocker, and `add-task`/`add-subtask` accept `--state WAITING`; no blocker links, no auto-unblock (conditional wake), no cleanup on exit, no blocker-side delete guard, no waiting-side delete unwind, no archive blocker-eligibility criterion, no `waiting_reason`/`blocked_by` surfacing | §4.2, §4.3, §4.4, §4.6, §4.11, §4.12, §5.5 | #39 |
 | 6 | View predicates read legacy state-mirror tags: stuck screen honors a `:WAITING:` tag on a NEXT child; deferred screen reads DEFER-ness from a tag, not deferred(p); the Next Tasks/Tasks ancestor exclusion rides tag inheritance rather than ancestor state; and the Waiting block has no DEFER-ancestor exclusion at all (its matcher's tag part cannot use the inherited `:WAITING:` tag, which the row itself carries) | §5.2, §5.4 | #40 |
 | 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
-| 8 | `set-state NEXT` admits subproject headings; `set-state WAITING` admits project headings; blocked DONE/CANCELLED silently no-ops reporting success; `set-next`'s project path can promote a subproject heading | §3 matrix, §4.6, §4.7 | #46 |
+| 8 | *Retired 2026-08-10: `set-state` rejects NEXT on a project/subproject heading and WAITING on a project heading (§3 matrix), and a blocked DONE/CANCELLED is the same structured rejection `set-done`/`set-cancelled` produce — a close driven through `set-state` is a genuine close running the §4.4 post-conditions, the promotion rule alone excepted (I9); `set-next`'s project path promotes the first TODO non-project direct child (§4.7) (#46).* | — | — |
 | 9 | *Retired 2026-08-07: `move` guards the full §4.9 zone invariant — completed block, NEXT prefix, and DEFER block — rejecting any reordering that would put the moved entry on the wrong side of a boundary (#37 interim, #47 full).* | — | — |
 | 10 | No closure repair: `add-subtask`, `set-state` (reopening), and `refile` place an open task below a closed heading with no reopen cascade; `set-next` rejects closed leaves outright | §4.0 (closure repair), §4.7 | #56 |
 | 11 | A WAITING leaf gaining its first task child keeps WAITING on what is now a subproject heading; no demotion, no `project-needs-review` | §4.0 (keyword-outgrown repair), §4.3, §4.8 | #56 |

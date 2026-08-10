@@ -3089,6 +3089,465 @@ class TestNextProjectGuard:
 
 
 # ===========================================================================
+# 26b. set-state legality guards + close-path parity (§7 row 8, #46)
+# ===========================================================================
+
+class TestSetStateProjectHeadingGuards:
+    """SEMANTICS.md §3: a project (or subproject) *heading* only ever
+    carries TODO/DEFER/DONE/CANCELLED. NEXT names a project's front and
+    WAITING its blocked-ness — both are read from the children, never
+    asserted on the heading (I3). Retires §7 row 8's first two limbs."""
+
+    ORG = (
+        "#+TITLE: Tasks\n\n"
+        "* Alpha Area\n"
+        "** TODO Alpha project\n"
+        "*** TODO Alpha subproject\n"
+        "**** TODO Alpha leaf s1\n"
+        "*** TODO Alpha leaf a1\n"
+        "* Alpha lone task\n"
+    )
+
+    @pytest.fixture
+    def alpha(self, org_dir):
+        # A real lone task at top level (not a category heading).
+        (org_dir / "tasks.org").write_text(
+            self.ORG.replace("* Alpha lone task", "* TODO Alpha lone task"))
+        return org_dir
+
+    # --- A1: NEXT on a subproject heading ---------------------------------
+
+    def test_next_on_subproject_heading_rejected(self, alpha):
+        before = (alpha / "tasks.org").read_text()
+        data, stderr, rc = run_cli_json(
+            "set-state", "Alpha subproject", "NEXT", org_dir=alpha)
+        assert rc == 1
+        assert data["exit_code"] == 1
+        assert data["error"] == (
+            'Cannot set NEXT on "Alpha subproject": it is a project heading'
+            " — NEXT belongs on a leaf task inside the project")
+        # The hint points at the leaf, naming the concrete child.
+        assert data["hint"] == (
+            'Mark the child that is actually next (e.g. "Alpha leaf s1") — '
+            "a project's front lives in its leaves.")
+        # I12: nothing written.
+        assert (alpha / "tasks.org").read_text() == before
+
+    def test_next_on_subproject_heading_message_differs_from_lone_task(
+            self, alpha):
+        sub, _, _ = run_cli_json(
+            "set-state", "Alpha subproject", "NEXT", org_dir=alpha)
+        lone, _, _ = run_cli_json(
+            "set-state", "Alpha lone task", "NEXT", org_dir=alpha)
+        # A3: the lone-task rejection is the long-standing one, verbatim.
+        assert lone["error"] == (
+            'Cannot set NEXT on "Alpha lone task": NEXT is only valid for an'
+            " actionable item inside a project (a TODO heading with"
+            " sub-TODO children)")
+        assert lone["hint"] == (
+            "File it as TODO instead, or attach it to a project first"
+            " (refile it under a project heading), then set NEXT.")
+        # A1: and the project-heading rejection is a different message —
+        # the lone-task one describes a project child as *valid*, which
+        # is actively misleading for a subproject heading.
+        assert sub["error"] != lone["error"]
+        assert sub["hint"] != lone["hint"]
+
+    # --- A2: NEXT on a top-level project heading --------------------------
+
+    def test_next_on_toplevel_project_heading_uses_project_message(
+            self, alpha):
+        before = (alpha / "tasks.org").read_text()
+        data, stderr, rc = run_cli_json(
+            "set-state", "Alpha project", "NEXT", org_dir=alpha)
+        assert rc == 1
+        assert "it is a project heading" in data["error"]
+        assert TestNextProjectGuard.REASON not in data["error"]
+        assert (alpha / "tasks.org").read_text() == before
+
+    # --- A4: the leaf still takes NEXT ------------------------------------
+
+    def test_next_on_project_child_leaf_still_succeeds(self, alpha):
+        stdout, stderr, rc = run_cli(
+            "set-state", "Alpha leaf a1", "NEXT", org_dir=alpha)
+        assert rc == 0, stderr
+        assert "NEXT Alpha leaf a1" in (alpha / "tasks.org").read_text()
+
+    # --- A5: WAITING on a project / subproject heading --------------------
+
+    @pytest.mark.parametrize("target", ["Alpha project", "Alpha subproject"])
+    def test_waiting_on_project_heading_rejected(self, alpha, target):
+        before = (alpha / "tasks.org").read_text()
+        data, stderr, rc = run_cli_json(
+            "set-state", target, "WAITING", org_dir=alpha)
+        assert rc == 1
+        assert data["exit_code"] == 1
+        assert data["error"] == (
+            f'Cannot set WAITING on "{target}": it is a project heading — '
+            "a project's blocked status is read from its children")
+        assert "actually waiting" in data["hint"]
+        assert "read from its children" in data["hint"]
+        assert (alpha / "tasks.org").read_text() == before
+
+    def test_waiting_hint_names_a_concrete_child_when_one_exists(self, alpha):
+        data, _, rc = run_cli_json(
+            "set-state", "Alpha subproject", "WAITING", org_dir=alpha)
+        assert rc == 1
+        assert '"Alpha leaf s1"' in data["hint"]
+
+    # --- A6: WAITING on a leaf is untouched (the reason is #39) ----------
+
+    @pytest.mark.parametrize("target", ["Alpha leaf a1", "Alpha lone task"])
+    def test_waiting_on_leaf_still_succeeds_without_reason(self, alpha, target):
+        # anchor §7 row 5 (#39): #46 adds the *structural* guard only —
+        # the --reason requirement is #39's and must not appear here.
+        stdout, stderr, rc = run_cli(
+            "set-state", target, "WAITING", org_dir=alpha)
+        assert rc == 0, stderr
+        assert f"WAITING {target}" in (alpha / "tasks.org").read_text()
+
+    # --- A12: --dry-run predicts every rejection --------------------------
+
+    @pytest.mark.parametrize("target,state", [
+        ("Alpha subproject", "NEXT"),
+        ("Alpha project", "NEXT"),
+        ("Alpha project", "WAITING"),
+        ("Alpha subproject", "WAITING"),
+        ("Alpha project", "DONE"),
+        ("Alpha project", "CANCELLED"),
+    ])
+    def test_dry_run_fails_identically(self, alpha, target, state):
+        before = (alpha / "tasks.org").read_text()
+        real, _, real_rc = run_cli_json(
+            "set-state", target, state, org_dir=alpha)
+        assert (alpha / "tasks.org").read_text() == before
+        dry, _, dry_rc = run_cli_json(
+            "set-state", target, state, "--dry-run", org_dir=alpha)
+        assert dry_rc == real_rc == 1
+        assert dry["error"] == real["error"]
+        assert dry["hint"] == real["hint"]
+        assert dry["exit_code"] == 1
+        assert (alpha / "tasks.org").read_text() == before
+
+
+class TestSetStateClosePathParity:
+    """§4.6 (PR #68): a transition *into* DONE/CANCELLED on a legal
+    target is a genuine close — the §4.4 post-conditions run, and a
+    blocked close is the same structured rejection `set-done` produces.
+    The §4.5 promotion rule alone is excepted (I9)."""
+
+    BLOCKED = (
+        "#+TITLE: Tasks\n\n"
+        "* Beta Area\n"
+        "** TODO Beta project\n"
+        "*** TODO Beta open child\n"
+    )
+    CLOSABLE = (
+        "#+TITLE: Tasks\n\n"
+        "* Gamma Area\n"
+        "** TODO Gamma project\n"
+        "*** DONE Gamma child one\n"
+        "*** CANCELLED Gamma child two\n"
+    )
+
+    @pytest.fixture
+    def blocked(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.BLOCKED)
+        return org_dir
+
+    @pytest.fixture
+    def closable(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.CLOSABLE)
+        return org_dir
+
+    # --- A7 / A8: blocked close ------------------------------------------
+
+    @pytest.mark.parametrize("state,command", [
+        ("DONE", "set-done"), ("CANCELLED", "set-cancelled")])
+    def test_blocked_close_matches_the_dedicated_command(
+            self, blocked, state, command):
+        via_state, _, rc_state = run_cli_json(
+            "set-state", "Beta project", state, org_dir=blocked)
+        via_command, _, rc_command = run_cli_json(
+            command, "Beta project", org_dir=blocked)
+        assert rc_state == rc_command == 1
+        # Same rejection shape, byte for byte.
+        assert via_state == via_command
+        assert via_state["error"] == (
+            f'Cannot mark "Beta project" {state}: blocked by an incomplete'
+            " subtask")
+        assert "Beta open child" in via_state["hint"]
+        assert via_state["exit_code"] == 1
+
+    @pytest.mark.parametrize("state", ["DONE", "CANCELLED"])
+    def test_blocked_close_never_reports_a_state_it_did_not_reach(
+            self, blocked, state):
+        """The original #46 symptom: the envelope claimed
+        `"new_state": "DONE"` while the enriched task (and the file)
+        still said TODO."""
+        data, _, rc = run_cli_json(
+            "set-state", "Beta project", state, org_dir=blocked)
+        assert rc == 1
+        assert "new_state" not in data
+        assert "task" not in data
+
+    @pytest.mark.parametrize("state", ["DONE", "CANCELLED"])
+    def test_blocked_close_writes_nothing(self, blocked, state):
+        # I12: byte-identical, no stray LOGBOOK entry either.
+        before = (blocked / "tasks.org").read_text()
+        _, _, rc = run_cli("set-state", "Beta project", state,
+                           org_dir=blocked)
+        assert rc == 1
+        after = (blocked / "tasks.org").read_text()
+        assert after == before
+        assert "LOGBOOK" not in after
+
+    def test_blocked_close_plain_text_matches_set_done(self, blocked):
+        _, err_state, rc_state = run_cli(
+            "set-state", "Beta project", "DONE", org_dir=blocked)
+        _, err_done, rc_done = run_cli(
+            "set-done", "Beta project", org_dir=blocked)
+        assert rc_state == rc_done == 1
+        assert err_state == err_done
+
+    # --- A9: the unblocked close still succeeds ---------------------------
+
+    @pytest.mark.parametrize("state", ["DONE", "CANCELLED"])
+    def test_close_succeeds_when_every_descendant_is_closed(
+            self, closable, state):
+        data, stderr, rc = run_cli_json(
+            "set-state", "Gamma project", state, org_dir=closable)
+        assert rc == 0, stderr
+        assert data["new_state"] == state
+        # Response integrity: the enriched task agrees with the envelope.
+        assert data["task"]["state"] == state
+        assert f"{state} Gamma project" in (closable / "tasks.org").read_text()
+
+    # --- A10 / A11: the §4.4 post-conditions, promotion excepted ----------
+
+    def test_close_via_set_state_runs_the_close_post_conditions(self, org_dir):
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Rho Area\n"
+            "** TODO Rho project\n"
+            "*** DONE Rho already closed\n"
+            "*** NEXT Rho current\n"
+            "*** TODO Rho later\n"
+        )
+        data, stderr, rc = run_cli_json(
+            "set-state", "Rho current", "DONE", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = (org_dir / "tasks.org").read_text()
+        # CLOSED timestamp (§4.4).
+        closed = re.search(
+            r"DONE Rho current\n\s*CLOSED: \[\d{4}-\d{2}-\d{2} "
+            r"[A-Z][a-z]{2} \d{2}:\d{2}\]", text)
+        assert closed, text
+        # I10's close record for this config is the CLOSED stamp itself:
+        # `org-log-done 'time` writes no LOGBOOK state note, and neither
+        # does `set-done` (pinned by the parity test below). What #46
+        # buys is that `set-state` now writes the same record `set-done`
+        # does — not a new guarantee about which record that is.
+        # §4.1: reordered to the bottom of the completed block.
+        order = re.findall(r"^\*\*\* (?:\w+ )?(Rho .*)$", text, re.M)
+        assert order == ["Rho already closed", "Rho current", "Rho later"]
+        # A11 / I9: no promotion, and no promotion side effect.
+        assert "TODO Rho later" in text
+        assert data.get("side_effects", []) == []
+
+    def test_close_via_set_state_renders_like_set_done(self, org_dir):
+        """§4.6: the closed entry that `set-state DONE` leaves on disk is
+        the one `set-done` leaves — the close machinery keys on the state
+        transition, not the command name."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Sigma Area\n"
+            "** TODO Sigma one\n"
+            "*** NEXT Sigma one current\n"
+            "*** TODO Sigma one later\n"
+            "** TODO Sigma two\n"
+            "*** NEXT Sigma two current\n"
+            "*** TODO Sigma two later\n"
+        )
+        _, stderr, rc = run_cli(
+            "set-state", "Sigma one current", "DONE", org_dir=org_dir)
+        assert rc == 0, stderr
+        _, stderr, rc = run_cli("set-done", "Sigma two current",
+                                org_dir=org_dir)
+        assert rc == 0, stderr
+
+        def closed_entry(text, heading):
+            """The closed heading's own lines, normalized."""
+            lines = text.splitlines()
+            start = next(i for i, l in enumerate(lines) if heading in l)
+            out = []
+            for line in lines[start:]:
+                if out and line.startswith("*"):
+                    break
+                out.append(re.sub(r"(CLOSED: \[|:ID:\s+).*", r"\1", line)
+                           .replace(heading, "X"))
+            return out
+
+        text = (org_dir / "tasks.org").read_text()
+        assert closed_entry(text, "Sigma one current") == \
+            closed_entry(text, "Sigma two current")
+
+    def test_close_via_set_done_still_promotes(self, org_dir):
+        """The I9 contrast: `set-done` on the same shape *does* promote,
+        so the shared close helper did not accidentally drop it."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Rho Area\n"
+            "** TODO Rho project\n"
+            "*** NEXT Rho current\n"
+            "*** TODO Rho later\n"
+        )
+        data, stderr, rc = run_cli_json(
+            "set-done", "Rho current", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["side_effects"] == [{
+            "action": "state-change",
+            "heading": "Rho later",
+            "old_state": "TODO",
+            "new_state": "NEXT",
+            "file": "tasks.org",
+        }]
+
+
+class TestSetNextSubprojectCandidate:
+    """§4.7 / I3: `set-next`'s project path promotes the first TODO
+    *non-project* direct child — the same candidate rule the §4.5
+    promotion drill uses. Retires §7 row 8's fourth limb."""
+
+    @pytest.fixture
+    def delta(self, org_dir):
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Delta Area\n"
+            "** TODO Delta project\n"
+            "*** TODO Delta subproject\n"
+            "**** TODO Delta grandchild\n"
+            "*** TODO Delta leaf\n"
+        )
+        return org_dir
+
+    # --- A15 --------------------------------------------------------------
+
+    def test_promotes_the_first_non_project_child(self, delta):
+        data, stderr, rc = run_cli_json(
+            "set-next", "Delta project", org_dir=delta)
+        assert rc == 0, stderr
+        assert data["side_effects"] == [{
+            "action": "state-change",
+            "heading": "Delta leaf",
+            "old_state": "TODO",
+            "new_state": "NEXT",
+            "file": "tasks.org",
+        }]
+        text = (delta / "tasks.org").read_text()
+        assert "NEXT Delta leaf" in text
+        # I3: the subproject heading is untouched, and it is NOT drilled
+        # into either — set-next simply skips subproject children.
+        assert "TODO Delta subproject" in text
+        assert "TODO Delta grandchild" in text
+        assert "NEXT Delta" not in text.replace("NEXT Delta leaf", "")
+
+    # --- A16 --------------------------------------------------------------
+
+    def test_no_promotable_child_reports_the_existing_error(self, org_dir):
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Eps Area\n"
+            "** TODO Eps project\n"
+            "*** TODO Eps subproject\n"
+            "**** TODO Eps grandchild\n"
+        )
+        before = (org_dir / "tasks.org").read_text()
+        stdout, stderr, rc = run_cli("set-next", "Eps project", org_dir=org_dir)
+        assert rc == 1
+        assert 'Error: "Eps project" has no TODO children to promote' in stderr
+        assert (org_dir / "tasks.org").read_text() == before
+
+    # --- A17: unchanged behavior ------------------------------------------
+
+    def test_subproject_heading_target_still_rejected(self, delta):
+        stdout, stderr, rc = run_cli(
+            "set-next", "Delta subproject", org_dir=delta)
+        assert rc == 1
+        assert 'Cannot set-next on subproject: "Delta subproject" has subtasks' \
+            in stderr
+
+    def test_existing_next_child_still_reported_unchanged(self, org_dir):
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Zeta Area\n"
+            "** TODO Zeta project\n"
+            "*** NEXT Zeta front\n"
+            "*** TODO Zeta subproject\n"
+            "**** TODO Zeta grandchild\n"
+        )
+        stdout, stderr, rc = run_cli("set-next", "Zeta project", org_dir=org_dir)
+        assert rc == 0
+        assert 'Already has NEXT: "Zeta front"' in stderr
+        assert "NEXT Zeta front" in (org_dir / "tasks.org").read_text()
+
+
+class TestPromotionDrillCandidateRegression:
+    """Regression pins for the two NEXT-minting sites that already
+    conformed (#46's table rows 3 and 4): the §4.5 promotion scan and
+    its drill both skip project children."""
+
+    def test_promotion_scan_skips_subproject_and_takes_the_leaf(self, org_dir):
+        """A subproject already in motion is passed over and the leaf
+        after it is promoted — never the subproject heading itself."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Theta Area\n"
+            "** TODO Theta project\n"
+            "*** NEXT Theta current\n"
+            "*** TODO Theta subproject\n"
+            "**** NEXT Theta grandchild\n"
+            "*** TODO Theta leaf\n"
+        )
+        data, stderr, rc = run_cli_json(
+            "set-done", "Theta current", org_dir=org_dir)
+        assert rc == 0, stderr
+        promotions = [e for e in data["side_effects"]
+                      if e["new_state"] == "NEXT"]
+        assert promotions == [{
+            "action": "state-change",
+            "heading": "Theta leaf",
+            "old_state": "TODO",
+            "new_state": "NEXT",
+            "file": "tasks.org",
+        }]
+
+    def test_promotion_drill_promotes_a_leaf_inside_the_subproject(
+            self, org_dir):
+        """The stuck-subproject drill: it descends one level and promotes
+        the first TODO *non-project* child there, never the nested
+        subproject heading."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* Iota Area\n"
+            "** TODO Iota project\n"
+            "*** NEXT Iota current\n"
+            "*** TODO Iota subproject\n"
+            "**** TODO Iota nested subproject\n"
+            "***** TODO Iota deep leaf\n"
+            "**** TODO Iota inner leaf\n"
+        )
+        data, stderr, rc = run_cli_json(
+            "set-done", "Iota current", org_dir=org_dir)
+        assert rc == 0, stderr
+        promotions = [e for e in data["side_effects"]
+                      if e["new_state"] == "NEXT"]
+        assert [p["heading"] for p in promotions] == ["Iota inner leaf"]
+        text = (org_dir / "tasks.org").read_text()
+        assert "TODO Iota nested subproject" in text
+
+
+# ===========================================================================
 # 27. subproject
 # ===========================================================================
 
