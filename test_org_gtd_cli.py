@@ -517,10 +517,16 @@ class TestAddTask:
         assert rc == 0
         assert "[#A]" in (org_dir / "inbox.org").read_text()
 
-    def test_with_state_waiting(self, org_dir):
-        stdout, stderr, rc = run_cli("add-task", "Waiting task", "--state", "WAITING", org_dir=org_dir)
-        assert rc == 0
-        assert "WAITING Waiting task" in (org_dir / "inbox.org").read_text()
+    def test_with_state_waiting_is_rejected(self, org_dir):
+        # §4.2 (#39): create never mints WAITING — this test encoded the
+        # pre-#39 behavior §7 row 5 recorded as a divergence, so it flips
+        # rather than being deleted. Full coverage: TestWaitingCreateGuard.
+        before = (org_dir / "inbox.org").read_text()
+        stdout, stderr, rc = run_cli(
+            "add-task", "Waiting task", "--state", "WAITING", org_dir=org_dir)
+        assert rc == 1
+        assert "Waiting task" not in (org_dir / "inbox.org").read_text()
+        assert (org_dir / "inbox.org").read_text() == before
 
     def test_with_category_single_segment(self, org_dir):
         stdout, stderr, rc = run_cli("add-task", "Category task", "--category", "Finance", org_dir=org_dir)
@@ -1580,8 +1586,9 @@ class TestDone:
 
 class TestSetState:
     def test_changes_state(self, org_dir):
-        # pins §7 row 5 (#39)
-        stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "WAITING",
+            "--reason", "vendor has not confirmed", org_dir=org_dir)
         assert rc == 0
         assert "NEXT -> WAITING (tasks.org)" in stdout
         assert "WAITING Book a rental car" in (org_dir / "tasks.org").read_text()
@@ -1615,17 +1622,21 @@ class TestSetState:
         assert reason in drawer
 
     def test_without_reason_does_not_add_reason_note(self, org_dir):
-        # pins §7 row 5 (#39)
+        # DEFER, not WAITING: the §4.6 guardrail (#39) makes a reasonless
+        # WAITING entry a rejection, so the reasonless-note shape has to
+        # be pinned on a state that has no entry requirement. The subject
+        # — no `--reason` means no note continuation — is unchanged.
         stdout, stderr, rc = run_cli(
-            "set-state", "Book a rental car", "WAITING", org_dir=org_dir)
+            "set-state", "Book a rental car", "DEFER", org_dir=org_dir)
         assert rc == 0
         drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
         assert "\\\\" not in drawer
 
     def test_waiting_adds_tag(self, org_dir):
-        # pins §7 row 5 (#39)
         # pins §7 row 6 (#40)
-        stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "WAITING",
+            "--reason", "vendor has not confirmed", org_dir=org_dir)
         assert rc == 0
         assert ":WAITING:" in (org_dir / "tasks.org").read_text()
 
@@ -1641,11 +1652,12 @@ class TestSetState:
         assert "NEXT Book a rental car" in (org_dir / "tasks.org").read_text()
 
     def test_preserves_priority_cookie(self, org_dir):
-        # pins §7 row 5 (#39)
         # WAITING (not NEXT): "Pay quarterly taxes" is a standalone task, and
         # NEXT is now rejected on non-project tasks. Priority-cookie handling
         # is identical across state changes.
-        stdout, stderr, rc = run_cli("set-state", "Pay quarterly taxes", "WAITING", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Pay quarterly taxes", "WAITING",
+            "--reason", "waiting on the accountant", org_dir=org_dir)
         assert rc == 0
         assert "WAITING [#A] Pay quarterly taxes" in (org_dir / "tasks.org").read_text()
 
@@ -1656,21 +1668,23 @@ class TestSetState:
         assert "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" in stderr
 
     def test_defer_to_waiting_cleans_defer_tag(self, org_dir):
-        # pins §7 row 5 (#39)
         # pins §7 row 6 (#40)
         # Multi-step: DEFER then WAITING
         run_cli("set-state", "Book a rental car", "DEFER", org_dir=org_dir)
-        stdout, stderr, rc = run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "WAITING",
+            "--reason", "vendor has not confirmed", org_dir=org_dir)
         assert rc == 0
         text = (org_dir / "tasks.org").read_text()
         assert ":WAITING:" in text
         assert ":DEFER:" not in text
 
     def test_waiting_to_todo_cleans_waiting_tag(self, org_dir):
-        # anchor §7 row 5 (#39) — non-flipping: only the unasserted WAITING
-        # setup call changes under #39; the TODO assertions stay green
-        # Multi-step: WAITING then TODO
-        run_cli("set-state", "Book a rental car", "WAITING", org_dir=org_dir)
+        # Multi-step: WAITING then TODO. Only the WAITING setup call
+        # changed under #39 (it now carries the required `--reason`); the
+        # TODO assertions are the same ones that were green before.
+        run_cli("set-state", "Book a rental car", "WAITING",
+                "--reason", "vendor has not confirmed", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "TODO", org_dir=org_dir)
         assert rc == 0
         assert "TODO Book a rental car" in (org_dir / "tasks.org").read_text()
@@ -3195,14 +3209,17 @@ class TestSetStateProjectHeadingGuards:
         assert rc == 1
         assert '"Alpha leaf s1"' in data["hint"]
 
-    # --- A6: WAITING on a leaf is untouched (the reason is #39) ----------
+    # --- A6: WAITING on a leaf is untouched by the structural guard ------
 
     @pytest.mark.parametrize("target", ["Alpha leaf a1", "Alpha lone task"])
-    def test_waiting_on_leaf_still_succeeds_without_reason(self, alpha, target):
-        # anchor §7 row 5 (#39): #46 adds the *structural* guard only —
-        # the --reason requirement is #39's and must not appear here.
+    def test_waiting_on_leaf_still_succeeds(self, alpha, target):
+        # #46's A6: the *structural* guard (project headings) must not
+        # touch leaves. #39 landed the §4.6 entry guardrail on the same
+        # call, so the reason is now supplied — what A6 pins is that
+        # neither leaf shape is rejected as a project heading.
         stdout, stderr, rc = run_cli(
-            "set-state", target, "WAITING", org_dir=alpha)
+            "set-state", target, "WAITING", "--reason", "blocked on a vendor",
+            org_dir=alpha)
         assert rc == 0, stderr
         assert f"WAITING {target}" in (alpha / "tasks.org").read_text()
 
@@ -4292,8 +4309,6 @@ class TestSiblingReordering:
         (org_dir / "reorder.org").write_text(content)
 
     def test_next_to_waiting_lands_below_next_prefix(self, org_dir):
-        # pins §7 row 5 (#39): the reasonless WAITING call flips to
-        # failure when #39 lands.
         # §4.1 NEXT-exit: the only NEXT leaving to WAITING lands just
         # below the (now empty) NEXT prefix — the top of the active
         # zone — with the TODO interleaving untouched.
@@ -4303,7 +4318,9 @@ class TestSiblingReordering:
 ** NEXT Gate
 ** TODO Beta
 """)
-        stdout, stderr, rc = run_cli("set-state", "Gate", "WAITING", org_dir=org_dir)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Gate", "WAITING", "--reason", "blocked on a vendor",
+            org_dir=org_dir)
         assert rc == 0
         f = org_dir / "reorder.org"
         assert_line_before(f, "WAITING Gate", "TODO Alpha")
@@ -4326,24 +4343,46 @@ class TestAddSubtaskStateReorder:
     # Only the WAITING arrival pin remains — the §4.1 arrival rule
     # places a new WAITING at the end of the active zone (§7 row 1
     # retired 2026-08-07, #34).
+    #
+    # #39 changed how that arrival is reached, not the rule: §4.2/§4.3
+    # make `add-subtask --state WAITING` a rejection, so the arrival is
+    # pinned through `refile` (the other §4.1 arrival site) and the
+    # rejection gets its own pin below.
 
     def _write_reorder_org(self, org_dir, content):
         (org_dir / "reorder.org").write_text(content)
 
-    def test_add_waiting_preserves_end_position(self, org_dir):
-        # §4.1 arrival rule: a new WAITING enters at the end of the
-        # active zone — after the existing TODO siblings; placement
-        # MUST NOT bubble it above them (the WAITING position
-        # invariant, see 3f0802b).
+    def test_add_waiting_is_rejected(self, org_dir):
+        # §4.3 (#39): create never mints WAITING. Nothing is created.
         self._write_reorder_org(org_dir, """\
 * TODO Project W1
 ** TODO Alpha
 ** TODO Beta
 """)
+        before = (org_dir / "reorder.org").read_text()
         stdout, stderr, rc = run_cli(
             "add-subtask", "Project W1", "Hold item",
             "--state", "WAITING", org_dir=org_dir)
+        assert rc == 1
+        assert (org_dir / "reorder.org").read_text() == before
+
+    def test_refiled_waiting_preserves_end_position(self, org_dir):
+        # §4.1 arrival rule: a WAITING arrival enters at the end of the
+        # active zone — after the existing TODO siblings; placement MUST
+        # NOT bubble it above them (the WAITING position invariant, see
+        # 3f0802b). Reached by refile now that create rejects WAITING.
+        self._write_reorder_org(org_dir, """\
+* TODO Project W1
+** TODO Alpha
+** TODO Beta
+* TODO Hold item
+""")
+        rc = run_cli("set-state", "Hold item", "WAITING",
+                     "--reason", "blocked on a vendor", org_dir=org_dir)[2]
         assert rc == 0
+        stdout, stderr, rc = run_cli(
+            "refile", "Hold item", "--to", "Project W1", org_dir=org_dir)
+        assert rc == 0, stderr
         f = org_dir / "reorder.org"
         assert_line_before(f, "TODO Alpha", "WAITING Hold item")
         assert_line_before(f, "TODO Beta", "WAITING Hold item")
@@ -4436,7 +4475,8 @@ class TestMinimalMoveReorder:
 """)
         before = f.read_text()
         stdout, stderr, rc = run_cli(
-            "set-state", "Wait gate", "WAITING", org_dir=org_dir)
+            "set-state", "Wait gate", "WAITING", "--reason", "blocked on a vendor",
+            org_dir=org_dir)
         assert rc == 0
         after = f.read_text()
         _, others_before = self._split_entry(before, "Wait gate")
@@ -4456,7 +4496,8 @@ class TestMinimalMoveReorder:
 ** TODO Beta step
 """)
         stdout, stderr, rc = run_cli(
-            "set-state", "Front gate", "WAITING", org_dir=org_dir)
+            "set-state", "Front gate", "WAITING", "--reason", "blocked on a vendor",
+            org_dir=org_dir)
         assert rc == 0
         assert_line_before(f, "NEXT Front other", "WAITING Front gate")
         assert_line_before(f, "WAITING Front gate", "TODO Beta step")
@@ -6535,16 +6576,18 @@ class TestJsonMutations:
         assert (org_dir / "tasks.org").read_text() == before
 
     def test_set_state_json(self, org_dir):
-        # pins §7 row 5 (#39)
-        data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", org_dir=org_dir)
+        data, _, rc = run_cli_json(
+            "set-state", "Buy groceries", "WAITING",
+            "--reason", "blocked on a vendor", org_dir=org_dir)
         assert rc == 0
         assert data["command"] == "set-state"
         assert data["old_state"] == "TODO"
         assert data["new_state"] == "WAITING"
 
     def test_set_state_dry_run_json(self, org_dir):
-        # pins §7 row 5 (#39) — dry-run must predict the #39 failure
-        data, _, rc = run_cli_json("set-state", "Buy groceries", "WAITING", "--dry-run", org_dir=org_dir)
+        data, _, rc = run_cli_json(
+            "set-state", "Buy groceries", "WAITING", "--reason",
+            "blocked on a vendor", "--dry-run", org_dir=org_dir)
         assert rc == 0
         assert data["dry_run"] is True
 
@@ -9476,19 +9519,20 @@ class TestBatchDelegation:
         data, stderr, rc = run_batch(
             "add-task",
             [{"title": "Scheduled batch task", "schedule": "2026-04-01",
-              "deadline": "2026-04-05", "priority": "A", "state": "WAITING",
+              "deadline": "2026-04-05", "priority": "A", "state": "DEFER",
               "tags": "work"}],
             org_dir=org_dir)
         assert rc == 0
         r = data["results"][0]
         assert r["success"] is True
         assert r["heading"] == "Scheduled batch task"
-        # WAITING, not NEXT: add-task files a freestanding task and NEXT is
-        # rejected on non-project tasks; state passthrough is what's tested here.
-        assert r["state"] == "WAITING"
+        # DEFER, not NEXT/WAITING: add-task files a freestanding task, and
+        # create rejects both NEXT (I3) and WAITING (§4.2, #39); state
+        # passthrough is what's tested here.
+        assert r["state"] == "DEFER"
         assert r["file"] == "inbox.org"
         inbox = (org_dir / "inbox.org").read_text()
-        assert "* WAITING [#A] Scheduled batch task" in inbox
+        assert "* DEFER [#A] Scheduled batch task" in inbox
         assert "SCHEDULED: <2026-04-01" in inbox
         assert "DEADLINE: <2026-04-05" in inbox
         # Creation timestamp (inactive, today's date)
@@ -9798,12 +9842,14 @@ class TestBatchExtendedCommands:
 
     def test_batch_set_state(self, org_dir):
         """--batch set-state changes TODO state per item."""
-        # pins §7 row 5 (#39)
         data, stderr, rc = run_batch(
             "set-state",
             # NEXT is rejected on freestanding tasks, so use DEFER for the
-            # standalone "Add aliases" item (see commit 0e1d2dd).
-            [{"heading": "Write quarterly report", "state": "WAITING"},
+            # standalone "Add aliases" item (see commit 0e1d2dd). The
+            # WAITING item carries `reason`: batch items go through the
+            # same §4.6 guardrail a single call does (#39).
+            [{"heading": "Write quarterly report", "state": "WAITING",
+              "reason": "blocked on a vendor"},
              {"heading": "Add aliases to common systemctl", "state": "DEFER"}],
             org_dir=org_dir,
         )
@@ -10623,13 +10669,13 @@ class TestStableIdAddressing:
 
     def test_lazy_create_on_substring_mutation(self, org_dir):
         """A substring mutation on an id-less task lazily creates a stable :ID:."""
-        # pins §7 row 5 (#39)
         inbox = org_dir / "inbox.org"
         assert _id_under(inbox, "Buy groceries") is None
         # WAITING, not NEXT: Buy groceries is a freestanding inbox task and NEXT
         # is now rejected on non-project tasks; lazy-ID creation is the subject.
         stdout, stderr, rc = run_cli(
-            "set-state", "Buy groceries", "WAITING", org_dir=org_dir)
+            "set-state", "Buy groceries", "WAITING", "--reason",
+            "blocked on a vendor", org_dir=org_dir)
         assert rc == 0, stderr
         text = inbox.read_text()
         assert "* WAITING Buy groceries" in text
@@ -10638,9 +10684,9 @@ class TestStableIdAddressing:
 
     def test_lazy_id_round_trips(self, org_dir):
         """A freshly lazy-created id is immediately resolvable by --id."""
-        # pins §7 row 5 (#39)
         inbox = org_dir / "inbox.org"
-        rc = run_cli("set-state", "Buy groceries", "WAITING", org_dir=org_dir)[2]
+        rc = run_cli("set-state", "Buy groceries", "WAITING", "--reason",
+                     "blocked on a vendor", org_dir=org_dir)[2]
         assert rc == 0
         new_id = _id_under(inbox, "Buy groceries")
         assert new_id is not None
@@ -10651,11 +10697,11 @@ class TestStableIdAddressing:
 
     def test_dry_run_does_not_create_id(self, org_dir):
         """--dry-run on an id-less task must NOT create an :ID:."""
-        # pins §7 row 5 (#39) — dry-run must predict the #39 failure
         inbox = org_dir / "inbox.org"
         before = inbox.read_bytes()
         stdout, stderr, rc = run_cli(
-            "set-state", "Call the plumber", "WAITING", "--dry-run", org_dir=org_dir)
+            "set-state", "Call the plumber", "WAITING", "--reason",
+            "blocked on a vendor", "--dry-run", org_dir=org_dir)
         assert rc == 0, stderr
         assert inbox.read_bytes() == before
         assert _id_under(inbox, "Call the plumber") is None
@@ -11810,3 +11856,1030 @@ class TestRenderFile:
         data, _, rc = run_cli_json(
             "render-file", "agent-notes/does-not-exist.org", org_dir=org_dir)
         self._assert_rejected(data, rc)
+
+
+# ===========================================================================
+# 55. The WAITING mechanism — SEMANTICS.md §4.2/§4.3/§4.4/§4.6/§4.11/§4.12/§5.5
+#     (issue #39, §7 row 5)
+# ===========================================================================
+#
+# Everything below is new with #39. The pure skeleton/side-effect shapes of
+# the entry guardrail, the AND-gate and the conditional wake also live in the
+# tier-1/tier-2 conformance suite:
+#
+#   test_gtd_model_properties.py::test_waiting_entry_requires_reason_or_link
+#   test_gtd_model_properties.py::test_and_gate_fires_only_when_all_closed
+#   test_gtd_model_properties.py::test_conditional_wake_state
+#   test_gtd_conformance.py::test_s7row5_waiting_requires_reason
+#   test_gtd_conformance.py::test_s7row5_blocker_link_and_wake
+#   test_gtd_conformance.py::test_s7row5_multi_blocker_and_gate
+#   test_gtd_conformance.py::test_s7row5_create_never_mints_waiting
+#
+# The tier-3 tests here pin what those tiers deliberately do not model:
+# the exact property bytes on disk, the CLI's error/hint text, `--dry-run`
+# parity, delete/archive (which the model has no operations for), and the
+# `waiting_reason`/`blocked_by` surfacing.
+
+
+def _prop_under(filepath, heading, key):
+    """Return property KEY inside HEADING's own drawer, or None."""
+    lines = filepath.read_text().splitlines()
+    in_entry = False
+    for line in lines:
+        if line.startswith("*"):
+            in_entry = heading in line
+            continue
+        if in_entry:
+            m = re.match(r"\s*:" + re.escape(key) + r":\s+(.*?)\s*$", line)
+            if m:
+                return m.group(1)
+    return None
+
+
+def _write_waiting_org(org_dir, content, name="waiting.org"):
+    (org_dir / name).write_text(content)
+    return org_dir / name
+
+
+PROJECT_WITH_BLOCKER = """\
+* TODO Wproject
+** TODO Wblocker
+** TODO Wwaiter
+"""
+
+
+def _link(org_dir, waiter="Wwaiter", blocker="Wblocker", extra=()):
+    """set-state WAITER WAITING --blocked-by BLOCKER; assert it took."""
+    stdout, stderr, rc = run_cli(
+        "set-state", waiter, "WAITING", "--blocked-by", blocker,
+        *extra, org_dir=org_dir)
+    assert rc == 0, stderr
+    return stdout
+
+
+class TestWaitingEntryGuardrail:
+    """§4.6 criteria 1-4: WAITING entry needs a concrete blocker."""
+
+    def test_bare_waiting_is_rejected_with_a_hint(self, org_dir):
+        # Criterion 1.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", org_dir=org_dir)
+        assert rc == 1
+        assert "--reason" in stderr
+        assert "--blocked-by" in stderr
+        assert "--blocked-by-id" in stderr
+        assert f.read_text() == before
+
+    def test_reason_only_writes_a_single_line_property_and_a_note(self, org_dir):
+        # Criterion 2: the :REASON: property AND the LOGBOOK note.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", "--reason", "vendor has not shipped",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _prop_under(f, "Wwaiter", "REASON") == "vendor has not shipped"
+        drawer = logbook_for_heading(f, "Wwaiter")
+        assert 'State "WAITING"' in drawer
+        assert "vendor has not shipped" in drawer
+
+    def test_link_only_succeeds(self, org_dir):
+        # Criterion 2: a blocker link alone satisfies the guardrail.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        assert "** WAITING Wwaiter" in f.read_text()
+        assert _prop_under(f, "Wwaiter", "REASON") is None
+
+    def test_reason_and_link_combine(self, org_dir):
+        # Criterion 2 + 10.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir, extra=("--reason", "and the vendor is slow"))
+        assert _prop_under(f, "Wwaiter", "REASON") == "and the vendor is slow"
+        assert _prop_under(f, "Wwaiter", "BLOCKER") == _prop_under(
+            f, "Wblocker", "ID")
+
+    def test_dry_run_fails_identically_and_mints_no_id(self, org_dir):
+        # Criterion 3.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        before = f.read_bytes()
+        data, stderr, rc = run_cli_json(
+            "set-state", "Wwaiter", "WAITING", "--dry-run", org_dir=org_dir)
+        assert rc == 1
+        assert "error" in data and "hint" in data
+        assert f.read_bytes() == before
+        assert _id_under(f, "Wwaiter") is None
+
+    def test_reasonless_waiting_on_disk_never_errors(self, org_dir):
+        # Criterion 4: an Emacs-written WAITING with no :REASON: is legal
+        # everywhere — reads, views, and every exit.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** WAITING Wwaiter
+""")
+        data, stderr, rc = run_cli_json("show", "Wwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["waiting_reason"] is None
+        assert data["blocked_by"] is None
+        for args in (["search", "Wwaiter", "--state", "all"],
+                     ["agenda", "--state", "WAITING"]):
+            _, stderr, rc = run_cli_json(*args, org_dir=org_dir)
+            assert rc == 0, stderr
+        _, stderr, rc = run_cli("agenda-view", org_dir=org_dir)
+        assert rc == 0, stderr
+        # Every exit out of WAITING succeeds on it.
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "TODO", org_dir=org_dir)
+        assert rc == 0, stderr
+
+    def test_entry_is_rejected_on_a_project_heading_before_the_guardrail(
+            self, org_dir):
+        # #46's structural guard still fires first; #39 does not weaken it.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wproject", "WAITING", "--reason", "x", org_dir=org_dir)
+        assert rc == 1
+        assert "project heading" in stderr
+        assert f.read_text() == before
+
+
+class TestWaitingCreateGuard:
+    """§4.2/§4.3 criteria 5-6: create never mints WAITING."""
+
+    def test_add_task_state_waiting_rejected(self, org_dir):
+        before = (org_dir / "inbox.org").read_text()
+        stdout, stderr, rc = run_cli(
+            "add-task", "Wnew", "--state", "WAITING", org_dir=org_dir)
+        assert rc == 1
+        assert "set-state" in stderr
+        assert "--reason" in stderr or "--blocked-by" in stderr
+        assert (org_dir / "inbox.org").read_text() == before
+
+    def test_add_subtask_state_waiting_rejected(self, org_dir):
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        before = f.read_text()
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Wproject", "Wnew", "--state", "WAITING",
+            org_dir=org_dir)
+        assert rc == 1
+        assert "set-state" in stderr
+        assert f.read_text() == before
+
+    def test_add_subtask_state_next_still_succeeds(self, org_dir):
+        # The asymmetry is deliberate: NEXT may be hand-declared at create.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Wproject", "Wnew", "--state", "NEXT",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "NEXT Wnew" in f.read_text()
+
+
+class TestWaitingBlockerLinks:
+    """§4.6 criteria 7-10: the org-depend link pair."""
+
+    def test_exact_org_depend_property_format_on_both_sides(self, org_dir):
+        # Criterion 7.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        waiter_id = _id_under(f, "Wwaiter")
+        blocker_id = _id_under(f, "Wblocker")
+        assert waiter_id and blocker_id
+        assert _prop_under(f, "Wblocker", "TRIGGER") == f"{waiter_id}(TODO)"
+        assert _prop_under(f, "Wwaiter", "BLOCKER") == blocker_id
+
+    def test_resolution_across_files_and_by_id(self, org_dir):
+        # Criterion 8.
+        a = _write_waiting_org(org_dir, "* TODO Wblocker\n", "wa.org")
+        b = _write_waiting_org(org_dir, "* TODO Wwaiter\n", "wb.org")
+        _link(org_dir)
+        assert _prop_under(b, "Wwaiter", "BLOCKER") == _id_under(a, "Wblocker")
+        # And again by --blocked-by-id, on a second waiter.
+        c = _write_waiting_org(org_dir, "* TODO Wsecond\n", "wc.org")
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wsecond", "WAITING",
+            "--blocked-by-id", _id_under(a, "Wblocker"), org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _prop_under(c, "Wsecond", "BLOCKER") == _id_under(a, "Wblocker")
+
+    def test_unmatched_or_ambiguous_blocker_mutates_nothing(self, org_dir):
+        # Criterion 9 (I12).
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wdupe one
+** TODO Wdupe two
+** TODO Wwaiter
+""")
+        for spec in ("no-such-task-anywhere", "Wdupe"):
+            before = f.read_bytes()
+            stdout, stderr, rc = run_cli(
+                "set-state", "Wwaiter", "WAITING", "--blocked-by", spec,
+                org_dir=org_dir)
+            assert rc != 0
+            assert f.read_bytes() == before
+            assert _id_under(f, "Wwaiter") is None
+
+    def test_multiple_blockers_are_all_recorded(self, org_dir):
+        # Criterion 10.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wb one
+** TODO Wb two
+** TODO Wwaiter
+""")
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING",
+            "--blocked-by", "Wb one", "--blocked-by", "Wb two",
+            "--reason", "two vendors", org_dir=org_dir)
+        assert rc == 0, stderr
+        recorded = _prop_under(f, "Wwaiter", "BLOCKER").split()
+        assert sorted(recorded) == sorted(
+            [_id_under(f, "Wb one"), _id_under(f, "Wb two")])
+
+
+class TestWaitingAutoUnblock:
+    """§4.4 criteria 11-12, 17-18 — and #46's A14 behavioral check."""
+
+    def _effects(self, data):
+        return sorted((e["action"], e["heading"], e.get("new_state"))
+                      for e in data["side_effects"])
+
+    def test_set_done_wakes_the_waiter_and_cleans_up(self, org_dir):
+        # Criterion 11.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir, extra=("--reason", "vendor"))
+        data, stderr, rc = run_cli_json("set-done", "Wblocker", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert ("unblocked", "Wwaiter", "NEXT") in self._effects(data)
+        assert ("blocker-link-removed", "Wblocker", None) in self._effects(data)
+        text = f.read_text()
+        assert "** NEXT Wwaiter" in text
+        assert _prop_under(f, "Wwaiter", "REASON") is None
+        assert _prop_under(f, "Wwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Wblocker", "TRIGGER") is None
+
+    def test_set_cancelled_fires_auto_unblock(self, org_dir):
+        # Criterion 11 (the CANCELLED half).
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        data, stderr, rc = run_cli_json(
+            "set-cancelled", "Wblocker", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert ("unblocked", "Wwaiter", "NEXT") in self._effects(data)
+        assert "** NEXT Wwaiter" in f.read_text()
+
+    def test_set_state_cancelled_fires_auto_unblock(self, org_dir):
+        """#46's criterion A14: the close path parity reaches auto-unblock.
+
+        #46 collapsed the close post-conditions into one helper so a close
+        driven through `set-state` runs them all; auto-unblock did not
+        exist then, so A14's behavioral check is #39's.
+        """
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        data, stderr, rc = run_cli_json(
+            "set-state", "Wblocker", "CANCELLED", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert ("unblocked", "Wwaiter", "NEXT") in self._effects(data)
+        assert "** NEXT Wwaiter" in f.read_text()
+        assert _prop_under(f, "Wwaiter", "BLOCKER") is None
+
+    def test_batch_close_fires_auto_unblock(self, org_dir):
+        # Criterion 11: "works in batch mode".
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        data, stderr, rc = run_batch(
+            "set-done", [{"heading": "Wblocker"}], org_dir=org_dir)
+        assert rc == 0, stderr
+        effects = data["results"][0]["side_effects"]
+        assert any(e["action"] == "unblocked" and e["heading"] == "Wwaiter"
+                   for e in effects)
+        assert "** NEXT Wwaiter" in f.read_text()
+
+    def test_batch_set_state_waiting_honours_the_guardrail(self, org_dir):
+        # Criterion 11: the new set-state fields pass through batch.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        data, stderr, rc = run_batch(
+            "set-state",
+            [{"heading": "Wwaiter", "state": "WAITING"}], org_dir=org_dir)
+        assert data["results"][0]["success"] is False
+        data, stderr, rc = run_batch(
+            "set-state",
+            [{"heading": "Wwaiter", "state": "WAITING",
+              "blocked_by": ["Wblocker"]}], org_dir=org_dir)
+        assert data["results"][0]["success"] is True, data
+        assert _prop_under(f, "Wwaiter", "BLOCKER") == _id_under(f, "Wblocker")
+
+    def test_multi_blocker_and_gate(self, org_dir):
+        # Criterion 12: untouched on the first close, wakes on the last.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wb one
+** TODO Wb two
+** TODO Wwaiter
+""")
+        rc = run_cli("set-state", "Wwaiter", "WAITING",
+                     "--blocked-by", "Wb one", "--blocked-by", "Wb two",
+                     "--reason", "two vendors", org_dir=org_dir)[2]
+        assert rc == 0
+        before_blocker = _prop_under(f, "Wwaiter", "BLOCKER")
+        data, stderr, rc = run_cli_json("set-done", "Wb one", org_dir=org_dir)
+        assert rc == 0, stderr
+        # Completely untouched: no state change, no property edit, no effect.
+        assert "** WAITING Wwaiter" in f.read_text()
+        assert _prop_under(f, "Wwaiter", "REASON") == "two vendors"
+        assert _prop_under(f, "Wwaiter", "BLOCKER") == before_blocker
+        assert not [e for e in data["side_effects"]
+                    if e["heading"] == "Wwaiter"]
+        # The last blocker closing fires the gate.
+        data, stderr, rc = run_cli_json("set-done", "Wb two", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert any(e["action"] == "unblocked" and e["heading"] == "Wwaiter"
+                   for e in data["side_effects"])
+        assert _prop_under(f, "Wwaiter", "BLOCKER") is None
+
+    def test_non_resolving_trigger_id_is_dropped_silently(self, org_dir):
+        # Criterion 17: a dangling id is skipped; a live one beside it is
+        # still processed.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        waiter_id = _id_under(f, "Wwaiter")
+        f.write_text(f.read_text().replace(
+            f":TRIGGER:  {waiter_id}(TODO)",
+            f":TRIGGER:  deadbeef-0000-0000-0000-000000000000(TODO) "
+            f"{waiter_id}(TODO)"))
+        data, stderr, rc = run_cli_json("set-done", "Wblocker", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert any(e["action"] == "unblocked" and e["heading"] == "Wwaiter"
+                   for e in data["side_effects"])
+
+    def test_only_a_dangling_trigger_closes_cleanly(self, org_dir):
+        # Criterion 17, the degenerate case.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wblocker
+:PROPERTIES:
+:ID:       11111111-0000-0000-0000-000000000000
+:TRIGGER:  deadbeef-0000-0000-0000-000000000000(TODO)
+:END:
+** TODO Wother
+""")
+        data, stderr, rc = run_cli_json("set-done", "Wblocker", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert not [e for e in data["side_effects"]
+                    if e["action"] in ("unblocked", "blocker-link-removed")]
+
+    @pytest.mark.parametrize("command", ["set-done", "set-cancelled"])
+    def test_dry_run_predicts_the_unblocked_effect(self, org_dir, command):
+        # Criterion 18.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        before = f.read_bytes()
+        data, stderr, rc = run_cli_json(
+            command, "Wblocker", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["dry_run"] is True
+        assert any(e["action"] == "unblocked" and e["heading"] == "Wwaiter"
+                   and e["new_state"] == "NEXT" for e in data["side_effects"])
+        assert f.read_bytes() == before
+
+
+class TestWaitingConditionalWake:
+    """§4.6 criteria 13-16: the conditional wake, and its residual."""
+
+    def _wake_state(self, org_dir, f):
+        data, stderr, rc = run_cli_json("set-done", "Wblocker", org_dir=org_dir)
+        assert rc == 0, stderr
+        woken = [e for e in data["side_effects"] if e["action"] == "unblocked"]
+        assert len(woken) == 1, data["side_effects"]
+        return woken[0]["new_state"]
+
+    def test_wakes_as_next_when_standing_in_for_the_front(self, org_dir):
+        # Criterion 13: leaf project child, nothing open before it,
+        # no NEXT in the group. The blocker lives in another project so
+        # the §4.5 promotion rule cannot touch the waiter's group.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wother project
+** TODO Wblocker
+* TODO Wproject
+** DONE Wold
+** TODO Wwaiter
+** TODO Wlater
+""")
+        _link(org_dir)
+        assert self._wake_state(org_dir, f) == "NEXT"
+        assert "** NEXT Wwaiter" in f.read_text()
+
+    def test_wakes_as_todo_for_a_lone_task(self, org_dir):
+        # Criterion 14a: a lone task is never NEXT (I3).
+        f = _write_waiting_org(org_dir, """\
+* TODO Wother project
+** TODO Wblocker
+* TODO Wwaiter
+""")
+        _link(org_dir)
+        assert self._wake_state(org_dir, f) == "TODO"
+
+    def test_wakes_as_todo_when_it_has_task_children(self, org_dir):
+        # Criterion 14b: a task that grew children wakes as TODO.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wother project
+** TODO Wblocker
+* TODO Wproject
+** TODO Wwaiter
+""")
+        _link(org_dir)
+        rc = run_cli("add-subtask", "Wwaiter", "Wgrown", org_dir=org_dir)[2]
+        assert rc == 0
+        assert self._wake_state(org_dir, f) == "TODO"
+
+    def test_wakes_as_todo_when_an_open_sibling_precedes(self, org_dir):
+        # Criterion 14c.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wother project
+** TODO Wblocker
+* TODO Wproject
+** TODO Wearlier
+** TODO Wwaiter
+""")
+        _link(org_dir)
+        assert self._wake_state(org_dir, f) == "TODO"
+
+    def test_wakes_as_todo_when_the_group_already_has_a_next(self, org_dir):
+        # Criterion 14d: (b) without (a) — the waiter is first, but the
+        # group holds a NEXT below it (a hand-edited I5 shape).
+        f = _write_waiting_org(org_dir, """\
+* TODO Wother project
+** TODO Wblocker
+* TODO Wproject
+** TODO Wwaiter
+** NEXT Wfront
+""")
+        _link(org_dir)
+        assert self._wake_state(org_dir, f) == "TODO"
+
+    def test_position_never_changes_and_no_promotion_runs(self, org_dir):
+        # Criterion 15.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wother project
+** TODO Wblocker
+* TODO Wproject
+** DONE Wold
+** TODO Wwaiter
+** TODO Wlater
+""")
+        _link(org_dir)
+        rc = run_cli("set-done", "Wblocker", org_dir=org_dir)[2]
+        assert rc == 0
+        # Same document order as before the wake; Wlater was NOT promoted.
+        assert_line_before(f, "DONE Wold", "NEXT Wwaiter")
+        assert_line_before(f, "NEXT Wwaiter", "TODO Wlater")
+
+    def test_accepted_residual_leaves_the_project_with_no_front(self, org_dir):
+        # Criterion 16: no NEXT in the group and the woken task is not
+        # first → TODO, and the project is deliberately stuck.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wother project
+** TODO Wblocker
+* TODO Wproject
+** TODO Wearlier
+** TODO Wwaiter
+""")
+        _link(org_dir)
+        assert self._wake_state(org_dir, f) == "TODO"
+        text = f.read_text()
+        assert "NEXT" not in text
+        # The stuck-projects block of the dashboard lists it (I11).
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0, stderr
+        stuck = [b for b in data["blocks"]
+                 if "stuck" in b["name"].lower()]
+        assert stuck, [b["name"] for b in data["blocks"]]
+        assert any(t["heading"] == "Wproject"
+                   for b in stuck for t in b["tasks"])
+
+
+class TestWaitingExitCleanup:
+    """§4.6 criteria 19-20: every exit unwinds reason and links."""
+
+    def _linked(self, org_dir):
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir, extra=("--reason", "vendor"))
+        return f
+
+    def _assert_unwound(self, f, data):
+        assert _prop_under(f, "Wwaiter", "REASON") is None
+        assert _prop_under(f, "Wwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Wblocker", "TRIGGER") is None
+        assert [e for e in data["side_effects"]
+                if e["action"] == "blocker-link-removed"
+                and e["heading"] == "Wblocker"]
+        # I10: the LOGBOOK record survives the cleanup.
+        assert ":LOGBOOK:" in logbook_for_heading(f, "Wwaiter")
+
+    def test_set_state_to_another_state(self, org_dir):
+        f = self._linked(org_dir)
+        data, stderr, rc = run_cli_json(
+            "set-state", "Wwaiter", "TODO", org_dir=org_dir)
+        assert rc == 0, stderr
+        self._assert_unwound(f, data)
+
+    def test_set_next(self, org_dir):
+        f = self._linked(org_dir)
+        data, stderr, rc = run_cli_json("set-next", "Wwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        self._assert_unwound(f, data)
+
+    @pytest.mark.parametrize("command", ["set-done", "set-cancelled"])
+    def test_close(self, org_dir, command):
+        f = self._linked(org_dir)
+        data, stderr, rc = run_cli_json(command, "Wwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        self._assert_unwound(f, data)
+
+    def test_set_state_dry_run_predicts_the_unwind(self, org_dir):
+        f = self._linked(org_dir)
+        before = f.read_bytes()
+        data, stderr, rc = run_cli_json(
+            "set-state", "Wwaiter", "TODO", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert [e for e in data["side_effects"]
+                if e["action"] == "blocker-link-removed"]
+        assert f.read_bytes() == before
+
+    def test_unresolvable_blocker_id_is_skipped_silently(self, org_dir):
+        # Criterion 20.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** WAITING Wwaiter
+:PROPERTIES:
+:ID:       22222222-0000-0000-0000-000000000000
+:REASON:   an old note
+:BLOCKER:  deadbeef-0000-0000-0000-000000000000
+:END:
+""")
+        data, stderr, rc = run_cli_json(
+            "set-state", "Wwaiter", "TODO", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["side_effects"] == []
+        assert _prop_under(f, "Wwaiter", "REASON") is None
+        assert _prop_under(f, "Wwaiter", "BLOCKER") is None
+
+
+class TestWaitingDeleteGuard:
+    """§4.12 criteria 21-25: guard one side, unwind the other."""
+
+    def test_deleting_a_blocker_is_rejected(self, org_dir):
+        # Criterion 21.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli("delete", "Wblocker", org_dir=org_dir)
+        assert rc == 1
+        assert "Wwaiter" in stderr
+        assert "CANCELLED" in stderr  # the careful path
+        assert f.read_bytes() == before
+
+    def test_non_resolving_trigger_does_not_trip_the_guard(self, org_dir):
+        # Criterion 22.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wblocker
+:PROPERTIES:
+:ID:       11111111-0000-0000-0000-000000000000
+:TRIGGER:  deadbeef-0000-0000-0000-000000000000(TODO)
+:END:
+** TODO Wother
+""")
+        stdout, stderr, rc = run_cli("delete", "Wblocker", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Wblocker" not in f.read_text()
+
+    def test_deleting_the_waiter_unwinds_and_never_wakes(self, org_dir):
+        # Criterion 23.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        data, stderr, rc = run_cli_json("delete", "Wwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert [e for e in data["side_effects"]
+                if e["action"] == "blocker-link-removed"
+                and e["heading"] == "Wblocker"]
+        assert not [e for e in data["side_effects"]
+                    if e["action"] == "unblocked"]
+        text = f.read_text()
+        assert "Wwaiter" not in text
+        assert _prop_under(f, "Wblocker", "TRIGGER") is None
+        assert "** TODO Wblocker" in text  # no wake, no state change
+
+    def test_a_task_in_both_roles_is_guarded(self, org_dir):
+        # Criterion 24: a chained dependency A <- B <- C; B is protected.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wa
+** TODO Wb
+** TODO Wc
+""")
+        assert run_cli("set-state", "Wb", "WAITING", "--blocked-by", "Wa",
+                       org_dir=org_dir)[2] == 0
+        assert run_cli("set-state", "Wc", "WAITING", "--blocked-by", "Wb",
+                       org_dir=org_dir)[2] == 0
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli("delete", "Wb", org_dir=org_dir)
+        assert rc == 1
+        assert "Wc" in stderr
+        assert f.read_bytes() == before
+
+    def test_dry_run_predicts_both_outcomes(self, org_dir):
+        # Criterion 25.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        before = f.read_bytes()
+        data, stderr, rc = run_cli_json(
+            "delete", "Wblocker", "--dry-run", org_dir=org_dir)
+        assert rc == 1
+        assert "Wwaiter" in data["error"]
+        data, stderr, rc = run_cli_json(
+            "delete", "Wwaiter", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert [e for e in data["side_effects"]
+                if e["action"] == "blocker-link-removed"]
+        assert f.read_bytes() == before
+
+
+class TestWaitingArchiveEligibility:
+    """§4.11 criteria 26-28: a blocker for an open task is held back."""
+
+    # An old date keeps the fixtures past the recent-date window; ORG_GTD_CLI_NOW
+    # pins "now" so the suite is date-independent.
+    NOW = {"ORG_GTD_CLI_NOW": "2026-06-01"}
+
+    def _setup(self, org_dir):
+        f = _write_waiting_org(org_dir, """\
+* Wcategory
+** TODO Wblocker
+CLOSED: [2026-01-02 Fri 10:00]
+** TODO Wwaiter
+""")
+        _link(org_dir)
+        return f
+
+    def test_single_archive_holds_the_blocker_back(self, org_dir):
+        # Criterion 26.
+        f = self._setup(org_dir)
+        assert run_cli("set-done", "Wblocker", "--dry-run",
+                       org_dir=org_dir)[2] == 0
+        # Close it with the waiter still blocked by a *second*, open blocker
+        # so the gate does not fire and the TRIGGER survives.
+        f.write_text(f.read_text().replace("** TODO Wblocker", "** DONE Wblocker"))
+        stdout, stderr, rc = run_cli(
+            "archive", "Wblocker", org_dir=org_dir, env_overrides=self.NOW)
+        assert rc == 1
+        assert "still blocks open task" in stderr
+        assert "Wwaiter" in stderr
+        assert "Wblocker" in f.read_text()
+
+    def test_archive_all_skips_it_silently(self, org_dir):
+        # Criterion 26 (the --all half).
+        f = self._setup(org_dir)
+        f.write_text(f.read_text().replace("** TODO Wblocker", "** DONE Wblocker"))
+        stdout, stderr, rc = run_cli(
+            "archive", "--all", org_dir=org_dir, env_overrides=self.NOW)
+        assert "Wblocker" in f.read_text()
+        assert "Wblocker" not in stderr  # silent skip, not a message
+
+    def test_eligible_again_once_the_waiter_leaves_waiting(self, org_dir):
+        # Criterion 27: no special casing — the §4.6 cleanup unwinds it.
+        f = self._setup(org_dir)
+        f.write_text(f.read_text().replace("** TODO Wblocker", "** DONE Wblocker"))
+        assert run_cli("set-state", "Wwaiter", "TODO", org_dir=org_dir)[2] == 0
+        stdout, stderr, rc = run_cli(
+            "archive", "Wblocker", org_dir=org_dir, env_overrides=self.NOW)
+        assert rc == 0, stderr
+        assert "Wblocker" not in f.read_text()
+
+    def test_trigger_to_a_closed_task_never_blocks_eligibility(self, org_dir):
+        # Criterion 28.
+        f = _write_waiting_org(org_dir, """\
+* Wcategory
+** DONE Wblocker
+CLOSED: [2026-01-02 Fri 10:00]
+:PROPERTIES:
+:ID:       11111111-0000-0000-0000-000000000000
+:TRIGGER:  22222222-0000-0000-0000-000000000000(TODO) deadbeef(TODO)
+:END:
+** DONE Wclosed waiter
+CLOSED: [2026-01-02 Fri 10:00]
+:PROPERTIES:
+:ID:       22222222-0000-0000-0000-000000000000
+:END:
+""")
+        stdout, stderr, rc = run_cli(
+            "archive", "Wblocker", org_dir=org_dir, env_overrides=self.NOW)
+        assert rc == 0, stderr
+        assert "** DONE Wblocker" not in f.read_text()
+
+
+class TestWaitingSurfacing:
+    """§5.5 criteria 29-30: waiting_reason / blocked_by, null-safe."""
+
+    def test_all_four_read_surfaces_carry_the_fields(self, org_dir):
+        # Criterion 29.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir, extra=("--reason", "vendor has not shipped"))
+        data, stderr, rc = run_cli_json("show", "Wwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["waiting_reason"] == "vendor has not shipped"
+        assert data["blocked_by"][0]["heading"] == "Wblocker"
+        assert data["blocked_by"][0]["state"] == "TODO"
+
+        data, stderr, rc = run_cli_json(
+            "search", "Wwaiter", "--state", "all", "--full", org_dir=org_dir)
+        assert rc == 0, stderr
+        row = data["tasks"][0]
+        assert row["waiting_reason"] == "vendor has not shipped"
+        assert row["blocked_by"][0]["heading"] == "Wblocker"
+
+        data, stderr, rc = run_cli_json(
+            "agenda", "--state", "WAITING", org_dir=org_dir)
+        assert rc == 0, stderr
+        row = [t for t in data["tasks"] if t["heading"] == "Wwaiter"][0]
+        assert row["waiting_reason"] == "vendor has not shipped"
+
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0, stderr
+        rows = [t for block in data["blocks"] for t in block["tasks"]]
+        assert rows, data
+        assert all("waiting_reason" in t and "blocked_by" in t for t in rows)
+        waiter = [t for t in rows if t["heading"] == "Wwaiter"]
+        assert waiter and waiter[0]["waiting_reason"] == "vendor has not shipped"
+
+    def test_absent_is_null_never_an_error(self, org_dir):
+        # Criterion 29: null-safe on a plain, link-less task.
+        _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        data, stderr, rc = run_cli_json("show", "Wblocker", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["waiting_reason"] is None
+        assert data["blocked_by"] is None
+
+    def test_link_only_waiting_derives_the_reason(self, org_dir):
+        # Criterion 30.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        data, stderr, rc = run_cli_json("show", "Wwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["waiting_reason"] == 'Blocked by "Wblocker" (TODO)'
+        # And it tracks the blocker's current state.
+        assert data["blocked_by"][0]["state"] == "TODO"
+
+
+class TestWaitingRuledEdgeCases:
+    """§4.6 criteria 31-36 — the four rulings of 2026-08-10."""
+
+    def _assert_untouched(self, f, before):
+        assert f.read_bytes() == before
+
+    @pytest.mark.parametrize("by_id", [False, True])
+    def test_self_block_is_rejected(self, org_dir, by_id):
+        # Criterion 31 (ruling a).
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        if by_id:
+            # Give the target an id first so --blocked-by-id can name it.
+            assert run_cli("set-state", "Wwaiter", "WAITING", "--blocked-by",
+                           "Wblocker", org_dir=org_dir)[2] == 0
+            assert run_cli("set-state", "Wwaiter", "TODO", org_dir=org_dir)[2] == 0
+            flag = ["--blocked-by-id", _id_under(f, "Wwaiter")]
+        else:
+            flag = ["--blocked-by", "Wwaiter"]
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", *flag, org_dir=org_dir)
+        assert rc == 1
+        assert "cannot block itself" in stderr
+        self._assert_untouched(f, before)
+
+    def test_two_hop_cycle_is_rejected(self, org_dir):
+        # Criterion 32: B already waits on X → X may not wait on B.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wx
+** TODO Wb
+""")
+        assert run_cli("set-state", "Wb", "WAITING", "--blocked-by", "Wx",
+                       org_dir=org_dir)[2] == 0
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wx", "WAITING", "--blocked-by", "Wb", org_dir=org_dir)
+        assert rc == 1
+        assert "cycle" in stderr
+        self._assert_untouched(f, before)
+
+    def test_three_hop_cycle_is_rejected(self, org_dir):
+        # Criterion 32: A→B→C→A.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wa
+** TODO Wb
+** TODO Wc
+""")
+        assert run_cli("set-state", "Wa", "WAITING", "--blocked-by", "Wb",
+                       org_dir=org_dir)[2] == 0
+        assert run_cli("set-state", "Wb", "WAITING", "--blocked-by", "Wc",
+                       org_dir=org_dir)[2] == 0
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wc", "WAITING", "--blocked-by", "Wa", org_dir=org_dir)
+        assert rc == 1
+        assert "cycle" in stderr
+        self._assert_untouched(f, before)
+
+    def test_diamond_is_accepted(self, org_dir):
+        # Criterion 32: two disjoint paths to a common blocker, no cycle.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wroot
+** TODO Wleft
+** TODO Wright
+** TODO Wtop
+""")
+        assert run_cli("set-state", "Wleft", "WAITING", "--blocked-by", "Wroot",
+                       org_dir=org_dir)[2] == 0
+        assert run_cli("set-state", "Wright", "WAITING", "--blocked-by", "Wroot",
+                       org_dir=org_dir)[2] == 0
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wtop", "WAITING",
+            "--blocked-by", "Wleft", "--blocked-by", "Wright", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert len(_prop_under(f, "Wtop", "BLOCKER").split()) == 2
+
+    def test_unresolvable_id_on_the_walk_does_not_reject(self, org_dir):
+        # Criterion 32: a dangling BLOCKER id met while walking is skipped.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wblocker
+:PROPERTIES:
+:ID:       11111111-0000-0000-0000-000000000000
+:BLOCKER:  deadbeef-0000-0000-0000-000000000000
+:END:
+** TODO Wwaiter
+""")
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", "--blocked-by", "Wblocker",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _prop_under(f, "Wwaiter", "BLOCKER") == (
+            "11111111-0000-0000-0000-000000000000")
+
+    @pytest.mark.parametrize("closed_state", ["DONE", "CANCELLED"])
+    def test_closed_blocker_is_rejected(self, org_dir, closed_state):
+        # Criterion 33 (ruling b).
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wblocker
+** TODO Wwaiter
+""")
+        assert run_cli("set-state", "Wblocker", closed_state,
+                       org_dir=org_dir)[2] == 0
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", "--blocked-by", "Wblocker",
+            org_dir=org_dir)
+        assert rc == 1
+        assert "Wblocker" in stderr
+        assert closed_state in stderr
+        self._assert_untouched(f, before)
+
+    def test_one_closed_blocker_rejects_the_whole_call(self, org_dir):
+        # Criterion 33: neither link is written.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wopen one
+** TODO Wclosed one
+** TODO Wwaiter
+""")
+        assert run_cli("set-state", "Wclosed one", "DONE",
+                       org_dir=org_dir)[2] == 0
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING",
+            "--blocked-by", "Wopen one", "--blocked-by", "Wclosed one",
+            org_dir=org_dir)
+        assert rc == 1
+        self._assert_untouched(f, before)
+        assert _prop_under(f, "Wopen one", "TRIGGER") is None
+
+    def test_reentry_amend_replaces_and_never_accumulates(self, org_dir):
+        # Criterion 34 (ruling c).
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wb one
+** TODO Wb two
+** TODO Wwaiter
+""")
+        assert run_cli("set-state", "Wwaiter", "WAITING",
+                       "--blocked-by", "Wb one", "--reason", "r1",
+                       org_dir=org_dir)[2] == 0
+        data, stderr, rc = run_cli_json(
+            "set-state", "Wwaiter", "WAITING", "--blocked-by", "Wb two",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["old_state"] == "WAITING"
+        assert data["new_state"] == "WAITING"
+        # Replaced, not accumulated: only b two remains, and r1 is gone.
+        assert _prop_under(f, "Wwaiter", "BLOCKER") == _id_under(f, "Wb two")
+        assert _prop_under(f, "Wwaiter", "REASON") is None
+        assert _prop_under(f, "Wb one", "TRIGGER") is None
+        assert _prop_under(f, "Wb two", "TRIGGER") == (
+            f"{_id_under(f, 'Wwaiter')}(TODO)")
+        removed = [e for e in data["side_effects"]
+                   if e["action"] == "blocker-link-removed"]
+        assert len(removed) == 1 and removed[0]["heading"] == "Wb one"
+        # State and sibling position unchanged.
+        assert_line_before(f, "TODO Wb one", "TODO Wb two")
+        assert_line_before(f, "TODO Wb two", "WAITING Wwaiter")
+
+    def test_bare_reentry_is_rejected(self, org_dir):
+        # Criterion 34: a flagless re-entry is still criterion 1.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        _link(org_dir)
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", org_dir=org_dir)
+        assert rc == 1
+        self._assert_untouched(f, before)
+
+    def test_rejected_amend_is_atomic(self, org_dir):
+        # Criterion 35: the cleanup must not have run.
+        f = _write_waiting_org(org_dir, """\
+* TODO Wproject
+** TODO Wb one
+** TODO Wclosed one
+** TODO Wwaiter
+""")
+        assert run_cli("set-state", "Wwaiter", "WAITING",
+                       "--blocked-by", "Wb one", "--reason", "r1",
+                       org_dir=org_dir)[2] == 0
+        assert run_cli("set-state", "Wclosed one", "DONE",
+                       org_dir=org_dir)[2] == 0
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", "--blocked-by", "Wclosed one",
+            org_dir=org_dir)
+        assert rc == 1
+        self._assert_untouched(f, before)
+        assert _prop_under(f, "Wwaiter", "REASON") == "r1"
+        assert _prop_under(f, "Wwaiter", "BLOCKER") == _id_under(f, "Wb one")
+        assert _prop_under(f, "Wb one", "TRIGGER") == (
+            f"{_id_under(f, 'Wwaiter')}(TODO)")
+
+    def test_multiline_reason_at_waiting_entry_is_rejected(self, org_dir):
+        # Criterion 36 (ruling d).
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", "--reason", "line one\nline two",
+            org_dir=org_dir)
+        assert rc == 1
+        assert "one line" in stderr
+        self._assert_untouched(f, before)
+        assert _id_under(f, "Wwaiter") is None
+
+    def test_multiline_reason_outside_waiting_still_succeeds(self, org_dir):
+        # Criterion 36: the restriction is scoped to the property site.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "DEFER", "--reason", "line one\nline two",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        drawer = logbook_for_heading(f, "Wwaiter")
+        assert "line one" in drawer and "line two" in drawer
+        assert _prop_under(f, "Wwaiter", "REASON") is None
+
+    @pytest.mark.parametrize("flags,needle", [
+        (["--blocked-by", "Wwaiter"], "cannot block itself"),
+        (["--reason", "line one\nline two"], "one line"),
+    ])
+    def test_dry_run_predicts_each_rejection(self, org_dir, flags, needle):
+        # §4.0: --dry-run fails identically to the real call.
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "set-state", "Wwaiter", "WAITING", *flags, "--dry-run",
+            org_dir=org_dir)
+        assert rc == 1
+        assert needle in stderr
+        self._assert_untouched(f, before)
+
+
+class TestWaitingReservedProperties:
+    """The link properties are not hand-writable through set-property."""
+
+    @pytest.mark.parametrize("key", ["REASON", "BLOCKER", "TRIGGER"])
+    def test_set_property_refuses_the_link_properties(self, org_dir, key):
+        f = _write_waiting_org(org_dir, PROJECT_WITH_BLOCKER)
+        stdout, stderr, rc = run_cli(
+            "set-property", "Wwaiter", "--key", key, "--value", "x",
+            org_dir=org_dir)
+        assert rc == 1
+        assert "reserved" in stderr
+        assert _prop_under(f, "Wwaiter", key) is None
