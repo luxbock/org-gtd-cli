@@ -230,9 +230,12 @@ property: it fires only when **all** listed blocker ids are now
 closed; while any remains open the task stays WAITING, untouched. A
 firing flip wakes the task per §4.6's conditional wake and is
 reported as an `unblocked` side effect naming the woken task and its
-new state. A `TRIGGER` id that no longer resolves is dropped silently
-at close time (defensive — it covers on-disk states created outside
-the CLI, which the §4.12 delete guard cannot police).
+new state. A `TRIGGER` id that no longer resolves is **ignored** at
+close time: the close proceeds and the entry is left on the blocker
+exactly as found. It is *not* removed, and nothing else reaps it, so
+dead back-links persist on disk indefinitely. This is deliberate
+tolerance for on-disk states created outside the CLI — which the §4.12
+delete guard cannot police — and not a cleanup mechanism.
 
 *Divergences:
 strip-on-close not yet implemented — #41; the closure guard pierces

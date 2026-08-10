@@ -3539,7 +3539,7 @@ message strings in printing order."
   "Return a marker on the first heading whose org `:ID:' is ID, or nil.
 The non-fatal counterpart of `org-gtd-cli/find-task-by-id' (which exits
 1 on a miss): blocker/trigger resolution must be able to *not* find an
-id — §4.4 drops unresolvable `TRIGGER' ids silently and §4.6 skips
+id — §4.4 ignores unresolvable `TRIGGER' ids and §4.6 skips
 unresolvable `BLOCKER' ids.  A marker, not a position, because callers
 hold the location across edits that shift it."
   (when (and id (stringp id) (not (string-empty-p id)))
@@ -3733,8 +3733,9 @@ blocker is closed; while any remains open the waiting task is left
 completely untouched — no state change, no property edit, no side
 effect.  A firing flip wakes the task per §4.6's conditional wake, runs
 the §4.6 exit cleanup, and is reported as an `unblocked' side effect.  A
-`TRIGGER' id that no longer resolves is dropped silently (§4.4's
-close-time defensive cover).
+`TRIGGER' id that no longer resolves is ignored and left on the blocker
+as found — §4.4's close-time tolerance for externally-created on-disk
+state.  It is not removed here or anywhere else.
 
 The §4.5 promotion rule is never invoked from here (I9).
 
