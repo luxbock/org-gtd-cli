@@ -212,6 +212,30 @@ def test_cli_conforms_to_current_mode_model(cli, model_and_ops):
                 f"{op}{args}{kwargs}: side_effects diverged\n"
                 f"  cli:   {envelope_side_effects(envelope)}\n"
                 f"  model: {model_side_effects(result)}")
+        assert_response_integrity(op, args, kwargs, envelope, rc, disk)
+
+
+def assert_response_integrity(op, args, kwargs, envelope, rc, disk):
+    """#46 A19: a reported ``new_state`` must be the keyword on disk.
+
+    The CLI-level counterpart of the tier-1 property (A18): the #46
+    symptom was a ``set-state DONE`` envelope claiming
+    ``"new_state": "DONE"`` while the blocked heading stayed TODO. A
+    rejected transition must also never come back as rc 0.
+    """
+    reported = (envelope or {}).get("new_state")
+    if reported is None:
+        return
+    assert rc == 0, (
+        f"{op}{args}{kwargs}: rejected (rc={rc}) yet reported "
+        f"new_state={reported!r}")
+    heading = (envelope or {}).get("heading")
+    on_disk = {h: kw for _, h, kw, _ in disk}
+    assert heading in on_disk, (
+        f"{op}{args}{kwargs}: reported heading {heading!r} not on disk")
+    assert on_disk[heading] == reported, (
+        f"{op}{args}{kwargs}: envelope says new_state={reported!r} but "
+        f"{heading!r} is {on_disk[heading]!r} on disk")
 
 
 # ---------------------------------------------------------------------------
@@ -307,8 +331,9 @@ def test_s7row7_priority_rules(cli):
     assert rc != 0
 
 
-@pytest.mark.xfail(reason="§7 row 8 (#46): set-state NEXT admits "
-                          "subproject headings", strict=True)
+# §7 row 8 retired 2026-08-10 (#46): the set-state legality guards, the
+# blocked-close rejection and set-next's non-project candidate rule all
+# landed, so these four witnesses now pin agreeing behavior.
 def test_s7row8_next_guard_rejects_subproject_heading(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("sub", "TODO", children=[Node("aa", "TODO")]),
@@ -317,6 +342,49 @@ def test_s7row8_next_guard_rejects_subproject_heading(cli):
         cli, model, "set_state", ("sub", "NEXT"), {})
     assert result.ok is False
     assert rc != 0
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row8_waiting_guard_rejects_project_heading(cli):
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "TODO"), Node("bb", "TODO"),
+    ])], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "set_state", ("proj", "WAITING"), {"reason": "because"})
+    assert result.ok is False
+    assert rc != 0
+    # I12: nothing written.
+    assert cli.read_skeleton() == model.skeleton()
+    assert envelope_side_effects(envelope) == []
+
+
+def test_s7row8_blocked_close_via_set_state_is_rejected(cli):
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
+                  Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "set_state", ("proj", "DONE"), {})
+    # Normative: a blocked close is an error, never a false success.
+    assert result.ok is False
+    assert rc != 0
+    assert cli.read_skeleton() == model.skeleton()
+    # The original symptom: the envelope must not claim a new_state the
+    # file never reached.
+    assert (envelope or {}).get("new_state") is None
+    assert envelope_side_effects(envelope) == []
+
+
+def test_s7row8_set_next_skips_subproject_first_child(cli):
+    model = Model([Node("proj", "TODO", children=[
+        Node("sub", "TODO", children=[Node("ss", "TODO")]),
+        Node("bb", "TODO"),
+    ])], Divergences.normative())
+    envelope, rc, result = run_normative(cli, model, "set_next", ("proj",), {})
+    assert rc == 0 and result.ok
+    # The non-project child later in the group is promoted, not "sub".
+    assert model_side_effects(result) == [
+        ("state-change", "bb", "TODO", "NEXT")]
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
 
 
 # §7 row 9 retired 2026-08-07 (#47, after the #37 interim subset): move
