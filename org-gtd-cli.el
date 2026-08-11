@@ -5000,9 +5000,93 @@ Returns a list of matches, each of the form (BUFFER POS FILE HEADING-PATH)."
                              matches)))))))))))
     (nreverse matches)))
 
+(defun org-gtd-cli/find-destination-matches (target src-buf src-start src-end)
+  "Find every `refile --to' destination matching TARGET (SEMANTICS.md §4.0).
+TARGET is matched case-insensitively and EXACTLY against headings of any
+kind — category headings included — across all agenda files; a `/' splits
+it into a path whose ancestor segments must match exactly too.  Headings
+inside the source subtree (SRC-BUF from SRC-START to SRC-END) are
+self-nesting and never candidates; they are counted separately so a
+target that exists but only inside the mover can say so.
+
+Returns (MATCHES . SELF-MATCH-COUNT), MATCHES being a list of
+(BUFFER POS FILE HEADING-PATH STATE HEADING) in document order.  The
+whole forest is scanned rather than stopped at the first hit: §4.0 makes
+destination addressing unique-or-error, so the caller needs the full
+candidate list to report (I12)."
+  (let ((target-parts (split-string target "/" t))
+        (matches '())
+        (self-match-count 0))
+    (dolist (file (org-agenda-files))
+      (when (file-exists-p file)
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (goto-char (point-min))
+           (while (re-search-forward org-heading-regexp nil t)
+             (let* ((in-source (and (eq (current-buffer) src-buf)
+                                    (>= (point) src-start)
+                                    (< (point) src-end)))
+                    (heading (org-get-heading t t t t))
+                    (leaf-match
+                     (let ((dh (downcase heading))
+                           (dt (downcase (car (last target-parts)))))
+                       (or (string= dt dh)
+                           (string= dt (downcase (org-gtd-cli/strip-markup heading))))))
+                    (path-match
+                     (and leaf-match
+                          (let ((ok t))
+                            (save-excursion
+                              (dolist (part (reverse (butlast target-parts)))
+                                (unless (and (org-up-heading-safe)
+                                             (let ((h (org-get-heading t t t t)))
+                                               (or (string= (downcase part) (downcase h))
+                                                   (string= (downcase part)
+                                                            (downcase (org-gtd-cli/strip-markup h))))))
+                                  (setq ok nil))))
+                            ok))))
+               (when path-match
+                 (if in-source
+                     (cl-incf self-match-count)
+                   (push (list (current-buffer) (line-beginning-position) file
+                               (org-gtd-cli/heading-path-at-point)
+                               (org-get-todo-state) heading)
+                         matches)))))))))
+    (cons (nreverse matches) self-match-count)))
+
+(defun org-gtd-cli/reject-ambiguous-destination (target matches)
+  "Reject an ambiguous `refile --to' TARGET, naming its MATCHES (§4.0).
+I12 applies to destinations exactly as to targets: nothing is mutated and
+the candidates are reported so the caller can disambiguate with a path."
+  (if org-gtd-cli/json-mode
+      ;; JSON: match list on stdout, mirroring `find-task's ambiguity
+      ;; envelope (see `org-gtd-cli/error').
+      (let ((match-list '())
+            (i 1))
+        (dolist (m matches)
+          (push `((index . ,i) (heading . ,(nth 5 m))
+                  (state . ,(or (nth 4 m) :null))
+                  (file . ,(org-gtd-cli/relative-filename (nth 2 m)))
+                  (path . ,(nth 3 m)))
+                match-list)
+          (cl-incf i))
+        (org-gtd-cli/output
+         `((error . ,(format "Multiple destination matches for \"%s\"" target))
+           (matches . ,(apply #'vector (nreverse match-list)))
+           (hint . "Use a more specific path (e.g. --to \"Parent/Child\")."))))
+    (org-gtd-cli/error "Multiple destination matches for \"%s\":" target)
+    (let ((i 1))
+      (dolist (m matches)
+        (org-gtd-cli/error "[%d] %s (%s)"
+                           i (nth 3 m)
+                           (org-gtd-cli/relative-filename (nth 2 m)))
+        (cl-incf i)))
+    (org-gtd-cli/error "Use a more specific path (e.g. --to \"Parent/Child\")."))
+  (kill-emacs 2))
+
 (defun org-gtd-cli/refile (substring target category &optional index dry-run)
   "Move a task to a different heading.
-TARGET (--to) uses exact match on any heading across all agenda files.
+TARGET (--to) uses exact match on any heading across all agenda files,
+unique-or-error (§4.0).
 CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
@@ -5022,52 +5106,21 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
           (target-buf nil)
           (target-file nil))
       (if use-exact
-          ;; --to: exact match on heading text (case-insensitive), any heading type
-          (let ((target-parts (split-string target "/" t))
-                (self-match-count 0))
-            (dolist (file (org-agenda-files))
-              (when (and (file-exists-p file) (not target-pos))
-                (with-current-buffer (find-file-noselect file)
-                  (org-with-wide-buffer
-                   (goto-char (point-min))
-                   (while (and (not target-pos)
-                               (re-search-forward org-heading-regexp nil t))
-                     (let ((in-source (and (eq (current-buffer) src-buf)
-                                           (>= (point) src-start)
-                                           (< (point) src-end)))
-                           (heading (org-get-heading t t t t)))
-                       (if (= (length target-parts) 1)
-                           ;; Single segment: exact case-insensitive (with markup stripping)
-                           (when (let ((dh (downcase heading))
-                                       (dt (downcase (car target-parts))))
-                                   (or (string= dt dh)
-                                       (string= dt (downcase (org-gtd-cli/strip-markup heading)))))
-                             (if in-source
-                                 (cl-incf self-match-count)
-                               (setq target-pos (point)
-                                     target-buf (current-buffer)
-                                     target-file file)))
-                         ;; Multi-segment: exact match on last, exact on each ancestor
-                         (when (let ((dh (downcase heading))
-                                     (dt (downcase (car (last target-parts)))))
-                                 (or (string= dt dh)
-                                     (string= dt (downcase (org-gtd-cli/strip-markup heading)))))
-                           (let ((path-match t)
-                                 (parts (butlast target-parts)))
-                             (save-excursion
-                               (dolist (part (reverse parts))
-                                 (unless (and (org-up-heading-safe)
-                                              (let ((h (org-get-heading t t t t)))
-                                                (or (string= (downcase part) (downcase h))
-                                                    (string= (downcase part)
-                                                             (downcase (org-gtd-cli/strip-markup h))))))
-                                   (setq path-match nil))))
-                             (when path-match
-                               (if in-source
-                                   (cl-incf self-match-count)
-                                 (setq target-pos (point)
-                                       target-buf (current-buffer)
-                                       target-file file))))))))))))
+          ;; --to: exact match on heading text (case-insensitive), any
+          ;; heading type, unique-or-error (§4.0 destination addressing).
+          (let* ((found (org-gtd-cli/find-destination-matches
+                         target src-buf src-start src-end))
+                 (matches (car found))
+                 (self-match-count (cdr found)))
+            ;; I12 on the destination: an ambiguous `--to' mutates nothing
+            ;; and reports its candidates.
+            (when (> (length matches) 1)
+              (org-gtd-cli/reject-ambiguous-destination target matches))
+            (when matches
+              (let ((m (car matches)))
+                (setq target-buf (nth 0 m)
+                      target-pos (nth 1 m)
+                      target-file (nth 2 m))))
             ;; Error handling for --to
             (unless target-pos
               (let ((msg (if (> self-match-count 0)
@@ -5136,30 +5189,39 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                                          (goto-char target-pos)
                                          (point-marker))))
                       (rfloc (list (org-get-heading t t t t)
-                                   target-file nil target-marker)))
+                                   target-file nil target-marker))
+                      (effects nil))
                  (org-refile nil nil rfloc)
                  ;; Restore GTD invariants at the destination: demote a moved
                  ;; NEXT that becomes freestanding or a duplicate NEXT sibling,
                  ;; demote a NEXT parent that has just become a project, then
                  ;; reorder destination siblings by state.
-                 (org-gtd-cli/refile-repair-invariants
-                  target-buf (marker-position target-marker) heading)
-                 (set-marker target-marker nil))
-               ;; Save destination BEFORE source: if a conflict aborts between
-               ;; the two saves, the subtree is left duplicated on disk
-               ;; (recoverable) instead of deleted from both files — the source
-               ;; save is the one that removes it, so it must land last.
-               (with-current-buffer target-buf (save-buffer))
-               (save-buffer)
-               (if org-gtd-cli/json-mode
-                   (org-gtd-cli/mutation-output
-                    `((version . 1) (command . "refile")
-                      (heading . ,heading) (file . ,rel-file)
-                      (target_heading . ,target-heading)
-                      (target_file . ,rel-target))
-                    nil)
-                 (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
-                                heading rel-target target-name rel-file)))))))))
+                 (setq effects (org-gtd-cli/refile-repair-invariants
+                                target-buf (marker-position target-marker) heading))
+                 (set-marker target-marker nil)
+                 ;; Save destination BEFORE source: if a conflict aborts between
+                 ;; the two saves, the subtree is left duplicated on disk
+                 ;; (recoverable) instead of deleted from both files — the source
+                 ;; save is the one that removes it, so it must land last.
+                 (with-current-buffer target-buf (save-buffer))
+                 (save-buffer)
+                 (if org-gtd-cli/json-mode
+                     (org-gtd-cli/mutation-output
+                      `((version . 1) (command . "refile")
+                        (heading . ,heading) (file . ,rel-file)
+                        (target_heading . ,target-heading)
+                        (target_file . ,rel-target)
+                        ;; §4.0: every repair refile performed, in the
+                        ;; vocabulary the primitive commands use.  Zone
+                        ;; placement and reorder are never side effects.
+                        (side_effects . ,(apply #'vector effects)))
+                      nil)
+                   (princ (format "Refiled: \"%s\" -> %s/%s (%s)\n"
+                                  heading rel-target target-name rel-file))
+                   ;; §4.0: text mode reports the repairs too — same wording
+                   ;; every other command uses for them.
+                   (dolist (e effects)
+                     (org-gtd-cli/princ-waiting-effect e))))))))))
     (kill-emacs 0)))
 
 (defun org-gtd-cli/refile-repair-invariants (target-buf target-pos moved-heading)
@@ -5172,10 +5234,12 @@ then runs both §4.0 repairs — the keyword-outgrown demotion of a NEXT or
 WAITING destination parent that has just gained its first task child, and the
 closure repair reopening a closed destination chain under an open arrival.
 
-Returns the repair side effects in report order.  `refile' does not put
-them on the wire yet — §7 row 12 (#57) owns that envelope change — so
-the value is currently informational; every other command already
-reports the same vocabulary for the same repairs (§4.0)."
+Returns the repair side effects in report order — the moved subtree's
+own demotion first, then the destination parent's, then the reopen
+cascade.  `refile' puts them on the wire verbatim: every command emits
+the same vocabulary for the same repair (§4.0).  Placement is not among
+them — the arrival rule and the reorders below are presentation, never
+side effects (§4.0/§4.1)."
   (with-current-buffer target-buf
     (org-with-wide-buffer
      (goto-char target-pos)
@@ -5217,7 +5281,10 @@ reports the same vocabulary for the same repairs (§4.0)."
                          (setq has-other-next t))))))
                (when (or freestanding has-other-next)
                  (let ((org-inhibit-logging nil))
-                   (org-todo "TODO")))))
+                   (org-todo "TODO"))
+                 ;; §4.0: the demotion is a machine-made state change, so
+                 ;; it is reported like every other one.
+                 (push (org-gtd-cli/to-todo-effect "NEXT") effects))))
            ;; §4.1 arrival rule: the moved subtree enters the destination
            ;; group at the end of its (post-demotion) zone.
            (org-gtd-cli/reorder-siblings-by-state)
@@ -5231,9 +5298,10 @@ reports the same vocabulary for the same repairs (§4.0)."
        ;; that group's remaining NEXT prefix, §4.1).
        (goto-char target-pos)
        (when (org-gtd-cli/has-todo-children-p)
-         (let ((parent-old-state (org-get-todo-state)))
-           (setq effects (org-gtd-cli/keyword-outgrown-repair))
-           (when effects
+         (let ((parent-old-state (org-get-todo-state))
+               (parent-effects (org-gtd-cli/keyword-outgrown-repair)))
+           (when parent-effects
+             (setq effects (append effects parent-effects))
              (org-gtd-cli/reorder-siblings-by-state parent-old-state))))
        ;; §4.0 closure repair: an open arrival under a closed destination
        ;; chain makes those records live again (I4).  Walked from the

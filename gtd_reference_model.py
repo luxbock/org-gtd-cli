@@ -147,6 +147,11 @@ class Divergences:
     # to NEXT, a closed lone task stays rejected, I3), and a WAITING
     # parent gaining its first task child demotes with the §4.6 exit
     # cleanup plus ``project-needs-review``.
+    # §7 row 12 (#57, retired 2026-08-11): no flag ever existed — the
+    # row is gone because ``refile --to`` is now unique-or-error (I12 on
+    # the destination) and refile reports every repair it performs as a
+    # side effect, in the primitive commands' vocabulary. Zone placement
+    # and reorder remain outside ``side_effects``.
 
     @classmethod
     def normative(cls):
@@ -944,9 +949,11 @@ class Model:
         if node is None:
             return Result(False, error)
         if to is not None:
-            # §4.8 --to: exact heading match (case-insensitive), any
-            # heading type, first match in document order; matches
-            # inside the source subtree are skipped (self-nesting
+            # §4.0/§4.8 --to: exact heading match (case-insensitive),
+            # any heading type, unique-or-error — I12 applies to
+            # destinations exactly as to targets, so duplicates are
+            # reported instead of silently resolved by document order.
+            # Matches inside the source subtree are skipped (self-nesting
             # excluded).
             subtree = {id(n) for n in self._descendants(node)}
             subtree.add(id(node))
@@ -955,6 +962,9 @@ class Model:
                        and id(n) not in subtree]
             if not targets:
                 return Result(False, f"No valid refile target: {to}")
+            if len(targets) > 1:
+                return Result(
+                    False, f"Multiple destination matches for {to}")
             target = targets[0]
         else:
             target, error = self.find_category(category)

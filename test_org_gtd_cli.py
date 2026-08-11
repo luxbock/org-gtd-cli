@@ -1924,8 +1924,28 @@ class TestRefileSelfMatch:
 # ===========================================================================
 
 class TestRefileToExact:
-    def test_exact_match_finds_first(self, org_dir):
+    def test_duplicate_destination_is_rejected(self, org_dir):
+        # §4.0: I12 applies to destinations exactly as to targets — the
+        # fixture has two "Tools" headings, so the exact match is
+        # ambiguous, nothing moves, and the candidates are named.
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in stderr
+        assert "Computers/Tools" in stderr
+        assert "Research/Tools" in stderr
+        assert "Buy groceries" in (org_dir / "inbox.org").read_text()
+
+    def test_duplicate_destination_json_lists_candidates(self, org_dir):
+        envelope, stderr, rc = run_cli_json(
+            "refile", "Buy groceries", "--to", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in envelope["error"]
+        assert [m["path"] for m in envelope["matches"]] == [
+            "Computers/Tools", "Research/Tools"]
+        assert "Buy groceries" in (org_dir / "inbox.org").read_text()
+
+    def test_exact_match_resolves_a_unique_destination(self, org_dir):
+        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Shopping", org_dir=org_dir)
         assert rc == 0
         assert "Buy groceries" not in (org_dir / "inbox.org").read_text()
         assert "Refiled" in stdout
@@ -1947,14 +1967,29 @@ class TestRefileToExact:
         assert "Refiled" in stdout
 
     def test_case_insensitive(self, org_dir):
-        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "tools", org_dir=org_dir)
+        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "shopping", org_dir=org_dir)
         assert rc == 0
         assert "Refiled" in stdout
+
+    def test_case_insensitive_duplicates_are_ambiguous_too(self, org_dir):
+        # Matching is case-insensitive on both sides of the uniqueness
+        # test, so a lowercase target still sees both "Tools".
+        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "tools", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in stderr
 
     def test_dry_run(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Shopping", "--dry-run", org_dir=org_dir)
         assert rc == 0
         assert "Would refile" in stdout
+        assert "Buy groceries" in (org_dir / "inbox.org").read_text()
+
+    def test_dry_run_predicts_the_ambiguity_failure(self, org_dir):
+        # §4.0: a dry run predicts the real outcome, failure included.
+        stdout, stderr, rc = run_cli(
+            "refile", "Buy groceries", "--to", "Tools", "--dry-run", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in stderr
         assert "Buy groceries" in (org_dir / "inbox.org").read_text()
 
     def test_intermediate_path_typo_fails(self, org_dir):
@@ -13343,17 +13378,20 @@ class TestClosureRepair:
         assert 'Would reopen: "Rproject" DONE -> TODO' in stdout, stdout
 
     def test_refile_into_a_closed_destination_reopens_it(self, org_dir):
-        # refile does not yet *report* its repairs (§7 row 12), so the
-        # evidence is the file.
         f = _write_repair_org(org_dir, """\
 * DONE Rdest
 ** DONE Rdest child
 * TODO Rsource
 ** TODO Rmover
 """)
-        stdout, stderr, rc = run_cli(
+        data, stderr, rc = run_cli_json(
             "refile", "Rmover", "--to", "Rdest child", org_dir=org_dir)
         assert rc == 0, stderr
+        # §4.0: refile reports the cascade, nearest ancestor first.
+        assert _states(data) == [
+            ("Rdest child", "DONE", "TODO"),
+            ("Rdest", "DONE", "TODO"),
+        ]
         text = f.read_text()
         assert "TODO Rdest child" in text, text
         assert "TODO Rdest" in text, text
@@ -13506,8 +13544,8 @@ class TestKeywordOutgrownRepair:
         assert "project-needs-review" not in stdout, stdout
 
     def test_refile_onto_a_waiting_parent_demotes_it(self, org_dir):
-        # The repair runs whatever caused the growth; refile does not yet
-        # report it (§7 row 12), so the file is the evidence.
+        # The repair runs whatever caused the growth, and refile reports
+        # it in the same vocabulary the primitive commands use (§4.0).
         f = _write_repair_org(org_dir, """\
 * TODO Rproject
 ** TODO Rblocker
@@ -13519,9 +13557,16 @@ class TestKeywordOutgrownRepair:
             "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
             "--reason", "vendor", org_dir=org_dir)
         assert rc == 0, stderr
-        stdout, stderr, rc = run_cli(
+        data, stderr, rc = run_cli_json(
             "refile", "Rmover", "--to", "Rwaiter", org_dir=org_dir)
         assert rc == 0, stderr
+        assert sorted((e["action"], e["heading"])
+                      for e in data["side_effects"]) == [
+            ("blocker-link-removed", "Rblocker"),
+            ("project-needs-review", "Rwaiter"),
+            ("state-change", "Rwaiter"),
+        ]
+        assert _states(data) == [("Rwaiter", "WAITING", "TODO")]
         text = f.read_text()
         assert "** TODO Rwaiter" in text, text
         assert "WAITING Rwaiter" not in text, text
@@ -13537,9 +13582,73 @@ class TestKeywordOutgrownRepair:
 * TODO Rsource
 ** TODO Rmover
 """)
-        stdout, stderr, rc = run_cli(
+        data, stderr, rc = run_cli_json(
             "refile", "Rmover", "--to", "Rleaf", org_dir=org_dir)
         assert rc == 0, stderr
+        assert _states(data) == [("Rleaf", "NEXT", "TODO")]
         text = f.read_text()
         assert "** TODO Rleaf" in text, text
         assert "NEXT Rleaf" not in text, text
+
+    def test_refile_reports_the_moved_next_demotion(self, org_dir):
+        # I6 at the destination: the arriving NEXT duplicates a sibling,
+        # and the demotion is a machine-made state change like any other.
+        f = _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rdest", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rmover", "NEXT", "TODO")]
+        assert "** TODO Rmover" in f.read_text()
+
+    def test_refile_reports_the_freestanding_next_demotion(self, org_dir):
+        # I3: a NEXT that lands outside any task ancestry demotes.
+        f = _write_repair_org(org_dir, """\
+* Rcategory
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rcategory", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rmover", "NEXT", "TODO")]
+        assert "** TODO Rmover" in f.read_text()
+
+    def test_refile_text_mode_reports_the_repairs(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+* TODO Rsource
+** TODO Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rleaf", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Refiled" in stdout, stdout
+        assert 'Demoted: "Rleaf" NEXT -> TODO' in stdout, stdout
+
+    def test_refile_placement_is_never_a_side_effect(self, org_dir):
+        # BOUNDARY: the arrival reorder is the outcome, not a repair.
+        f = _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+** TODO Ralpha
+** DONE Rclosed
+* TODO Rsource
+** TODO Rmover
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rdest", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["side_effects"] == []
+        # The move itself happened; only the placement it triggered is
+        # left unreported.
+        assert_line_before(f, "TODO Rmover", "TODO Rsource")

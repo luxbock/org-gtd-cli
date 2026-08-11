@@ -18,9 +18,9 @@ Comparison surface notes:
 - ``warnings`` is never compared: per the 2026-07-28 warnings-channel
   ruling the model predicts ``side_effects`` exactly and ignores
   ``warnings``.
-- ``refile`` side_effects are not compared: today's refile envelope
-  reports none even when it demotes (PARKED 2026-07-31 as a candidate
-  §7 row — §4.0 requires reporting).
+- ``refile`` side_effects ARE compared (since #57, §7 row 12): refile
+  reports every repair it performs in the same vocabulary the primitive
+  commands use (§4.0).
 """
 
 import json
@@ -208,7 +208,7 @@ def test_cli_conforms_to_current_mode_model(cli, model_and_ops):
         assert disk == model.skeleton(), (
             f"{op}{args}{kwargs}: file skeleton diverged\n"
             f"  cli:   {disk}\n  model: {model.skeleton()}")
-        if result.ok and op != "refile":
+        if result.ok:
             assert envelope_side_effects(envelope) == \
                 model_side_effects(result), (
                 f"{op}{args}{kwargs}: side_effects diverged\n"
@@ -530,15 +530,18 @@ def test_s7row10_set_state_reopening_cascades(cli):
 
 
 def test_s7row10_refile_into_a_closed_destination_cascades(cli):
-    # refile's own side_effects are still unreported (row 12 → #57), so
-    # the skeleton carries the witness.
     model = Model([
         Node("dest", "DONE", children=[Node("host", "DONE")]),
         Node("src", "TODO", children=[Node("mover", "TODO")]),
     ], Divergences.normative())
-    _, rc, result = run_normative(
+    envelope, rc, result = run_normative(
         cli, model, "refile", ("mover",), {"to": "host"})
     assert rc == 0 and result.ok
+    # Since #57 (row 12) refile reports the cascade it performs.
+    assert model_side_effects(result) == sorted([
+        ("state-change", "host", "DONE", "TODO"),
+        ("state-change", "dest", "DONE", "TODO")])
+    assert envelope_side_effects(envelope) == model_side_effects(result)
     assert cli.read_skeleton() == model.skeleton()
 
 
@@ -592,6 +595,84 @@ def test_s7row11_next_parent_demotes(cli):
     assert rc == 0 and result.ok
     assert model_side_effects(result) == [
         ("state-change", "aa", "NEXT", "TODO")]
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
+# §7 row 12 retired 2026-08-11 (#57): `refile --to' is unique-or-error
+# (I12 applies to destinations exactly as to targets) and refile reports
+# every repair it performs in the primitive commands' own vocabulary.
+# Zone placement and reorder stay out of `side_effects' — they are the
+# outcome, not a repair.
+def test_s7row12_duplicate_destination_is_rejected(cli):
+    model = Model([
+        Node("home", "TODO", children=[Node("Plumbing", None)]),
+        Node("work", "TODO", children=[Node("Plumbing", None)]),
+        Node("src", "TODO", children=[
+            Node("mover", "TODO"), Node("stay", "TODO")]),
+    ], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "refile", ("mover",), {"to": "Plumbing"})
+    assert result.ok is False
+    assert rc == 2
+    # I12: nothing is mutated on the error path...
+    assert cli.read_skeleton() == model.skeleton()
+    # ...and the candidates are named so a path can disambiguate.
+    assert sorted(m["path"] for m in envelope["matches"]) == [
+        "home/Plumbing", "work/Plumbing"]
+
+
+def test_s7row12_unique_category_destination_still_resolves(cli):
+    # Any heading type is a legal destination, and the arrival placement
+    # it triggers is never a side effect.
+    model = Model([
+        Node("home", "TODO", children=[
+            Node("Plumbing", None, children=[Node("tap", "TODO")]),
+            Node("aa", "TODO")]),
+        Node("src", "TODO", children=[
+            Node("mover", "TODO"), Node("stay", "TODO")]),
+    ], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "refile", ("mover",), {"to": "Plumbing"})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == []
+    assert envelope_side_effects(envelope) == []
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row12_moved_next_demotion_is_reported(cli):
+    model = Model([
+        Node("dst", "TODO", children=[Node("keep", "NEXT")]),
+        Node("src", "TODO", children=[
+            Node("movern", "NEXT"), Node("stay", "TODO")]),
+    ], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "refile", ("movern",), {"to": "dst"})
+    assert rc == 0 and result.ok
+    # I6 at the destination: the arriving NEXT duplicates a sibling.
+    assert model_side_effects(result) == [
+        ("state-change", "movern", "NEXT", "TODO")]
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row12_waiting_destination_unwinds_and_reports(cli):
+    model = Model([
+        Node("proj", "TODO", children=[
+            Node("blk", "TODO", triggers=("wait",)),
+            Node("wait", "WAITING", waiting_reason="vendor",
+                 blockers=("blk",))]),
+        Node("src", "TODO", children=[
+            Node("mover", "TODO"), Node("stay", "TODO")]),
+    ], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "refile", ("mover",), {"to": "wait"})
+    assert rc == 0 and result.ok
+    # The demoted WAITING parent takes the §4.6 exit cleanup with it.
+    assert model_side_effects(result) == sorted([
+        ("state-change", "wait", "WAITING", "TODO"),
+        ("blocker-link-removed", "blk", None, None),
+        ("project-needs-review", "wait", None, None)])
     assert envelope_side_effects(envelope) == model_side_effects(result)
     assert cli.read_skeleton() == model.skeleton()
 

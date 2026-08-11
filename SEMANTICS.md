@@ -350,8 +350,7 @@ demoted (§4.0 keyword-outgrown repair, the WAITING case emitting
 `project-needs-review`); an open subtree arriving under a closed
 destination chain runs the §4.0 closure repair. Every repair is
 reported as a side effect — refile uses the same vocabulary as the
-primitive commands. *Divergence: `--to` resolves first-hit and the
-repairs are unreported — row 12.*
+primitive commands.
 
 ### 4.9 move
 
@@ -609,6 +608,6 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 9 | *Retired 2026-08-07: `move` guards the full §4.9 zone invariant — completed block, NEXT prefix, and DEFER block — rejecting any reordering that would put the moved entry on the wrong side of a boundary (#37 interim, #47 full).* | — | — |
 | 10 | *Retired 2026-08-11: the §4.0 closure repair runs — an open task placed or revealed in the task descent of a closed ancestor reopens that whole chain (`add-subtask`, `set-state` reopening, `refile`), each reopened ancestor a `state-change` side effect, and `set-next` accepts a closed project-child leaf, reopening it straight to NEXT (a closed lone task stays rejected, I3) (#56).* | — | — |
 | 11 | *Retired 2026-08-11: the §4.0 keyword-outgrown repair runs — a NEXT or WAITING leaf gaining its first direct task child demotes to TODO, the WAITING case through the §4.6 exit cleanup and additionally emitting `project-needs-review` (#56).* | — | — |
-| 12 | `refile --to` resolves by first match in document order (silent on duplicates); refile reports none of its repairs as side effects | §4.0, §4.8 | #57 |
+| 12 | *Retired 2026-08-11: `refile --to` is unique-or-error — I12 applies to destinations exactly as to targets, so duplicate exact matches are rejected with their candidates named and nothing mutated — and refile reports every repair it performs (moved-NEXT demotion, keyword-outgrown demotion with its `project-needs-review` and unwound blocker links, reopened ancestors) as a side effect in the primitive commands' vocabulary; zone placement and reorder are never side effects (#57).* | — | — |
 | 13 | *Retired 2026-08-11: task traversal severs at category headings — the closure guard (I4), the activity/stuckness predicates and project detection all stop at the first keyword-less heading, and closing or archiving over open severed tasks emits the `open-severed-tasks` warning (#58).* | — | — |
 | 14 | *Retired 2026-08-07: the level-1 guard is gone — a uniform top-level group places like an implicit category bucket, per the 2026-08-02 ruling (#34).* | — | — |
