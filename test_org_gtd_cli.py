@@ -11275,6 +11275,256 @@ class TestReadIdentity:
 
 
 # ===========================================================================
+# §2 severing + the open-severed-tasks warning (issue #58, §7 row 13)
+# ===========================================================================
+#
+# SEMANTICS.md §2: a task's parent task is its immediate parent heading iff
+# that heading is a task; a category heading (no TODO keyword) severs the
+# chain. Task descendants are the transitive closure of *direct* task
+# children, so a task whose only children are category headings is a LEAF.
+# Consequences pinned here: the I4 closure guard no longer blocks on severed
+# work, the promotion rule treats such a task as promotable, and every close
+# (and `archive`) *observes* the open severed tasks it leaves behind through
+# the §4.4/§4.11 `open-severed-tasks` warning.
+
+
+class TestSeveringAndOpenSeveredTasksWarning:
+
+    # "Renovate the bathroom" is a leaf under §2: its only child is the
+    # category heading "Plumbing".
+    SEVERED = (
+        "#+TITLE: Tasks\n\n"
+        "* TODO Home\n"
+        "** TODO Renovate the bathroom\n"
+        "*** Plumbing\n"
+        "**** TODO Call plumber\n"
+        "**** DONE Measure\n"
+    )
+    # Same shape plus an open sibling, for the promotion repro.
+    SEVERED_WITH_SIBLING = (
+        "#+TITLE: Tasks\n\n"
+        "* TODO Home\n"
+        "** TODO Fix the porch light\n"
+        "** TODO Renovate the bathroom\n"
+        "*** Plumbing\n"
+        "**** TODO Call plumber\n"
+    )
+    # Nothing open below the category heading: the clean path.
+    SEVERED_ALL_CLOSED = (
+        "#+TITLE: Tasks\n\n"
+        "* TODO Home\n"
+        "** TODO Renovate the bathroom\n"
+        "*** Plumbing\n"
+        "**** DONE Call plumber\n"
+    )
+
+    @pytest.fixture
+    def severed(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED)
+        return org_dir
+
+    @pytest.fixture
+    def sibling(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED_WITH_SIBLING)
+        return org_dir
+
+    @pytest.fixture
+    def all_closed(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED_ALL_CLOSED)
+        return org_dir
+
+    EXPECTED = {
+        "type": "open-severed-tasks",
+        "file": "tasks.org",
+        "heading": "Renovate the bathroom",
+        "count": 1,
+        "tasks": ["Call plumber"],
+    }
+
+    # --- I4: severed work does not block the close ------------------------
+
+    @pytest.mark.parametrize("command,keyword", [
+        ("set-done", "DONE"), ("set-cancelled", "CANCELLED")])
+    def test_close_over_severed_open_task_succeeds(
+            self, severed, command, keyword):
+        """The confirmed repro: `Call plumber` is open but severed by
+        `Plumbing`, so it is no task descendant of `Renovate the bathroom'
+        and the I4 guard lets the close through."""
+        data, stderr, rc = run_cli_json(
+            command, "Renovate the bathroom", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["new_state"] == keyword
+        text = (severed / "tasks.org").read_text()
+        assert f"** {keyword} Renovate the bathroom" in text
+        # The severed work is untouched, exactly as the warning claims.
+        assert "**** TODO Call plumber" in text
+
+    def test_set_state_close_over_severed_open_task_succeeds(self, severed):
+        data, stderr, rc = run_cli_json(
+            "set-state", "Renovate the bathroom", "DONE", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["new_state"] == "DONE"
+
+    def test_unsevered_open_child_still_blocks(self, org_dir):
+        """The guard is *narrowed*, not removed: a direct open task child
+        still blocks, so I4 keeps its teeth."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* TODO Home\n"
+            "** TODO Renovate the bathroom\n"
+            "*** TODO Call plumber\n")
+        data, _, rc = run_cli_json(
+            "set-done", "Renovate the bathroom", org_dir=org_dir)
+        assert rc == 1
+        assert "incomplete subtask" in data["error"]
+
+    # --- §4.4 warning -----------------------------------------------------
+
+    @pytest.mark.parametrize("command", ["set-done", "set-cancelled"])
+    def test_close_json_carries_the_warning(self, severed, command):
+        data, stderr, rc = run_cli_json(
+            command, "Renovate the bathroom", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+
+    def test_set_state_close_json_carries_the_warning(self, severed):
+        data, stderr, rc = run_cli_json(
+            "set-state", "Renovate the bathroom", "DONE", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+
+    @pytest.mark.parametrize("command", ["set-done", "set-cancelled"])
+    def test_dry_run_previews_the_same_warning(self, severed, command):
+        """The preview observes exactly what the real call will: the
+        warning is computed before any mutation."""
+        preview, _, prc = run_cli_json(
+            command, "Renovate the bathroom", "--dry-run", org_dir=severed)
+        assert prc == 0
+        assert preview["warnings"] == [self.EXPECTED]
+        # ... and the dry run changed nothing.
+        assert (severed / "tasks.org").read_text() == self.SEVERED
+
+    def test_text_mode_mirrors_the_warning_on_stderr(self, severed):
+        stdout, stderr, rc = run_cli(
+            "set-done", "Renovate the bathroom", org_dir=severed)
+        assert rc == 0
+        assert "Done: Renovate the bathroom" in stdout
+        assert "Warning:" in stderr
+        assert '1 open task(s) below "Renovate the bathroom"' in stderr
+        assert '"Call plumber"' in stderr
+        # stdout stays clean — warnings are a stderr channel in text mode.
+        assert "Warning:" not in stdout
+
+    def test_closed_severed_tasks_are_not_warned_about(self, all_closed):
+        """Only *open* severed work is reported; a finished task below a
+        category heading leaves the envelope byte-identical."""
+        data, stderr, rc = run_cli_json(
+            "set-done", "Renovate the bathroom", org_dir=all_closed)
+        assert rc == 0, stderr
+        assert "warnings" not in data
+
+    def test_no_severed_work_no_warnings_key(self, org_dir):
+        data, stderr, rc = run_cli_json(
+            "set-done", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "warnings" not in data
+
+    # --- §4.11 archive ----------------------------------------------------
+
+    # Archivable shape: closed long ago (pinned "now" below), and not
+    # inside an active project — "Home" carries no keyword here.
+    SEVERED_ARCHIVABLE = (
+        "#+TITLE: Tasks\n\n"
+        "* Home\n"
+        "** DONE Renovate the bathroom\n"
+        "CLOSED: [2026-01-05 Mon 10:00]\n"
+        "*** Plumbing\n"
+        "**** TODO Call plumber\n"
+    )
+    ARCHIVE_NOW = {"ORG_GTD_CLI_NOW": "2026-06-01"}
+
+    @pytest.fixture
+    def archivable(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED_ARCHIVABLE)
+        return org_dir
+
+    def _archive(self, org_dir, *extra):
+        stdout, stderr, rc = run_cli(
+            "--json", "archive", "Renovate the bathroom", *extra,
+            org_dir=org_dir, env_overrides=self.ARCHIVE_NOW)
+        return json.loads(stdout), stderr, rc
+
+    def test_archive_observes_open_severed_tasks(self, archivable):
+        """§4.11: severed work never blocks the archive, but the archive
+        observes it with the same entry — nothing is silently relocated."""
+        data, stderr, rc = self._archive(archivable)
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+        assert "Call plumber" in \
+            (archivable / "tasks.org_archive").read_text()
+
+    def test_archive_dry_run_previews_the_warning(self, archivable):
+        before = (archivable / "tasks.org").read_text()
+        data, stderr, rc = self._archive(archivable, "--dry-run")
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+        assert (archivable / "tasks.org").read_text() == before
+
+    # --- §2 structure: a severed-only task is a LEAF ----------------------
+
+    def test_promotion_treats_severed_only_task_as_a_leaf(self, sibling):
+        """The second confirmed repro: closing `Fix the porch light`
+        promotes `Renovate the bathroom`, which is a leaf under §2 —
+        its only task lives below a category heading."""
+        data, stderr, rc = run_cli_json(
+            "set-done", "Fix the porch light", org_dir=sibling)
+        assert rc == 0, stderr
+        assert data["side_effects"] == [{
+            "action": "state-change",
+            "heading": "Renovate the bathroom",
+            "old_state": "TODO",
+            "new_state": "NEXT",
+            "file": "tasks.org",
+        }]
+        assert "** NEXT Renovate the bathroom" in \
+            (sibling / "tasks.org").read_text()
+
+    def test_all_done_but_open_subproject_ignores_severed_work(self, org_dir):
+        """§4.5 step 3 reads the subproject's *direct* task children, and
+        under §2 that is the whole of its task content at that level: the
+        open `Book electrician` is severed by `Electrics`, so the
+        subproject genuinely is all-done-but-open and gets its review."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* TODO Home\n"
+            "** TODO Water the plants\n"
+            "** TODO Renovate the kitchen\n"
+            "*** DONE Order cabinets\n"
+            "*** Electrics\n"
+            "**** TODO Book electrician\n")
+        data, stderr, rc = run_cli_json(
+            "set-done", "Water the plants", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert {
+            "action": "project-needs-review",
+            "heading": "Renovate the kitchen",
+            "file": "tasks.org",
+        } in data["side_effects"]
+        # The severed task is untouched — nothing was promoted inside it.
+        assert "**** TODO Book electrician" in \
+            (org_dir / "tasks.org").read_text()
+
+    def test_set_next_accepts_a_severed_only_task(self, severed):
+        """§4.7 rejects NEXT on a project heading; a task whose only
+        children are category headings is not a project."""
+        _, stderr, rc = run_cli_json(
+            "set-next", "Renovate the bathroom", org_dir=severed)
+        assert rc == 0, stderr
+        assert "** NEXT Renovate the bathroom" in \
+            (severed / "tasks.org").read_text()
+
+
+# ===========================================================================
 # sync-conflict warning (issue #35): the universal `warnings` envelope field
 # ===========================================================================
 #

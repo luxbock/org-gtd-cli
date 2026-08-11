@@ -2348,6 +2348,41 @@ relative to `org-directory'; otherwise nil.  Never modifies the buffer."
                  (heading . ,heading)
                  (count . ,count))))))))
 
+(defun org-gtd-cli/open-severed-task-warning (rel-file heading)
+  "Return the `open-severed-tasks' warnings list for the entry at point.
+SEMANTICS.md §2 severs a task's descent at its category headings, so
+open tasks below them neither block the entry's closure (§4.4) nor its
+archiving (§4.11).  They are still work someone left open under this
+heading, so both commands OBSERVE them: an environmental fact about the
+surrounding tree, never an effect of the mutation — the tasks are left
+exactly as found.  Point must be on the entry's heading, before the
+subtree moves (archive).  When one or more open severed tasks exist,
+returns a single-entry list
+  (((type . \"open-severed-tasks\") (file . REL) (heading . HEADING)
+    (count . N) (tasks . [TEXT...])))
+listing them in document order; otherwise nil, so a clean close keeps
+the pre-#58 envelope byte-for-byte.  Never modifies the buffer."
+  (let ((tasks '()))
+    (gtd/map-subtree-task-headings
+     (lambda (severed)
+       (when (and severed
+                  (not (member (org-get-todo-state) org-done-keywords)))
+         (push (org-get-heading t t t t) tasks))))
+    (setq tasks (nreverse tasks))
+    (when tasks
+      (list `((type . "open-severed-tasks")
+              (file . ,rel-file)
+              (heading . ,heading)
+              (count . ,(length tasks))
+              (tasks . ,(apply #'vector tasks)))))))
+
+(defun org-gtd-cli/warnings-alist (warnings)
+  "Return the `warnings' envelope fragment for WARNINGS, or nil when empty.
+Appended to a command's response alist, so an envelope with nothing to
+warn about is unchanged (README: the array is absent when empty)."
+  (when warnings
+    `((warnings . ,(org-gtd-cli/warnings-vector warnings)))))
+
 (defun org-gtd-cli/warnings-vector (warnings)
   "Return WARNINGS (a list of warning alists) as a JSON vector."
   (apply #'vector warnings))
@@ -2357,15 +2392,25 @@ relative to `org-directory'; otherwise nil.  Never modifies the buffer."
 In batch Emacs `message' writes to stderr; stdout output is untouched.
 The message text dispatches on each entry's `type'."
   (dolist (w warnings)
-    (if (equal (alist-get 'type w) "duplicate-heading")
-        (message "Warning: %d headings share the heading \"%s\" in %s"
-                 (alist-get 'count w)
-                 (alist-get 'heading w)
-                 (alist-get 'file w))
+    (cond
+     ((equal (alist-get 'type w) "duplicate-heading")
+      (message "Warning: %d headings share the heading \"%s\" in %s"
+               (alist-get 'count w)
+               (alist-get 'heading w)
+               (alist-get 'file w)))
+     ((equal (alist-get 'type w) "open-severed-tasks")
+      (message "Warning: %d open task(s) below \"%s\"'s category headings in %s were left untouched (%s)"
+               (alist-get 'count w)
+               (alist-get 'heading w)
+               (alist-get 'file w)
+               (mapconcat (lambda (h) (format "\"%s\"" h))
+                          (append (alist-get 'tasks w) nil)
+                          ", ")))
+     (t
       (message "Warning: %d id-less headings share the heading \"%s\" in %s (add an :ID:/:entry-id: or dedupe)"
                (alist-get 'count w)
                (alist-get 'heading w)
-               (alist-get 'file w)))))
+               (alist-get 'file w))))))
 
 ;; --- outline ---
 
@@ -3310,11 +3355,13 @@ always reflects the buffer's current contents."
 
 (defun org-gtd-cli/subproject-all-done-p ()
   "Non-nil if the subproject at point has task children, all of them closed.
-Direct children only: SEMANTICS.md §4.5 does not pin whether tasks
-below the subproject's *own* category headings count (§2 severing —
-PARKED, awaiting a ruling), and `gtd_reference_model' reads direct
-children here too.  The two must agree, so neither side widens the
-scope unilaterally."
+Direct children only, and under SEMANTICS.md §2 severing that is the
+whole of the subproject's task content: an open task below one of its
+own category headings is severed, so it is no task descendant of the
+subproject at all and does not keep it open.  A subproject whose only
+tasks live below such a heading is not a project (`gtd/is-project-p' is
+nil) and never reaches this predicate.  `gtd_reference_model' reads the
+same direct children."
   (save-excursion
     (let ((any nil) (all t))
       (when (org-goto-first-child)
@@ -4008,11 +4055,16 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (old-state (org-get-todo-state)))
+              (old-state (org-get-todo-state))
+              ;; §4.4: read the open severed tasks BEFORE the close — the
+              ;; close never touches them, and the preview must observe
+              ;; exactly what the real call will.
+              (severed (org-gtd-cli/open-severed-task-warning
+                        rel-file heading)))
          (if is-dry-run
              ;; Dry-run can't call `org-todo', so detect a blocked transition
-             ;; up front with `org-entry-blocked-p' (same predicate
-             ;; `org-enforce-todo-dependencies' uses).  A blocked parent must
+             ;; up front with `org-entry-blocked-p' (same predicate the
+             ;; `org-blocker-hook' guard uses).  A blocked parent must
              ;; NOT preview success.
              (if (org-entry-blocked-p)
                  (org-gtd-cli/reject-blocked-close heading "DONE" t)
@@ -4033,8 +4085,10 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
                                          (org-gtd-cli/auto-progress-preview rel-file)
                                          rel-file)
                                         (org-gtd-cli/close-waiting-preview old-state))))))
-                     (org-gtd-cli/output result))
+                     (org-gtd-cli/output
+                      (append result (org-gtd-cli/warnings-alist severed))))
                  (princ (format "Would mark done: %s (%s)\n" heading rel-file))
+                 (org-gtd-cli/print-warnings-text severed)
                  (dolist (msg (org-gtd-cli/auto-progress-preview rel-file))
                    (princ msg))
                  (dolist (msg (car (org-gtd-cli/auto-unblock t)))
@@ -4046,8 +4100,8 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
            ;; Real path
            (let ((org-inhibit-logging nil))
              (org-todo "DONE"))
-           ;; `org-todo' on an entry blocked by `org-enforce-todo-dependencies'
-           ;; (e.g. a project with incomplete children) does NOT signal a
+           ;; `org-todo' on an entry the `org-blocker-hook' guard rejects
+           ;; (a project with incomplete task children) does NOT signal a
            ;; catchable error — it emits a "blocked" notice via `message' and
            ;; leaves the state unchanged.  Verify the transition actually took
            ;; before reporting success, otherwise we would falsely claim DONE,
@@ -4060,17 +4114,20 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
                     (link-effects (cdr post)))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
-                    `((version . 1)
-                      (command . "set-done")
-                      (heading . ,heading)
-                      (file . ,rel-file)
-                      (old_state . ,old-state)
-                      (new_state . "DONE")
-                      (side_effects
-                       . ,(vconcat (org-gtd-cli/parse-side-effects auto-msgs)
-                                   link-effects)))
+                    (append
+                     `((version . 1)
+                       (command . "set-done")
+                       (heading . ,heading)
+                       (file . ,rel-file)
+                       (old_state . ,old-state)
+                       (new_state . "DONE")
+                       (side_effects
+                        . ,(vconcat (org-gtd-cli/parse-side-effects auto-msgs)
+                                    link-effects)))
+                     (org-gtd-cli/warnings-alist severed))
                     heading)
                  (princ (format "Done: %s (%s)\n" heading rel-file))
+                 (org-gtd-cli/print-warnings-text severed)
                  (dolist (msg auto-msgs)
                    (princ msg))
                  ;; `auto-msgs' already carries the `unblocked' lines; only
@@ -4091,26 +4148,32 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (old-state (org-get-todo-state)))
+              (old-state (org-get-todo-state))
+              ;; §4.4, as in `set-done': observed before the close.
+              (severed (org-gtd-cli/open-severed-task-warning
+                        rel-file heading)))
          (if is-dry-run
              (if (org-entry-blocked-p)
                  (org-gtd-cli/reject-blocked-close heading "CANCELLED" t)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/output
-                    `((version . 1)
-                      (command . "set-cancelled")
-                      (heading . ,heading)
-                      (file . ,rel-file)
-                      (old_state . ,old-state)
-                      (new_state . "CANCELLED")
-                      (dry_run . t)
-                      (side_effects
-                       . ,(vconcat
-                           (org-gtd-cli/parse-side-effects-preview
-                            (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
-                            rel-file)
-                           (org-gtd-cli/close-waiting-preview old-state)))))
+                    (append
+                     `((version . 1)
+                       (command . "set-cancelled")
+                       (heading . ,heading)
+                       (file . ,rel-file)
+                       (old_state . ,old-state)
+                       (new_state . "CANCELLED")
+                       (dry_run . t)
+                       (side_effects
+                        . ,(vconcat
+                            (org-gtd-cli/parse-side-effects-preview
+                             (org-gtd-cli/auto-progress-preview rel-file "CANCELLED")
+                             rel-file)
+                            (org-gtd-cli/close-waiting-preview old-state))))
+                     (org-gtd-cli/warnings-alist severed)))
                  (princ (format "Would cancel: %s (%s)\n" heading rel-file))
+                 (org-gtd-cli/print-warnings-text severed)
                  (dolist (msg (org-gtd-cli/auto-progress-preview rel-file "CANCELLED"))
                    (princ msg))
                  (dolist (msg (car (org-gtd-cli/auto-unblock t)))
@@ -4130,17 +4193,20 @@ exit unwind when it is leaving WAITING.  Mutates nothing."
                     (link-effects (cdr post)))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output
-                    `((version . 1)
-                      (command . "set-cancelled")
-                      (heading . ,heading)
-                      (file . ,rel-file)
-                      (old_state . ,old-state)
-                      (new_state . "CANCELLED")
-                      (side_effects
-                       . ,(vconcat (org-gtd-cli/parse-side-effects auto-msgs)
-                                   link-effects)))
+                    (append
+                     `((version . 1)
+                       (command . "set-cancelled")
+                       (heading . ,heading)
+                       (file . ,rel-file)
+                       (old_state . ,old-state)
+                       (new_state . "CANCELLED")
+                       (side_effects
+                        . ,(vconcat (org-gtd-cli/parse-side-effects auto-msgs)
+                                    link-effects)))
+                     (org-gtd-cli/warnings-alist severed))
                     heading)
                  (princ (format "Cancelled: %s (%s)\n" heading rel-file))
+                 (org-gtd-cli/print-warnings-text severed)
                  (dolist (msg auto-msgs)
                    (princ msg))
                  ;; `auto-msgs' already carries the `unblocked' lines; only
@@ -4570,7 +4636,14 @@ behaviour, multi-line tolerance included."
               ;; which would leave the raw resolved position stale.
               (target-marker (copy-marker (cdr buf-pos)))
               (blocker-markers nil)
-              (link-effects '()))
+              (link-effects '())
+              ;; §4.4 close parity: a `set-state' into a closed state
+              ;; observes the open severed tasks exactly as
+              ;; `set-done'/`set-cancelled' do.  Read here, before any
+              ;; mutation, so the preview and the real call agree.
+              (severed (when (member new-state org-done-keywords)
+                         (org-gtd-cli/open-severed-task-warning
+                          rel-file heading))))
          ;; §3 legality guards.  All of them run before the dry-run branch,
          ;; so a previewed invalid op fails exactly like the real one (§4.0).
          ;;
@@ -4591,8 +4664,8 @@ behaviour, multi-line tolerance included."
                   heading reason blocked-by blocked-by-id)))
          ;; I4: a close is blocked while any task descendant is open.  The
          ;; dry run cannot call `org-todo', so it uses `org-entry-blocked-p'
-         ;; — the same predicate `org-enforce-todo-dependencies' consults,
-         ;; and the same one `set-done'/`set-cancelled' preview with.
+         ;; — the same predicate the `org-blocker-hook' guard consults, and
+         ;; the same one `set-done'/`set-cancelled' preview with.
          (when (and is-dry-run
                     (member new-state org-done-keywords)
                     (org-entry-blocked-p))
@@ -4612,16 +4685,19 @@ behaviour, multi-line tolerance included."
                        (cdr (org-gtd-cli/auto-unblock t))))))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/output
-                    `((version . 1)
-                      (command . "set-state")
-                      (heading . ,heading)
-                      (file . ,rel-file)
-                      (old_state . ,(or old-state :null))
-                      (new_state . ,new-state)
-                      (dry_run . t)
-                      (side_effects . ,(apply #'vector preview))))
+                    (append
+                     `((version . 1)
+                       (command . "set-state")
+                       (heading . ,heading)
+                       (file . ,rel-file)
+                       (old_state . ,(or old-state :null))
+                       (new_state . ,new-state)
+                       (dry_run . t)
+                       (side_effects . ,(apply #'vector preview)))
+                     (org-gtd-cli/warnings-alist severed)))
                  (princ (format "Would change: \"%s\" %s -> %s (%s)\n"
                                 heading old-state new-state rel-file))
+                 (org-gtd-cli/print-warnings-text severed)
                  ;; `preview' mixes both vocabularies — the wake's
                  ;; `unblocked' followed by the `blocker-link-removed'
                  ;; entries its cleanup emits — so format by `action'.
@@ -4631,8 +4707,8 @@ behaviour, multi-line tolerance included."
                    (org-gtd-cli/princ-waiting-effect e t))))
            (let ((org-inhibit-logging nil))
              (org-todo new-state))
-           ;; Response integrity: `org-todo' on an entry blocked by
-           ;; `org-enforce-todo-dependencies' does NOT signal — it emits a
+           ;; Response integrity: `org-todo' on an entry the
+           ;; `org-blocker-hook' guard rejects does NOT signal — it emits a
            ;; notice and leaves the keyword alone.  Verify the transition
            ;; actually took before reporting it, or the envelope would
            ;; claim a `new_state' the file never reached.
@@ -4680,16 +4756,19 @@ behaviour, multi-line tolerance included."
              (set-marker target-marker nil)
              (if org-gtd-cli/json-mode
                  (org-gtd-cli/mutation-output
-                  `((version . 1)
-                    (command . "set-state")
-                    (heading . ,heading)
-                    (file . ,rel-file)
-                    (old_state . ,(or old-state :null))
-                    (new_state . ,new-state)
-                    (side_effects . ,(apply #'vector link-effects)))
+                  (append
+                   `((version . 1)
+                     (command . "set-state")
+                     (heading . ,heading)
+                     (file . ,rel-file)
+                     (old_state . ,(or old-state :null))
+                     (new_state . ,new-state)
+                     (side_effects . ,(apply #'vector link-effects)))
+                   (org-gtd-cli/warnings-alist severed))
                   heading)
                (princ (format "State change: \"%s\" %s -> %s (%s)\n"
                               heading old-state new-state rel-file))
+               (org-gtd-cli/print-warnings-text severed)
                ;; No message list is printed on this path (I9 keeps the
                ;; promotion rule, and with it `auto-msgs', out of
                ;; `set-state'), so both vocabularies come from the
@@ -4989,14 +5068,19 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
               (existing-next nil)
               (link-effects nil)
               (first-todo-pos nil))
-         ;; Scan direct children
+         ;; Scan direct children.  §2 severing: only a direct *task*
+         ;; child makes this heading a project — a category heading below
+         ;; it severs, so what hangs off one is no descendant of this
+         ;; entry and cannot make it a subproject either.  HAS-CHILDREN
+         ;; is therefore `is_project' in scan form, matching
+         ;; `gtd/is-project-p' and the reference model's `is_project'.
          (save-excursion
            (forward-line 1)
            (while (and (< (point) subtree-end)
                        (re-search-forward org-heading-regexp subtree-end t))
              (when (= (org-current-level) child-level)
-               (setq has-children t)
                (let ((child-state (org-get-todo-state)))
+                 (when child-state (setq has-children t))
                  (when (and child-state (string= child-state "NEXT") (not existing-next))
                    (setq existing-next (org-get-heading t t t t)))
                  ;; §4.7: the project path's candidate is the first TODO
@@ -5990,7 +6074,13 @@ per-property validation belongs in the calling command."
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (state (org-get-todo-state)))
+              (state (org-get-todo-state))
+              ;; §4.11: open severed tasks never block the archive, but the
+              ;; archive observes them with §4.4's entry — read before
+              ;; `org-archive-subtree' relocates the subtree out from under
+              ;; point, so the preview and the real call see the same thing.
+              (severed (org-gtd-cli/open-severed-task-warning
+                        rel-file heading)))
          ;; Rule 1: must be done
          (unless (member state org-done-keywords)
            (org-gtd-cli/error "Not archivable: \"%s\" is still active (%s) (%s)"
@@ -6023,9 +6113,12 @@ per-property validation belongs in the calling command."
              (progn
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/output
-                    `((version . 1) (command . "archive")
-                      (heading . ,heading) (file . ,rel-file) (dry_run . t)))
-                 (princ (format "Would archive: \"%s\" (%s)\n" heading rel-file)))
+                    (append
+                     `((version . 1) (command . "archive")
+                       (heading . ,heading) (file . ,rel-file) (dry_run . t))
+                     (org-gtd-cli/warnings-alist severed)))
+                 (princ (format "Would archive: \"%s\" (%s)\n" heading rel-file))
+                 (org-gtd-cli/print-warnings-text severed))
                (kill-emacs 0))
            ;; Archive
            (org-archive-subtree)
@@ -6036,9 +6129,12 @@ per-property validation belongs in the calling command."
                (with-current-buffer buf (save-buffer))))
            (if org-gtd-cli/json-mode
                (org-gtd-cli/output
-                `((version . 1) (command . "archive")
-                  (heading . ,heading) (file . ,rel-file)))
-             (princ (format "Archived: \"%s\" (%s)\n" heading rel-file))))))))
+                (append
+                 `((version . 1) (command . "archive")
+                   (heading . ,heading) (file . ,rel-file))
+                 (org-gtd-cli/warnings-alist severed)))
+             (princ (format "Archived: \"%s\" (%s)\n" heading rel-file))
+             (org-gtd-cli/print-warnings-text severed)))))))
   (kill-emacs 0))
 
 ;; --- archive-all (batch) ---
@@ -6090,7 +6186,13 @@ per-property validation belongs in the calling command."
                                   heading rel-file))
               ;; All rules pass
               (t
-               (push (list buf pos heading rel-file) archivable)))))))
+               ;; §4.11: read the open severed tasks here, while every
+               ;; candidate still sits where it was found — the archiving
+               ;; pass relocates subtrees and would invalidate the walk.
+               (push (list buf pos heading rel-file
+                           (org-gtd-cli/open-severed-task-warning
+                            rel-file heading))
+                     archivable)))))))
       (setq archivable (nreverse archivable))
       (if (null archivable)
           (progn
@@ -6109,9 +6211,11 @@ per-property validation belongs in the calling command."
           (setq archivable '())
           (maphash (lambda (_buf items) (setq archivable (append items archivable)))
                    by-buffer))
-        (let ((archived-items '()))
+        (let ((archived-items '())
+              (warnings '()))
           (dolist (item archivable)
-            (cl-destructuring-bind (buf pos heading rel-file) item
+            (cl-destructuring-bind (buf pos heading rel-file severed) item
+              (setq warnings (append warnings severed))
               (if is-dry-run
                   (progn
                     (push (list heading rel-file) archived-items)
@@ -6134,13 +6238,16 @@ per-property validation belongs in the calling command."
                 (dolist (a (nreverse archived-items))
                   (push `((heading . ,(nth 0 a)) (file . ,(nth 1 a))) items))
                 (org-gtd-cli/output
-                 `((version . 1) (command . "archive")
-                   (archived . ,(apply #'vector (nreverse items)))
-                   (skipped . ,skipped) (count . ,archived)
-                   ,@(when is-dry-run '((dry_run . t))))))
+                 (append
+                  `((version . 1) (command . "archive")
+                    (archived . ,(apply #'vector (nreverse items)))
+                    (skipped . ,skipped) (count . ,archived)
+                    ,@(when is-dry-run '((dry_run . t))))
+                  (org-gtd-cli/warnings-alist warnings))))
             (princ (format "%s %d tasks, %d skipped\n"
                            (if is-dry-run "Would archive" "Archived")
-                           archived skipped)))))))
+                           archived skipped))
+            (org-gtd-cli/print-warnings-text warnings))))))
   (kill-emacs 0))
 
 ;; --- delete ---

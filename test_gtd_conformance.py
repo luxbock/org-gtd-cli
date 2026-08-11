@@ -485,6 +485,44 @@ def test_s7row9_defer_block_guard(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
+# §7 row 13 retired 2026-08-11 (#58): task traversal severs at category
+# headings per §2 — the closure guard, the activity/stuckness predicates
+# and project detection all stop at the first keyword-less heading. Both
+# witnesses pin the agreeing behavior on the shapes row 13 recorded as
+# divergent. (`warnings` is not compared here — the §4.4 severed-task
+# warning is exercised in test_org_gtd_cli.py; the model predicts
+# `side_effects` only.)
+def test_s7row13_close_over_severed_open_task_succeeds(cli):
+    # "Call plumber" is open but sits below the category heading
+    # "Plumbing", so it is no task descendant of "reno" and does not
+    # block the close (I4).
+    model = Model([Node("home", "TODO", children=[
+        Node("reno", "TODO", children=[
+            Node("Plumbing", None, children=[
+                Node("plumber", "TODO"), Node("measure", "DONE")])])])],
+        Divergences.normative())
+    _, rc, result = run_normative(cli, model, "set_done", ("reno",), {})
+    assert rc == 0 and result.ok
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row13_severed_only_task_is_a_leaf_and_promotes(cli):
+    # "reno"'s only task lives below a category heading, so under §2
+    # severing "reno" is a LEAF, not a project — the promotion rule
+    # picks it up when its sibling closes.
+    model = Model([Node("home", "TODO", children=[
+        Node("porch", "TODO"),
+        Node("reno", "TODO", children=[
+            Node("Plumbing", None, children=[Node("plumber", "TODO")])])])],
+        Divergences.normative())
+    envelope, rc, result = run_normative(cli, model, "set_done", ("porch",), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == [
+        ("state-change", "reno", "TODO", "NEXT")]
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
 # §7 row 14 retired 2026-08-07 (#34): the level-1 guard is gone — a
 # uniform top-level group places like an implicit category bucket
 # (ruling 2026-08-02). This witness now pins the agreeing behavior.
