@@ -12549,7 +12549,12 @@ class TestWaitingConditionalWake:
         assert self._wake_state(org_dir, f) == "TODO"
 
     def test_wakes_as_todo_when_it_has_task_children(self, org_dir):
-        # Criterion 14b: a task that grew children wakes as TODO.
+        # Criterion 14b: a task with children wakes as TODO.  The child is
+        # appended by hand, the way Emacs would: since §4.0 a WAITING leaf
+        # that gains its first task child is demoted on the spot, so
+        # `add-subtask' can no longer leave a WAITING parent asleep (and
+        # the #46 guard refuses to put WAITING on a heading that already
+        # has children).
         f = _write_waiting_org(org_dir, """\
 * TODO Wother project
 ** TODO Wblocker
@@ -12557,8 +12562,7 @@ class TestWaitingConditionalWake:
 ** TODO Wwaiter
 """)
         _link(org_dir)
-        rc = run_cli("add-subtask", "Wwaiter", "Wgrown", org_dir=org_dir)[2]
-        assert rc == 0
+        f.write_text(f.read_text().rstrip("\n") + "\n*** TODO Wgrown\n")
         assert self._wake_state(org_dir, f) == "TODO"
 
     def test_wakes_as_todo_when_an_open_sibling_precedes(self, org_dir):
@@ -13202,3 +13206,340 @@ class TestWaitingReservedProperties:
         assert rc == 1
         assert "reserved" in stderr
         assert _prop_under(f, "Wwaiter", key) is None
+
+
+# ---------------------------------------------------------------------------
+# §4.0 structural repairs (#56)
+# ---------------------------------------------------------------------------
+
+def _write_repair_org(org_dir, content, name="repair.org"):
+    (org_dir / name).write_text(content)
+    return org_dir / name
+
+
+def _states(data):
+    """The `state-change' side effects of DATA as (heading, old, new)."""
+    return [(e["heading"], e["old_state"], e["new_state"])
+            for e in data["side_effects"] if e["action"] == "state-change"]
+
+
+class TestClosureRepair:
+    """§4.0: an open task revealed under a closed chain reopens it."""
+
+    def test_add_subtask_reopens_the_whole_chain_nearest_first(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** CANCELLED Rmiddle
+*** DONE Rleaf
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [
+            ("Rleaf", "DONE", "TODO"),
+            ("Rmiddle", "CANCELLED", "TODO"),
+            ("Rproject", "DONE", "TODO"),
+        ]
+        text = f.read_text()
+        for heading in ("Rproject", "Rmiddle", "Rleaf", "Rchild"):
+            assert f"TODO {heading}" in text, text
+
+    def test_add_subtask_text_mode_reports_each_reopen(self, org_dir):
+        _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rleaf
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Reopened: "Rleaf" DONE -> TODO' in stdout, stdout
+        assert 'Reopened: "Rproject" DONE -> TODO' in stdout, stdout
+        # Machine vocabulary never leaks into text mode.
+        assert "state-change" not in stdout, stdout
+
+    def test_a_closed_child_does_not_reopen_its_ancestors(self, org_dir):
+        # The trigger is an *open* arrival; a closed one leaves the record
+        # closed.
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rleaf
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rchild", "--state", "DONE",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == []
+        assert "DONE Rproject" in f.read_text()
+
+    def test_a_category_heading_severs_the_cascade(self, org_dir):
+        # §2: the walk stops at the first non-task ancestor, so an arrival
+        # under a category reopens nothing above it.  `refile' is the only
+        # way in — `add-subtask' addresses tasks, not category headings.
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** Rbucket
+* TODO Rsource
+** TODO Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rbucket", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = f.read_text()
+        assert "DONE Rclosed" in text, text
+        assert "*** TODO Rmover" in text, text
+
+    def test_set_state_reopening_cascades(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rmiddle
+*** DONE Rtask
+""")
+        data, stderr, rc = run_cli_json(
+            "set-state", "Rtask", "TODO", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [
+            ("Rmiddle", "DONE", "TODO"),
+            ("Rproject", "DONE", "TODO"),
+        ]
+        assert "TODO Rmiddle" in f.read_text()
+
+    def test_set_state_into_a_closed_state_never_cascades(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** TODO Rtask
+""")
+        data, stderr, rc = run_cli_json(
+            "set-state", "Rtask", "DONE", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == []
+        assert "DONE Rproject" in f.read_text()
+
+    def test_set_state_dry_run_predicts_the_cascade_and_writes_nothing(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rmiddle
+*** DONE Rtask
+""")
+        before = f.read_bytes()
+        data, stderr, rc = run_cli_json(
+            "set-state", "Rtask", "TODO", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [
+            ("Rmiddle", "DONE", "TODO"),
+            ("Rproject", "DONE", "TODO"),
+        ]
+        assert f.read_bytes() == before
+
+    def test_set_state_dry_run_text_mode_uses_the_preview_wording(
+            self, org_dir):
+        _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rtask
+""")
+        stdout, stderr, rc = run_cli(
+            "set-state", "Rtask", "TODO", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Would reopen: "Rproject" DONE -> TODO' in stdout, stdout
+
+    def test_refile_into_a_closed_destination_reopens_it(self, org_dir):
+        # refile does not yet *report* its repairs (§7 row 12), so the
+        # evidence is the file.
+        f = _write_repair_org(org_dir, """\
+* DONE Rdest
+** DONE Rdest child
+* TODO Rsource
+** TODO Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rdest child", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = f.read_text()
+        assert "TODO Rdest child" in text, text
+        assert "TODO Rdest" in text, text
+        assert "DONE" not in text, text
+
+    def test_refile_of_a_closed_subtree_leaves_the_destination_closed(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rdest
+** DONE Rdest child
+* TODO Rsource
+** DONE Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rdest child", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = f.read_text()
+        assert "DONE Rdest child" in text, text
+        assert "DONE Rdest\n" in text, text
+
+    def test_set_next_on_a_closed_project_child_reopens_the_project(
+            self, org_dir):
+        # §4.7: the closed leaf is accepted and reopens straight to NEXT,
+        # and its closed ancestors cascade behind it.
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rleaf
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json("set-next", "Rleaf", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rproject", "DONE", "TODO")]
+        text = f.read_text()
+        assert "NEXT Rleaf" in text, text
+        assert "TODO Rproject" in text, text
+
+    def test_set_next_still_rejects_a_closed_lone_task(self, org_dir):
+        # I3 is enforced before the state check, so admitting closed leaves
+        # cannot admit a lone task.
+        f = _write_repair_org(org_dir, """\
+* DONE Rlone
+""")
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli("set-next", "Rlone", org_dir=org_dir)
+        assert rc == 1
+        assert f.read_bytes() == before
+
+
+class TestKeywordOutgrownRepair:
+    """§4.0: a leaf that grows a child loses a keyword it may no longer hold."""
+
+    def test_add_subtask_demotes_a_next_parent(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rleaf", "NEXT", "TODO")]
+        assert "TODO Rleaf" in f.read_text()
+
+    def test_add_subtask_text_mode_calls_it_a_demotion(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Demoted: "Rleaf" NEXT -> TODO' in stdout, stdout
+        assert "state-change" not in stdout, stdout
+
+    def test_a_second_child_leaves_the_todo_parent_alone(self, org_dir):
+        # The repair fires on the *first* child only — nothing to repair
+        # once the keyword is already legal.
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rleaf
+*** TODO Rfirst
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rsecond", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == []
+        assert "TODO Rleaf" in f.read_text()
+
+    def test_add_subtask_demotes_a_waiting_parent_and_unwinds_its_link(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            "--reason", "vendor", org_dir=org_dir)
+        assert rc == 0, stderr
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rwaiter", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rwaiter", "WAITING", "TODO")]
+        assert [e for e in data["side_effects"]
+                if e["action"] == "blocker-link-removed"
+                and e["heading"] == "Rblocker"], data["side_effects"]
+        assert [e for e in data["side_effects"]
+                if e["action"] == "project-needs-review"
+                and e["heading"] == "Rwaiter"], data["side_effects"]
+        # §4.6 exit cleanup ran in full; I10 keeps the record.
+        assert _prop_under(f, "Rwaiter", "REASON") is None
+        assert _prop_under(f, "Rwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Rblocker", "TRIGGER") is None
+        assert ":LOGBOOK:" in logbook_for_heading(f, "Rwaiter")
+        assert "TODO Rwaiter" in f.read_text()
+
+    def test_a_reason_only_waiting_parent_demotes_without_a_link_unwind(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rwaiter
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--reason", "vendor",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rwaiter", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert [e["action"] for e in data["side_effects"]] == [
+            "state-change", "project-needs-review"]
+        assert _prop_under(f, "Rwaiter", "REASON") is None
+
+    def test_waiting_demotion_text_mode_reports_the_whole_repair(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Rwaiter", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Demoted: "Rwaiter" WAITING -> TODO' in stdout, stdout
+        assert 'Removed blocker link: "Rblocker"' in stdout, stdout
+        assert "project-needs-review" not in stdout, stdout
+
+    def test_refile_onto_a_waiting_parent_demotes_it(self, org_dir):
+        # The repair runs whatever caused the growth; refile does not yet
+        # report it (§7 row 12), so the file is the evidence.
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            "--reason", "vendor", org_dir=org_dir)
+        assert rc == 0, stderr
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = f.read_text()
+        assert "** TODO Rwaiter" in text, text
+        assert "WAITING Rwaiter" not in text, text
+        assert _prop_under(f, "Rwaiter", "REASON") is None
+        assert _prop_under(f, "Rwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Rblocker", "TRIGGER") is None
+
+    def test_refile_onto_a_next_parent_demotes_it(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+* TODO Rsource
+** TODO Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rleaf", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = f.read_text()
+        assert "** TODO Rleaf" in text, text
+        assert "NEXT Rleaf" not in text, text
