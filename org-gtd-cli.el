@@ -4464,12 +4464,29 @@ no-op rather than a duplicate entry."
        (save-buffer)))
     blocker-id))
 
+(defun org-gtd-cli/state-note-quoted (state)
+  "Return STATE quoted the way Org's `state' log-note heading quotes it.
+STATE may be nil (a stateless heading), in which case the empty
+string is quoted.  Text properties are stripped: state strings read
+out of a buffer are propertized — by jit-lock fontification under the
+daemon, and by the `org-todo-head' property `org-todo' puts on the
+keyword even in batch — and printing such a string with `%S' emits
+elisp propertized-string read syntax (`#(\"TODO\" 0 4 (...))') instead
+of `\"TODO\"'.  Building the quotes by hand over a stripped string is
+what keeps the LOGBOOK readable by Org (issue #80)."
+  (format "\"%s\"" (substring-no-properties (or state ""))))
+
 (defun org-gtd-cli/state-note-entry (new-state old-state reason)
-  "Return an Org state-change note entry for NEW-STATE, OLD-STATE, and REASON."
+  "Return an Org state-change note entry for NEW-STATE, OLD-STATE, and REASON.
+The states are rendered by `org-gtd-cli/state-note-quoted', which also
+strips their text properties; the padding keeps Org's own column
+layout (the quoted state padded to 12 columns)."
   (let ((note (replace-regexp-in-string
                "\n" "\n  " (string-trim (or reason "")))))
-    (format "- State %-12S from %-12S %s \\\\\n  %s"
-            new-state (or old-state "") (format-time-string "[%Y-%m-%d %a %H:%M]")
+    (format "- State %-12s from %-12s %s \\\\\n  %s"
+            (org-gtd-cli/state-note-quoted new-state)
+            (org-gtd-cli/state-note-quoted old-state)
+            (format-time-string "[%Y-%m-%d %a %H:%M]")
             note)))
 
 (defun org-gtd-cli/add-state-reason-note (new-state old-state reason)
@@ -4490,8 +4507,12 @@ Otherwise create a standard state-change note in the LOGBOOK drawer."
           (when drawer-end
             (forward-line 1)
             (when (re-search-forward
-                   (format "^[ \t]*- State[ \t]+%S[ \t]+from[ \t]+%S[ \t]+\\[[^]\n]+\\]"
-                           new-state (or old-state ""))
+                   ;; Same quoting as `org-gtd-cli/state-note-entry' (and so
+                   ;; the same property strip), `regexp-quote'd because the
+                   ;; state text is data, not pattern.
+                   (format "^[ \t]*- State[ \t]+%s[ \t]+from[ \t]+%s[ \t]+\\[[^]\n]+\\]"
+                           (regexp-quote (org-gtd-cli/state-note-quoted new-state))
+                           (regexp-quote (org-gtd-cli/state-note-quoted old-state)))
                    drawer-end t)
               (end-of-line)
               (unless (save-excursion
@@ -4563,7 +4584,12 @@ behaviour, multi-line tolerance included."
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
        (let* ((heading (org-get-heading t t t t))
-              (old-state (org-get-todo-state))
+              ;; Strip at capture: the keyword carries text properties (see
+              ;; `org-gtd-cli/state-note-quoted'), and this value reaches the
+              ;; LOGBOOK note.  `org-get-todo-state' returns nil on a
+              ;; stateless heading, so guard the substring (issue #80).
+              (old-state (let ((s (org-get-todo-state)))
+                           (and s (substring-no-properties s))))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
               ;; The close post-conditions and the §4.6 exit cleanup both
               ;; edit other entries (possibly earlier in this very file),
