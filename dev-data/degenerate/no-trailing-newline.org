@@ -1,0 +1,6 @@
+* TODO Last entry with no trailing newline
+** WAITING Blocked child
+:PROPERTIES:
+:REASON:   waiting on the plumber
+:END:
+*** TODO Grandchild

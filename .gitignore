@@ -17,3 +17,7 @@ __pycache__/
 
 # Claude Code session state (agent worktrees, local settings)
 .claude/
+
+# Factory run scaffolding (orchestrator BRIEF, worker notes) — per-run,
+# cleared on VM teardown; never part of a commit.
+/.factory/

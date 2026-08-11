@@ -1,0 +1,10 @@
+* TODO Home
+** TODO Renovate the bathroom
+*** Plumbing
+**** TODO Call plumber
+**** DONE Measure
+** TODO Renovate the kitchen
+*** DONE Get quotes
+*** DONE Pick tiles
+*** Wiring
+**** TODO Book electrician

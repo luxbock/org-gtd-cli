@@ -1,0 +1,4 @@
+* TODO Task with an unterminated drawer
+:PROPERTIES:
+:ID:       11111111-2222-3333-4444-555555555555
+* TODO Task after the unterminated drawer
