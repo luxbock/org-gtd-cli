@@ -237,10 +237,7 @@ dead back-links persist on disk indefinitely. This is deliberate
 tolerance for on-disk states created outside the CLI — which the §4.12
 delete guard cannot police — and not a cleanup mechanism.
 
-*Divergences:
-strip-on-close not yet implemented — #41; the closure guard pierces
-category headings and the severed-task warning does not exist — row
-13.*
+*Divergence: strip-on-close not yet implemented — #41.*
 
 ### 4.5 The promotion rule
 
@@ -495,9 +492,7 @@ For any task `t` and project heading `p` (per §2):
 *Divergences: two view predicates still read legacy tags instead
 of states — the stuck screen treats a `:WAITING:`-tagged NEXT as
 blocking, and the deferred screen reads DEFER-ness from a tag rather
-than the project's own (or an ancestor's) DEFER state (#40); the
-predicates pierce category headings, counting severed tasks as
-descendants — row 13.*
+than the project's own (or an ancestor's) DEFER state (#40).*
 
 ### 5.3 agenda — the flat query
 
@@ -620,5 +615,5 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 10 | No closure repair: `add-subtask`, `set-state` (reopening), and `refile` place an open task below a closed heading with no reopen cascade; `set-next` rejects closed leaves outright | §4.0 (closure repair), §4.7 | #56 |
 | 11 | A WAITING leaf gaining its first task child keeps WAITING on what is now a subproject heading; no demotion, no `project-needs-review` | §4.0 (keyword-outgrown repair), §4.3, §4.8 | #56 |
 | 12 | `refile --to` resolves by first match in document order (silent on duplicates); refile reports none of its repairs as side effects | §4.0, §4.8 | #57 |
-| 13 | Task traversal pierces category headings: the closure guard (I4), activity/stuckness predicates, and project detection treat tasks below category headings as task descendants; closing or archiving over open severed tasks emits no warning | §2 (severing), §4.4, §4.11, §5.2 | #58 |
+| 13 | *Retired 2026-08-11: task traversal severs at category headings — the closure guard (I4), the activity/stuckness predicates and project detection all stop at the first keyword-less heading, and closing or archiving over open severed tasks emits the `open-severed-tasks` warning (#58).* | — | — |
 | 14 | *Retired 2026-08-07: the level-1 guard is gone — a uniform top-level group places like an implicit category bucket, per the 2026-08-02 ruling (#34).* | — | — |

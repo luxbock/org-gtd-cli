@@ -139,6 +139,7 @@ Current vocabulary:
 
 - `duplicate-idless-heading` (on `outline` / `agenda-view`) — see below.
 - `duplicate-heading` (on `add-task` / `add-subtask`) — see below.
+- `open-severed-tasks` (on the closing commands and `archive`) — see below.
 - `sync-conflict` (on **all** commands) — see below.
 
 #### `duplicate-idless-heading` — id-less duplicates on `outline` / `agenda-view`
@@ -211,6 +212,36 @@ envelope's `warnings` array gains one entry:
 - In **text mode** the entry is mirrored as one line on **stderr** —
   `Warning: N headings share the heading "..." in FILE` — while stdout keeps
   only the normal `Added: ...` confirmation.
+
+#### `open-severed-tasks` — open work below the entry's category headings (closes / `archive`)
+
+SEMANTICS.md §2 *severs* a task's descent at its category headings: a heading
+carrying no TODO keyword ends the chain, so tasks below it are not task
+descendants of anything above it. They therefore do not block closing the entry
+(§4.4) and do not block archiving it (§4.11) — but they are real, open work that
+the operation leaves behind or relocates, so the CLI **observes** them:
+
+```json
+{"type": "open-severed-tasks", "file": "tasks.org", "heading": "Renovate the bathroom", "count": 1, "tasks": ["Call plumber"]}
+```
+
+- **Emitted by `set-done`, `set-cancelled`, `set-state` into a closed state, and
+  `archive`** (single and `--all`), in both `--json` and text mode, and on the
+  `--dry-run` preview exactly as on the real call — the warning is computed
+  *before* any mutation, so preview and execution report the same facts.
+- **One entry per closed/archived entry**, listing that entry's open severed
+  tasks in document order; `count` is their number and `tasks` their bare
+  heading texts. `archive --all` composes one entry per archived record.
+- **Open only.** A DONE/CANCELLED task below a category heading is finished work
+  and is never listed; when nothing open is severed the entry is absent
+  entirely, so the clean-path envelope is byte-identical to before.
+- **Warn-only, and never a `side_effect`.** The severed tasks are pre-existing
+  state the command observed, not something it changed: the close never touches
+  them, and `archive` relocates them only as part of the subtree it was told to
+  move. The exit code is unchanged.
+- In **text mode** the entry is mirrored as one line on **stderr** —
+  `Warning: N open task(s) below "HEADING"'s category headings in FILE were left
+  untouched ("...", "...")`.
 
 #### `sync-conflict` — pending org-sync conflict (all commands)
 

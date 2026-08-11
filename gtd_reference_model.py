@@ -199,9 +199,26 @@ class Model:
         return node.keyword is not None
 
     def task_descendants(self, node):
-        return [n for n in self._descendants(node) if self.is_task(n)]
+        """§2 severing: the transitive closure of *direct task children*.
+
+        A category heading (no keyword) severs the chain, so nothing
+        below one is ever a task descendant of anything above it — the
+        walk simply does not descend into a category heading.
+        """
+        out = []
+        def walk(parent):
+            for child in parent.children:
+                if self.is_task(child):
+                    out.append(child)
+                    walk(child)
+        walk(node)
+        return out
 
     def _descendants(self, node):
+        """Every heading below NODE, severing ignored (raw outline shape).
+
+        Structural callers only — subtree containment, not task descent.
+        """
         out = []
         def walk(children):
             for child in children:
@@ -211,28 +228,34 @@ class Model:
         return out
 
     def is_project(self, node):
-        """§2: a task with at least one task among its descendants."""
+        """§2: a task with at least one direct task child."""
         return self.is_task(node) and bool(self.task_descendants(node))
 
     def task_ancestors(self, node):
+        """§2 severing: the chain of task parents, nearest first.
+
+        A task's parent task is its immediate parent heading iff that
+        heading is itself a task; the first category heading ends the
+        chain, wherever it sits.
+        """
         out = []
         current = self.parent_of(node)
-        while current is not None:
-            if self.is_task(current):
-                out.append(current)
+        while current is not None and self.is_task(current):
+            out.append(current)
             current = self.parent_of(current)
         return out
 
     def is_subproject(self, node):
-        """§2: a project that itself has a task ancestor."""
+        """§2: a project whose immediate parent heading is a task."""
         return self.is_project(node) and bool(self.task_ancestors(node))
 
     def is_leaf_task(self, node):
-        """§2: a task with no task descendants."""
+        """§2: a task with no direct task children (a task whose only
+        children are category headings is a leaf)."""
         return self.is_task(node) and not self.task_descendants(node)
 
     def is_project_child(self, node):
-        """§2: a task whose nearest ancestor task exists."""
+        """§2: a task whose immediate parent heading is a task."""
         return self.is_task(node) and bool(self.task_ancestors(node))
 
     def is_lone_task(self, node):
@@ -430,17 +453,16 @@ class Model:
             if self.active(candidate):
                 # Subproject with an active descendant → skip it.
                 continue
-            # PARKED (scope of "all-done-but-open"): direct children
-            # here vs descendants in active() above. With a category
-            # heading inside the subproject, an open TODO below it does
-            # not stop the emission — the subproject still reads as
-            # all-done-but-open and gets a review side effect; and a
-            # subproject whose only tasks live below such a heading has
-            # no direct task children at all, so it falls through to the
-            # drill and is passed silently. §4.5 does not pin the scope
-            # (§2 severing, ex-§7 row 13's territory); awaiting olli's
-            # ruling. `org-gtd-cli/subproject-all-done-p' matches this
-            # choice exactly — neither side widens it unilaterally.
+            # "All-done-but-open" reads the subproject's direct task
+            # children, and under §2 severing that is the whole of its
+            # task content at this level: an open TODO below one of its
+            # own category headings is severed, so it neither counts here
+            # nor in active() above — the subproject genuinely is
+            # all-done-but-open and the review is correct.  A subproject
+            # whose only tasks live below such a heading is not a project
+            # at all (is_project is false), so it never reaches this
+            # branch.  `org-gtd-cli/subproject-all-done-p' reads the same
+            # children.
             subproject_tasks = [c for c in candidate.children
                                 if self.is_task(c)]
             if subproject_tasks and all(c.keyword in CLOSED_STATES
