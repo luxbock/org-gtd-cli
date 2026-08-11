@@ -140,10 +140,13 @@ class Divergences:
     # §7 row 9 (#47, retired 2026-08-07): ``d9_completed_block_only`` is
     # gone — move now guards the full §4.9 zone invariant (completed
     # block, NEXT prefix, DEFER block), so current and normative agree.
-    # Observed divergence with no §7 row yet (PARKED for ruling
-    # 2026-07-31): set-next on a *closed* leaf is rejected by the CLI,
-    # while §4.7 ("same guard as set-state NEXT") implies acceptance.
-    dx_setnext_rejects_closed_leaf: bool = False
+    # §7 rows 10 and 11 (#56, retired 2026-08-11 with the §4.0 repairs):
+    # ``dx_setnext_rejects_closed_leaf`` is gone — the closure repair
+    # cascade now runs from ``add-subtask``, ``set-state``, ``refile``
+    # and ``set-next`` (a closed *project-child* leaf reopens straight
+    # to NEXT, a closed lone task stays rejected, I3), and a WAITING
+    # parent gaining its first task child demotes with the §4.6 exit
+    # cleanup plus ``project-needs-review``.
 
     @classmethod
     def normative(cls):
@@ -151,8 +154,7 @@ class Divergences:
 
     @classmethod
     def current(cls):
-        return cls(d7_no_priority_rules=True,
-                   dx_setnext_rejects_closed_leaf=True)
+        return cls(d7_no_priority_rules=True)
 
 
 class Model:
@@ -622,6 +624,63 @@ class Model:
             effects.extend(self.waiting_exit_cleanup(waiter))
         return effects
 
+    # ── §4.0 repairs ──────────────────────────────────────────────────
+
+    def closure_repair(self, node):
+        """§4.0 closure repair: reopen NODE's closed ancestor chain.
+
+        Any operation that places or reveals an *open* task in the task
+        descent of a closed ancestor reopens that chain — each closed
+        ancestor task becomes TODO, each reported as a ``state-change``
+        side effect, so I4 stays a hard invariant. The walk is
+        ``task_ancestors`` (nearest first, §2 severing), never a raw
+        outline walk: a category heading between the task and a closed
+        heading above it severs the chain, and nothing above that
+        heading is repaired.
+        """
+        effects = []
+        for ancestor in self.task_ancestors(node):
+            if ancestor.keyword not in CLOSED_STATES:
+                continue
+            old_state = ancestor.keyword
+            ancestor.keyword = "TODO"
+            ancestor.logbook += 1  # I10
+            effects.append(SideEffect(
+                "state-change", ancestor.heading, old_state, "TODO"))
+            # §4.1: the reopened ancestor leaves the completed block.
+            self._reorder(self.sibling_group(ancestor), ancestor,
+                          old_keyword=old_state)
+        return effects
+
+    def keyword_outgrown_repair(self, parent):
+        """§4.0: PARENT just gained a direct task child — fix its keyword.
+
+        NEXT and WAITING live on leaves only (§3), so a leaf that grows
+        a task child demotes to TODO in the same mutation. The WAITING
+        case additionally runs the §4.6 exit cleanup (the demotion is a
+        CLI-driven WAITING exit) and emits ``project-needs-review`` for
+        itself: the demotion disarmed a blocked marker, and whether the
+        blocker now belongs on a child is a human call. A category
+        heading or an already-legal keyword is left alone.
+        """
+        if parent.keyword not in ("NEXT", "WAITING"):
+            return []
+        old_state = parent.keyword
+        parent.keyword = "TODO"
+        parent.logbook += 1  # I10
+        effects = [SideEffect(
+            "state-change", parent.heading, old_state, "TODO")]
+        if old_state == "WAITING":
+            effects.extend(self.waiting_exit_cleanup(parent))
+            effects.append(SideEffect(
+                "project-needs-review", parent.heading))
+        # §4.1 (NEXT-exit rule, demotions included): re-place the
+        # demoted parent in its own sibling group — the minimal move
+        # keeps a WAITING→TODO demotion exactly where it stands.
+        self._reorder(self.sibling_group(parent), parent,
+                      old_keyword=old_state)
+        return effects
+
     # ── §4.2 add-task ─────────────────────────────────────────────────
 
     def add_task(self, heading, state="TODO", category=None, priority=None):
@@ -664,20 +723,15 @@ class Model:
             return Result(False, "create never mints WAITING")
         if state not in KEYWORDS:
             return Result(False, f"Unknown state: {state}")
-        effects = []
         node = Node(heading, state)
         parent.children.append(node)
-        if parent.keyword == "NEXT":
-            # A project heading is never NEXT (I3): demote, side effect,
-            # and re-place the demoted parent in its own sibling group —
-            # immediately below that group's remaining NEXT prefix
-            # (§4.1 NEXT-exit rule, demotions included).
-            parent.keyword = "TODO"
-            parent.logbook += 1
-            effects.append(SideEffect(
-                "state-change", parent.heading, "NEXT", "TODO"))
-            self._reorder(self.sibling_group(parent), parent,
-                          old_keyword="NEXT")
+        # §4.0 keyword-outgrown repair: a project heading is never NEXT
+        # and never WAITING (I3/§3), so a leaf parent demotes here.
+        effects = self.keyword_outgrown_repair(parent)
+        if state not in CLOSED_STATES:
+            # §4.0 closure repair: an open arrival below a closed chain
+            # makes those records live again (I4).
+            effects.extend(self.closure_repair(node))
         # §4.1 arrival rule: the child enters at the end of its zone —
         # never blindly appended.
         self._reorder(parent.children, node)
@@ -808,6 +862,10 @@ class Model:
             # §4.4 post-conditions, the promotion rule alone excepted
             # (I9) — auto-unblock included.
             effects.extend(self.auto_unblock(node))
+        else:
+            # §4.0 closure repair: set-state is the reopen trigger —
+            # an open task below closed ancestors reopens the chain.
+            effects.extend(self.closure_repair(node))
         # §4.6/§4.1: minimal move. The primitive itself keeps a
         # TODO→WAITING in place (same boundary class) and sends a
         # NEXT→WAITING immediately below the remaining NEXT prefix.
@@ -855,9 +913,10 @@ class Model:
         # idempotent success (§4.7).
         if node.keyword == "NEXT":
             return Result(True, old_state="NEXT", new_state="NEXT")
-        if (node.keyword in CLOSED_STATES
-                and self.div.dx_setnext_rejects_closed_leaf):
-            return Result(False, "is in done state", old_state=node.keyword)
+        # §4.7: a closed *project-child* leaf is accepted — it reopens
+        # straight to NEXT through the §4.0 closure repair below. A
+        # closed *lone* task falls into the same guard every other lone
+        # task hits (I3), which is what keeps it rejected.
         if not self.is_project_child(node):
             return Result(False, "NEXT is only valid inside a project")
         old_state = node.keyword
@@ -866,6 +925,9 @@ class Model:
         # §4.6: set-next is one of the WAITING exit sites.
         effects = (self.waiting_exit_cleanup(node)
                    if old_state == "WAITING" else [])
+        # §4.0 closure repair: reopening to NEXT below a closed chain
+        # makes those ancestors live again (I4).
+        effects.extend(self.closure_repair(node))
         # §2/§4.1: entering NEXT from within the active zone takes the
         # top of the active zone; a DEFER release lands at the end of
         # the NEXT prefix.
@@ -913,16 +975,14 @@ class Model:
                 node.logbook += 1
                 effects.append(SideEffect(
                     "state-change", node.heading, "NEXT", "TODO"))
-        if self.is_task(target) and target.keyword == "NEXT":
-            # A NEXT target parent that just became a project → TODO,
-            # re-placed in its own sibling group (§4.1 NEXT-exit rule,
-            # demotions included).
-            target.keyword = "TODO"
-            target.logbook += 1
-            effects.append(SideEffect(
-                "state-change", target.heading, "NEXT", "TODO"))
-            self._reorder(self.sibling_group(target), target,
-                          old_keyword="NEXT")
+        # §4.0 keyword-outgrown repair: a NEXT or WAITING target parent
+        # that just became a project heading demotes (the WAITING case
+        # also unwinds its blocker links and asks for a review).
+        effects.extend(self.keyword_outgrown_repair(target))
+        if node.keyword not in CLOSED_STATES:
+            # §4.0 closure repair: an open subtree arriving under a
+            # closed destination chain reopens it (I4).
+            effects.extend(self.closure_repair(node))
         # §4.8/§4.1 arrival rule: the moved subtree enters the
         # destination group at the end of its (post-demotion) zone.
         self._reorder(target.children, node)

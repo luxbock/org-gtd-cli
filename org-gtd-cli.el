@@ -3021,11 +3021,15 @@ any state (including DONE) and plain category/note headings."
               (parent-level (org-current-level))
               (child-level (1+ parent-level))
               (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
-              (parent-was-next (string= (org-get-todo-state) "NEXT")))
-         ;; Demote NEXT parent to TODO (a NEXT task becoming a project should be TODO)
-         (when parent-was-next
-           (let ((org-inhibit-logging nil))
-             (org-todo "TODO")))
+              (parent-old-state (org-get-todo-state))
+              ;; §4.0 keyword-outgrown repair: the parent is about to
+              ;; stop being a leaf, so a NEXT or WAITING keyword on it is
+              ;; no longer legal (§3).  The WAITING case runs the §4.6
+              ;; exit cleanup and reports `project-needs-review' too.
+              ;; Placement is left to us: the parent must not move until
+              ;; the child it grew is in place.
+              (repair-effects (org-gtd-cli/keyword-outgrown-repair))
+              (parent-demoted (and repair-effects t)))
          ;; Go to end of subtree
          (org-end-of-subtree t)
          (unless (bolp) (insert "\n"))
@@ -3048,13 +3052,28 @@ any state (including DONE) and plain category/note headings."
            (save-excursion
              (goto-char child-pos)
              (org-gtd-cli/reorder-siblings-by-state))
-           ;; A demoted parent left NEXT (§4.0 keyword-outgrown repair):
-           ;; re-place it in its own sibling group — immediately below
-           ;; that group's remaining NEXT prefix (§4.1 NEXT-exit rule).
-           (when parent-was-next
+           ;; A demoted parent left NEXT or WAITING (§4.0 keyword-outgrown
+           ;; repair): re-place it in its own sibling group — a NEXT exit
+           ;; lands immediately below that group's remaining NEXT prefix,
+           ;; a WAITING→TODO keeps its place (§4.1).  Done before the
+           ;; cascade below, while the parent's position is still live.
+           (when parent-demoted
              (save-excursion
                (goto-char (cdr buf-pos))
-               (org-gtd-cli/reorder-siblings-by-state "NEXT")))
+               (org-gtd-cli/reorder-siblings-by-state parent-old-state)))
+           ;; §4.0 closure repair: an open child arriving below a closed
+           ;; chain makes those records live again (I4).  The child is
+           ;; re-addressed by its `:ID:' because the placements above may
+           ;; have moved it, and the cascade in turn invalidates
+           ;; everything inside the chain it re-places.
+           (unless (member todo-state org-done-keywords)
+             (let ((m (org-gtd-cli/locate-id child-id)))
+               (when m
+                 (setq repair-effects
+                       (append repair-effects
+                               (org-gtd-cli/call-at-marker
+                                m #'org-gtd-cli/closure-repair)))
+                 (set-marker m nil))))
            (save-buffer)
            ;; Warn-only duplicate detection (#64): does the created child's
            ;; (file, bare heading text) key collide with any pre-existing
@@ -3067,17 +3086,16 @@ any state (including DONE) and plain category/note headings."
                   `((version . 1) (command . "add-subtask")
                     (heading . ,title) (state . ,todo-state)
                     (file . ,rel-file) (parent . ,parent-heading)
-                    (side_effects . ,(if parent-was-next
-                                         (vector `((action . "state-change")
-                                                   (heading . ,parent-heading)
-                                                   (old_state . "NEXT")
-                                                   (new_state . "TODO")))
-                                       []))
+                    (side_effects . ,(apply #'vector repair-effects))
                     (warnings . ,(org-gtd-cli/warnings-vector warnings)))
                   (org-gtd-cli/find-task-by-id child-id))
                (princ (format "Added subtask: \"%s\" under \"%s\" (%s)\n"
                               title parent-heading rel-file))
-               (org-gtd-cli/print-warnings-text warnings))))))))
+               (org-gtd-cli/print-warnings-text warnings)
+               ;; §4.0: text mode reports the repairs too — same wording
+               ;; every other command uses for them.
+               (dolist (e repair-effects)
+                 (org-gtd-cli/princ-waiting-effect e)))))))))
   (kill-emacs 0))
 
 ;; --- add-event ---
@@ -3713,6 +3731,124 @@ demotion wires in without duplication."
             (set-marker m nil)))))
     (nreverse effects)))
 
+;; ── §4.0 repairs ────────────────────────────────────────────────────────────
+;; The two structural repairs every mutating command shares.  Both are
+;; expressed on the §2 task-descent primitives (+gtd-core.el), never on a
+;; raw subtree walk: a category heading severs ancestry, so the cascade
+;; inherits that rule instead of re-deriving it.
+
+(defun org-gtd-cli/to-todo-effect (old-state)
+  "The §4.0 `state-change' side effect for the task at point becoming TODO.
+Shared by both repairs: the reopen cascade and the keyword-outgrown
+demotion report the same vocabulary for the same shape of change."
+  `((action . "state-change")
+    (heading . ,(org-get-heading t t t t))
+    (old_state . ,old-state)
+    (new_state . "TODO")
+    (file . ,(org-gtd-cli/relative-filename (buffer-file-name)))))
+
+(defun org-gtd-cli/first-closed-task-ancestor ()
+  "Position of the nearest closed task ancestor of the entry at point.
+Nil when the entry's ancestor chain (§2: it ends at the first category
+heading) holds no closed task."
+  (catch 'gtd-cli--closed
+    (gtd/map-task-ancestors
+     (lambda ()
+       (when (member (org-get-todo-state) org-done-keywords)
+         (throw 'gtd-cli--closed (point)))))
+    nil))
+
+(defun org-gtd-cli/closure-repair (&optional dry self)
+  "SEMANTICS.md §4.0 closure repair for the open task at point.
+An open task placed or revealed below a closed heading makes that record
+live again: every closed task ancestor becomes TODO, nearest first, each
+re-placed in its own sibling group (§4.1) — I4 stays a hard invariant.
+Returns one `state-change' side-effect alist per reopened ancestor, in
+cascade order.  With DRY non-nil nothing is written and the effects are
+predicted instead (`--dry-run' parity).
+
+Call with point on the *open* task; a closed one is the caller's own
+transition to decide.  The buffer is not saved.
+
+With SELF non-nil the entry at point is itself a candidate for the
+cascade — the caller stands on the chain rather than on the open arrival
+below it.  `refile' needs that: its moved subtree is re-placed by the
+arrival rule and has no stable position afterwards, while the
+destination parent does; the two walks are the same chain, since an open
+arrival's nearest ancestor *is* that parent.  The caller owes the §2
+check that the parent is a task at all — a category destination severs
+the arrival from everything above it and must not cascade.
+
+Re-placing an ancestor cuts and reinserts its subtree, so a position
+held inside the reopened chain — the addressed task's own included — is
+stale afterwards: re-address by `:ID:' or by heading.  That is also why
+the walk re-derives the chain from the reopened ancestor each round
+rather than collecting markers up front."
+  (let ((effects '()))
+    (if dry
+        (progn
+          (when self
+            (let ((state (org-get-todo-state)))
+              (when (member state org-done-keywords)
+                (push (org-gtd-cli/to-todo-effect state) effects))))
+          (gtd/map-task-ancestors
+           (lambda ()
+             (let ((state (org-get-todo-state)))
+               (when (member state org-done-keywords)
+                 (push (org-gtd-cli/to-todo-effect state) effects))))))
+      (let ((pos (if (and self (member (org-get-todo-state) org-done-keywords))
+                     (point)
+                   (org-gtd-cli/first-closed-task-ancestor))))
+        (while pos
+          (goto-char pos)
+          (let ((old-state (org-get-todo-state)))
+            (push (org-gtd-cli/to-todo-effect old-state) effects)
+            (let ((org-inhibit-logging nil))
+              (org-todo "TODO"))
+            ;; §4.1: the reopened ancestor leaves the completed block,
+            ;; landing at the end of its own group's active zone.  Point
+            ;; follows it, so the next round's walk starts from a live
+            ;; position.
+            (org-gtd-cli/reorder-siblings-by-state old-state))
+          (setq pos (org-gtd-cli/first-closed-task-ancestor)))))
+    (nreverse effects)))
+
+(defun org-gtd-cli/keyword-outgrown-repair (&optional dry)
+  "SEMANTICS.md §4.0 keyword-outgrown repair for the task at point.
+The task has just gained (or, under DRY, would gain) its first direct
+task child, and §3 admits NEXT and WAITING on leaves/project children
+only — so a NEXT parent demotes to TODO, and a WAITING parent demotes to
+TODO through the §4.6 exit cleanup (`:REASON:' removed, the
+`TRIGGER'/`BLOCKER' pair unwound, LOGBOOK untouched per I10) and
+additionally reports `project-needs-review' for itself: the demotion
+disarmed a blocked marker and where that blocker now belongs is a human
+call.  Any other keyword is left alone; nil is returned.
+
+Returns the side effects in report order — the demotion, each
+`blocker-link-removed', then `project-needs-review'.  With DRY non-nil
+nothing is written and the effects are predicted instead.
+
+Placement is deliberately left to the caller: the demoted parent must
+stay put until the arrival that outgrew it is in place (§4.1's NEXT-exit
+move is the caller's `org-gtd-cli/reorder-siblings-by-state' call)."
+  (let ((old-state (org-get-todo-state)))
+    (when (member old-state '("NEXT" "WAITING"))
+      (let ((demotion (org-gtd-cli/to-todo-effect old-state))
+            (heading (org-get-heading t t t t))
+            (rel-file (org-gtd-cli/relative-filename (buffer-file-name)))
+            (cleanup nil))
+        (unless dry
+          (let ((org-inhibit-logging nil))
+            (org-todo "TODO")))
+        (when (equal old-state "WAITING")
+          (setq cleanup (org-gtd-cli/waiting-exit-cleanup dry)))
+        (append (list demotion)
+                cleanup
+                (when (equal old-state "WAITING")
+                  (list `((action . "project-needs-review")
+                          (heading . ,heading)
+                          (file . ,rel-file)))))))))
+
 (defun org-gtd-cli/wake-state (&optional closing-id)
   "The §4.6 conditional-wake target state for the WAITING task at point.
 NEXT iff the task is a leaf project child, no open sibling (NEXT/TODO/
@@ -3838,7 +3974,9 @@ the same prediction comes back — `set-done --dry-run' parity."
 DRY selects the preview wording.  Text mode has no structured channel,
 so every command that can emit the WAITING vocabulary prints through
 here — otherwise `set-done' and `set-state' describe the same repair in
-different words, or (as review-bot found on PR #77) not at all.
+different words, or (as review-bot found on PR #77) not at all.  The
+§4.0 repair vocabulary (#56) rides along for the same reason: a
+`set-state' reopen cascades through this printer too.
 
 The `unblocked' wording is `org-gtd-cli/auto-unblock's own, verbatim, so
 a caller that already printed that function's message list must not also
@@ -3846,16 +3984,44 @@ print its `unblocked' effects — it would say the same thing twice."
   (let ((action (cdr (assq 'action e)))
         (heading (cdr (assq 'heading e)))
         (file (cdr (assq 'file e))))
-    (if (equal action "unblocked")
-        (princ (if dry
-                   (format "  Would unblock: \"%s\" -> %s\n"
-                           heading (cdr (assq 'new_state e)))
-                 (format "  Unblocked: \"%s\" -> %s (%s)\n"
-                         heading (cdr (assq 'new_state e)) file)))
+    (cond
+     ((equal action "unblocked")
+      (princ (if dry
+                 (format "  Would unblock: \"%s\" -> %s\n"
+                         heading (cdr (assq 'new_state e)))
+               (format "  Unblocked: \"%s\" -> %s (%s)\n"
+                       heading (cdr (assq 'new_state e)) file))))
+     ;; §4.0: the reopen cascade and the keyword-outgrown demotion.  Both
+     ;; are `state-change'; only the keyword it left says which repair
+     ;; ran, and the two read nothing alike to a human.
+     ((equal action "state-change")
+      (let* ((old-state (cdr (assq 'old_state e)))
+             (new-state (cdr (assq 'new_state e)))
+             (demotion (member old-state '("NEXT" "WAITING"))))
+        (princ (cond
+                ((and demotion dry)
+                 (format "  Would demote: \"%s\" %s -> %s\n"
+                         heading old-state new-state))
+                (demotion
+                 (format "  Demoted: \"%s\" %s -> %s (%s)\n"
+                         heading old-state new-state file))
+                (dry
+                 (format "  Would reopen: \"%s\" %s -> %s\n"
+                         heading old-state new-state))
+                (t
+                 (format "  Reopened: \"%s\" %s -> %s (%s)\n"
+                         heading old-state new-state file))))))
+     ((equal action "project-needs-review")
+      (princ (if dry
+                 (format "  Project would be left open for review: \"%s\"\n"
+                         heading)
+               (format "  Project left open for review: \"%s\" (%s)\n"
+                       heading file))))
+     (t
       (princ (format (if dry
                          "  Would remove blocker link: \"%s\" (%s)\n"
                        "  Removed blocker link: \"%s\" (%s)\n")
-                     heading file)))))
+                     heading file))))))
 
 (defun org-gtd-cli/princ-link-removals (effects &optional dry)
   "Print only the `blocker-link-removed' entries of EFFECTS.
@@ -4681,8 +4847,12 @@ behaviour, multi-line tolerance included."
                      ;; §4.6 close parity: a `set-state' into a closed
                      ;; state runs the §4.4 auto-unblock, so its preview
                      ;; predicts the wake (§4.0).
-                     (when (member new-state org-done-keywords)
-                       (cdr (org-gtd-cli/auto-unblock t))))))
+                     (if (member new-state org-done-keywords)
+                         (cdr (org-gtd-cli/auto-unblock t))
+                       ;; §4.0 closure repair: the transition leaves the
+                       ;; task open, so a closed ancestor chain above it
+                       ;; would reopen — predict that too.
+                       (org-gtd-cli/closure-repair t)))))
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/output
                     (append
@@ -4752,6 +4922,14 @@ behaviour, multi-line tolerance included."
                ;; remaining NEXT prefix — the old skip-sort mitigation's I5
                ;; violation must not survive.
                (org-gtd-cli/reorder-siblings-by-state old-state)
+               ;; §4.0 closure repair: `set-state' is the reopen trigger.
+               ;; The task is open now, so every closed ancestor above it
+               ;; becomes live again (I4).  Runs after this task's own
+               ;; placement — the cascade re-places the ancestors, and
+               ;; that invalidates positions inside them (TARGET-MARKER
+               ;; included, which is why nothing reads it below).
+               (setq link-effects
+                     (append link-effects (org-gtd-cli/closure-repair)))
                (save-buffer))
              (set-marker target-marker nil)
              (if org-gtd-cli/json-mode
@@ -4988,17 +5166,25 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
   "Restore GTD invariants after refiling MOVED-HEADING.
 TARGET-POS is a position in TARGET-BUF pointing at the destination parent.
 Demotes the moved subtree to TODO when it is a NEXT that would be freestanding
-or a duplicate NEXT sibling in its new home; demotes a NEXT parent that has just
-become a project because a child was refiled under it; and places the arrived
-subtree in the destination group per the SEMANTICS.md §4.1 arrival rule (end of
-its zone)."
+or a duplicate NEXT sibling in its new home; places the arrived subtree in the
+destination group per the SEMANTICS.md §4.1 arrival rule (end of its zone);
+then runs both §4.0 repairs — the keyword-outgrown demotion of a NEXT or
+WAITING destination parent that has just gained its first task child, and the
+closure repair reopening a closed destination chain under an open arrival.
+
+Returns the repair side effects in report order.  `refile' does not put
+them on the wire yet — §7 row 12 (#57) owns that envelope change — so
+the value is currently informational; every other command already
+reports the same vocabulary for the same repairs (§4.0)."
   (with-current-buffer target-buf
     (org-with-wide-buffer
      (goto-char target-pos)
      (let* ((parent-level (org-current-level))
             (child-level (1+ parent-level))
             (subtree-end (save-excursion (org-end-of-subtree t) (point)))
-            (moved-pos nil))
+            (moved-pos nil)
+            (moved-open nil)
+            (effects '()))
        ;; Locate the moved subtree among the target's direct children.  Org
        ;; appends the refiled subtree, so when duplicate headings exist the
        ;; just-moved child is the last direct child with this heading, not the
@@ -5034,18 +5220,30 @@ its zone)."
                    (org-todo "TODO")))))
            ;; §4.1 arrival rule: the moved subtree enters the destination
            ;; group at the end of its (post-demotion) zone.
-           (org-gtd-cli/reorder-siblings-by-state)))
-       ;; Demote target parent from NEXT to TODO when it just gained a
-       ;; TODO-keyword child (a NEXT that becomes a project must be TODO),
-       ;; then re-place it in its own sibling group — immediately below
-       ;; that group's remaining NEXT prefix (§4.1 NEXT-exit rule).
-       (save-excursion
-         (goto-char target-pos)
-         (when (and (equal (org-get-todo-state) "NEXT")
-                    (org-gtd-cli/has-todo-children-p))
-           (let ((org-inhibit-logging nil))
-             (org-todo "TODO"))
-           (org-gtd-cli/reorder-siblings-by-state "NEXT")))))))
+           (org-gtd-cli/reorder-siblings-by-state)
+           (setq moved-open (not (member (org-get-todo-state)
+                                         org-done-keywords)))))
+       ;; §4.0 keyword-outgrown repair: the destination parent has just
+       ;; gained its first task child, so a NEXT or WAITING keyword on it
+       ;; is no longer legal (§3) — the WAITING case runs the §4.6 exit
+       ;; cleanup and reports `project-needs-review' as well.  Then
+       ;; re-place it in its own sibling group (a NEXT exit lands below
+       ;; that group's remaining NEXT prefix, §4.1).
+       (goto-char target-pos)
+       (when (org-gtd-cli/has-todo-children-p)
+         (let ((parent-old-state (org-get-todo-state)))
+           (setq effects (org-gtd-cli/keyword-outgrown-repair))
+           (when effects
+             (org-gtd-cli/reorder-siblings-by-state parent-old-state))))
+       ;; §4.0 closure repair: an open arrival under a closed destination
+       ;; chain makes those records live again (I4).  Walked from the
+       ;; destination parent (SELF), whose position is still live after
+       ;; the placement above — the moved subtree's is not.  A category
+       ;; destination severs the arrival from everything above it (§2), so
+       ;; nothing cascades there.
+       (when (and moved-open (gtd/task-heading-p))
+         (setq effects (append effects (org-gtd-cli/closure-repair nil t))))
+       effects))))
 
 ;; --- set-next ---
 
@@ -5130,10 +5328,12 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                       (side_effects . []))
                     buf-pos)
                  (org-gtd-cli/error "Already NEXT: \"%s\" (%s)" heading rel-file)))
-              ((not (member current-state org-not-done-keywords))
-               (org-gtd-cli/error "Error: \"%s\" is in done state %s" heading current-state)
-               (kill-emacs 1))
               (t
+               ;; §4.7: a *closed* leaf is accepted — it reopens straight
+               ;; to NEXT through the §4.0 closure repair below.  A closed
+               ;; lone task is still rejected, by the same
+               ;; `org-gtd-cli/ensure-next-allowed' guard every lone task
+               ;; hits above (I3); the state never enters into it.
                (let ((org-inhibit-logging nil))
                  (org-todo "NEXT"))
                ;; §4.6: `set-next' is one of the WAITING exit sites — the
@@ -5142,9 +5342,17 @@ If the target already has a NEXT (subtask or itself), report it and exit 0."
                      (when (equal current-state "WAITING")
                        (org-gtd-cli/waiting-exit-cleanup)))
                ;; §4.1: entering NEXT from within the active zone takes
-               ;; the top of the active zone; a DEFER release lands at
-               ;; the end of the NEXT prefix.
+               ;; the top of the active zone; a reopen out of the
+               ;; completed block, like a DEFER release, lands at the end
+               ;; of the NEXT prefix.
                (org-gtd-cli/reorder-siblings-by-state current-state)
+               ;; §4.0 closure repair: the leaf is open now, so its closed
+               ;; ancestors are live again (I4).  After this task's own
+               ;; placement — the cascade re-places the ancestors, which
+               ;; leaves positions inside them stale (hence the re-find by
+               ;; heading below).
+               (setq link-effects
+                     (append link-effects (org-gtd-cli/closure-repair)))
                (save-buffer)
                (if org-gtd-cli/json-mode
                    (org-gtd-cli/mutation-output

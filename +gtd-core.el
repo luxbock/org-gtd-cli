@@ -166,6 +166,27 @@ is what this function returns.  Severing-aware (§2); see
          (when hit (throw 'gtd--found hit)))))
     nil))
 
+(defun gtd/map-task-ancestors (fun)
+  "Call FUN with point on each task ancestor of the entry at point.
+The walk goes upward, nearest ancestor first, and stops at the first
+heading that is not itself a task: a category heading SEVERS the chain
+\(§2\), so nothing above it is an ancestor of the entry.  The entry
+itself is not visited.  FUN may exit early with `throw'.  Returns nil.
+
+The upward counterpart of `gtd/map-task-descendants': the §4.0 closure
+repair walks it so the cascade inherits severing rather than
+re-deriving it."
+  (save-restriction
+    (widen)
+    (save-excursion
+      (org-back-to-heading t)
+      (catch 'gtd--severed
+        (while (org-up-heading-safe)
+          (unless (gtd/task-heading-p)
+            (throw 'gtd--severed nil))
+          (save-excursion (funcall fun))))
+      nil)))
+
 ;; ── Project detection ───────────────────────────────────────────────────────
 
 (defun gtd/is-project-p ()

@@ -485,6 +485,117 @@ def test_s7row9_defer_block_guard(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
+# §7 row 10 retired 2026-08-11 (#56): the §4.0 closure repair runs — an
+# open task placed or revealed below a closed heading reopens that whole
+# ancestor chain, and `set-next' accepts a closed project-child leaf
+# (§4.7) instead of rejecting it. One witness per trigger; each pins the
+# agreeing behavior on the shape row 10 recorded as divergent.
+def test_s7row10_add_subtask_reopens_the_closed_chain(cli):
+    model = Model([Node("proj", "DONE", children=[
+        Node("leaf", "DONE")])], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "add_subtask", ("leaf", "kid", "TODO"), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == sorted([
+        ("state-change", "leaf", "DONE", "TODO"),
+        ("state-change", "proj", "DONE", "TODO")])
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row10_closed_arrival_reopens_nothing(cli):
+    # The trigger is an *open* arrival; the record stays closed otherwise.
+    model = Model([Node("proj", "DONE", children=[
+        Node("leaf", "DONE")])], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "add_subtask", ("leaf", "kid", "DONE"), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == []
+    assert envelope_side_effects(envelope) == []
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row10_set_state_reopening_cascades(cli):
+    model = Model([Node("proj", "DONE", children=[
+        Node("mid", "DONE", children=[Node("leaf", "DONE")])])],
+        Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "set_state", ("leaf", "TODO"), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == sorted([
+        ("state-change", "mid", "DONE", "TODO"),
+        ("state-change", "proj", "DONE", "TODO")])
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row10_refile_into_a_closed_destination_cascades(cli):
+    # refile's own side_effects are still unreported (row 12 → #57), so
+    # the skeleton carries the witness.
+    model = Model([
+        Node("dest", "DONE", children=[Node("host", "DONE")]),
+        Node("src", "TODO", children=[Node("mover", "TODO")]),
+    ], Divergences.normative())
+    _, rc, result = run_normative(
+        cli, model, "refile", ("mover",), {"to": "host"})
+    assert rc == 0 and result.ok
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row10_set_next_accepts_a_closed_project_child(cli):
+    model = Model([Node("proj", "DONE", children=[
+        Node("aa", "DONE"), Node("bb", "TODO")])],
+        Divergences.normative())
+    envelope, rc, result = run_normative(cli, model, "set_next", ("aa",), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == [
+        ("state-change", "proj", "DONE", "TODO")]
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row10_set_next_still_rejects_a_closed_lone_task(cli):
+    # I3 outranks the §4.7 acceptance: a lone task is never NEXT.
+    model = Model([Node("lone", "DONE")], Divergences.normative())
+    _, rc, result = run_normative(cli, model, "set_next", ("lone",), {})
+    assert result.ok is False
+    assert rc != 0
+    assert cli.read_skeleton() == model.skeleton()
+
+
+# §7 row 11 retired 2026-08-11 (#56): the §4.0 keyword-outgrown repair
+# runs — a NEXT or WAITING leaf that grows its first task child demotes
+# to TODO, the WAITING case through the §4.6 exit cleanup plus
+# `project-needs-review'.
+def test_s7row11_waiting_parent_demotes_with_the_exit_cleanup(cli):
+    model = Model([Node("proj", "TODO", children=[
+        Node("blk", "TODO", triggers=("wait",)),
+        Node("wait", "WAITING", waiting_reason="vendor", blockers=("blk",)),
+    ])], Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "add_subtask", ("wait", "kid", "TODO"), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == sorted([
+        ("state-change", "wait", "WAITING", "TODO"),
+        ("blocker-link-removed", "blk", None, None),
+        ("project-needs-review", "wait", None, None)])
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row11_next_parent_demotes(cli):
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "NEXT"), Node("bb", "TODO")])],
+        Divergences.normative())
+    envelope, rc, result = run_normative(
+        cli, model, "add_subtask", ("aa", "kid", "TODO"), {})
+    assert rc == 0 and result.ok
+    assert model_side_effects(result) == [
+        ("state-change", "aa", "NEXT", "TODO")]
+    assert envelope_side_effects(envelope) == model_side_effects(result)
+    assert cli.read_skeleton() == model.skeleton()
+
+
 # §7 row 13 retired 2026-08-11 (#58): task traversal severs at category
 # headings per §2 — the closure guard, the activity/stuckness predicates
 # and project detection all stop at the first keyword-less heading. Both
