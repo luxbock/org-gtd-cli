@@ -92,9 +92,11 @@ class CliSession:
     def write_state(self, model):
         (self.org_dir / "tasks.org").write_text(model.to_org_text())
 
+    def read_org_text(self):
+        return (self.org_dir / "tasks.org").read_text()
+
     def read_skeleton(self):
-        text = (self.org_dir / "tasks.org").read_text()
-        return Model(parse_org_text(text)).skeleton()
+        return Model(parse_org_text(self.read_org_text())).skeleton()
 
     def stop(self):
         self.run("daemon", "stop")
@@ -208,6 +210,13 @@ def test_cli_conforms_to_current_mode_model(cli, model_and_ops):
         assert disk == model.skeleton(), (
             f"{op}{args}{kwargs}: file skeleton diverged\n"
             f"  cli:   {disk}\n  model: {model.skeleton()}")
+        # #80: no elisp read syntax may ever reach the file. The model
+        # deliberately does not model note text (logbook is an integer
+        # count), so this is a one-line negative invariant rather than a
+        # comparison: `#(' is the opening of a propertized-string literal,
+        # which is what `%S' over fontified buffer text produces.
+        assert "#(" not in cli.read_org_text(), (
+            f"{op}{args}{kwargs}: elisp read syntax reached tasks.org")
         if result.ok:
             assert envelope_side_effects(envelope) == \
                 model_side_effects(result), (
