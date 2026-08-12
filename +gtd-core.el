@@ -44,14 +44,11 @@
       '((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d!/!)")
         (sequence "WAITING(w/!)" "DEFER(f@/!)" "|" "CANCELLED(c/!)")))
 
-(setq org-todo-state-tags-triggers
-      '(("CANCELLED" ("CANCELLED" . t) ("WAITING") ("DEFER"))
-        ("WAITING" ("WAITING" . t) ("CANCELLED") ("DEFER"))
-        ("DEFER" ("WAITING" . t) ("DEFER" . t) ("CANCELLED"))
-        (done ("WAITING") ("CANCELLED") ("DEFER"))
-        ("TODO" ("WAITING") ("CANCELLED") ("DEFER"))
-        ("NEXT" ("WAITING") ("CANCELLED") ("DEFER"))
-        ("DONE" ("WAITING") ("CANCELLED") ("DEFER"))))
+;; No state-mirror tags: view membership reads ancestor *state* (§5.2/§5.4),
+;; not inherited :WAITING:/:DEFER:/:CANCELLED: tags. Explicit nil rather than
+;; deletion — this file is re-loaded into a live interactive Emacs, where a
+;; previously-set value would otherwise survive the reload.
+(setq org-todo-state-tags-triggers nil)
 
 (setq org-tag-persistent-alist '((:startgroup)
                        ("@errand" . ?e)
@@ -497,6 +494,44 @@ new location when moved).  Returns non-nil iff the entry moved."
 
 ;; ── Agenda skip functions ───────────────────────────────────────────────────
 
+(defun gtd/hidden-by-ancestor-state-p ()
+  "Non-nil when a task ancestor's state hides the entry at point.
+The §5.4 ancestor-state exclusion: any task ancestor (§2 walk, so a
+category heading severs the chain) in state DEFER, WAITING, CANCELLED or
+DONE hides the whole task descent below it.  Replaces the inherited
+:WAITING:/:DEFER:/:CANCELLED: tag selectors the view matchers used to
+carry (§7 row 6)."
+  (catch 'gtd--hidden
+    (gtd/map-task-ancestors
+     (lambda ()
+       (let ((state (org-get-todo-state)))
+         (when (or (member state '("WAITING" "DEFER"))
+                   (member state org-done-keywords))
+           (throw 'gtd--hidden t)))))
+    nil))
+
+(defun gtd/deferred-p ()
+  "Non-nil when the entry at point is deferred (§5.2 deferred(t)).
+True when its own state is DEFER, or when some task ancestor (§2 walk)
+is DEFER -- inherited DEFER shelves the whole task descent."
+  (or (equal (org-get-todo-state) "DEFER")
+      (catch 'gtd--deferred
+        (gtd/map-task-ancestors
+         (lambda ()
+           (when (equal (org-get-todo-state) "DEFER")
+             (throw 'gtd--deferred t))))
+        nil)))
+
+(defun gtd/stuck-project-p ()
+  "Non-nil when the entry at point is a stuck project (§5.2 / I11).
+An open project that is neither deferred(p) nor active(p).  Openness is
+asserted here rather than left to the caller's matcher: this is the
+shared definition of stuckness, not a matcher helper."
+  (and (gtd/is-project-p)
+       (not (member (org-get-todo-state) org-done-keywords))
+       (not (gtd/deferred-p))
+       (not (gtd/has-active-in-subtree-p))))
+
 (defun gtd/list-sublevels-for-projects-indented ()
   "Set `org-tags-match-list-sublevels' so a subtree restriction
 lists all subtasks."
@@ -513,57 +548,74 @@ lists all subtasks."
     (setq org-tags-match-list-sublevels nil))
   nil)
 
-(defun gtd/skip-stuck-projects ()
-  "Skip trees that are not stuck projects."
+(defun gtd/skip-hidden-by-ancestor-state ()
+  "Skip entries hidden by a DEFER/WAITING/CANCELLED/DONE task ancestor (§5.4)."
+  (save-restriction
+    (widen)
+    (if (gtd/hidden-by-ancestor-state-p)
+        (save-excursion (or (outline-next-heading) (point-max)))
+      nil)))
+
+(defun gtd/skip-deferred-block-non-members ()
+  "Skip entries the §5.4 Deferred block excludes.
+Own-state DEFER tasks only: a task with a DEFER task ancestor is
+represented by that ancestor's row, and a stuck project belongs to the
+Stuck Projects block (§5.2).  Replaces `gtd/skip-stuck-projects', whose
+name was inverted and whose NEXT test discounted an inherited :WAITING:
+tag (§7 row 6)."
   (save-restriction
     (widen)
     (let ((next-headline (save-excursion (or (outline-next-heading) (point-max)))))
-      (if (gtd/is-project-p)
-          ;; Severing-aware (§2): a NEXT below one of this project's own
-          ;; category headings is another task world's, so it does not
-          ;; un-stick this project.
-          (let ((has-next
-                 (gtd/first-task-descendant
-                  (lambda ()
-                    (and (equal (org-get-todo-state) "NEXT")
-                         (not (member "WAITING" (org-get-tags))))))))
-            (if has-next
-                nil
-              next-headline))            ; a stuck project
-        nil))))
+      (cond
+       ;; A DEFER task ancestor (§2 walk) represents the whole descent.
+       ((catch 'gtd--deferred-ancestor
+          (gtd/map-task-ancestors
+           (lambda ()
+             (when (equal (org-get-todo-state) "DEFER")
+               (throw 'gtd--deferred-ancestor t))))
+          nil)
+        next-headline)
+       ;; §5.4 names the stuck exclusion; under §5.2 it is vacuous here
+       ;; (every candidate row already has own-state DEFER, so it is
+       ;; deferred and therefore not stuck).  Kept because the document
+       ;; names it.
+       ((gtd/stuck-project-p) next-headline)
+       (t nil)))))
 
 (defun gtd/skip-non-stuck-projects ()
-  "Skip trees that are not stuck projects."
+  "Skip trees that are not stuck projects (§5.2 stuck(p))."
   (gtd/list-sublevels-for-projects-indented)
   (save-restriction
     (widen)
     (let ((next-headline (save-excursion (or (outline-next-heading) (point-max)))))
       (if (gtd/is-project-p)
-          ;; Severing-aware (§2), same reading as §5.2 active(p).
-          (let ((has-next (gtd/has-active-in-subtree-p)))
-            (if (or has-next (member "DEFER" (org-get-tags)))
-                next-headline
-              nil))                      ; a stuck project
+          (if (gtd/stuck-project-p) nil next-headline)
         next-headline))))
 
 (defun gtd/skip-non-projects ()
-  "Skip trees that are not projects."
+  "Skip trees that are not projects (§5.4 Projects block)."
   (gtd/list-sublevels-for-projects-indented)
-  (if (save-excursion (gtd/skip-non-stuck-projects))
-      (save-restriction
-        (widen)
-        (let ((subtree-end (save-excursion (org-end-of-subtree t))))
-          (cond
-           ((and (gtd/is-project-p)
-                 (marker-buffer org-agenda-restrict-begin))
-            nil)
-           ((and (gtd/is-project-p)
-                 (not (marker-buffer org-agenda-restrict-begin))
-                 (not (gtd/is-project-subtree-p)))
-            nil)
-           (t
-            subtree-end))))
-    (save-excursion (org-end-of-subtree t))))
+  (save-restriction
+    (widen)
+    (let ((subtree-end (save-excursion (org-end-of-subtree t))))
+      (cond
+       ;; §5.4: the block is the open, non-deferred projects.  Deferred
+       ;; ones used to be excluded by the matcher's `-DEFER' tag
+       ;; selector; ancestor DEFER is covered too (§5.2 deferred(t)).
+       ((gtd/deferred-p) subtree-end)
+       ;; Stuck projects belong to the Stuck Projects block -- the two
+       ;; blocks partition the open non-deferred projects (§5.4, ruled
+       ;; intentional 2026-08-12).
+       ((gtd/stuck-project-p) subtree-end)
+       ((and (gtd/is-project-p)
+             (marker-buffer org-agenda-restrict-begin))
+        nil)
+       ((and (gtd/is-project-p)
+             (not (marker-buffer org-agenda-restrict-begin))
+             (not (gtd/is-project-subtree-p)))
+        nil)
+       (t
+        subtree-end)))))
 
 (defun gtd/skip-project-trees ()
   "Skip trees that are projects."
@@ -580,6 +632,7 @@ lists all subtasks."
     (widen)
     (let ((next-headline (save-excursion (or (outline-next-heading) (point-max)))))
       (cond
+       ((gtd/hidden-by-ancestor-state-p) next-headline)
        ((gtd/is-project-p) next-headline)
        ((and (gtd/is-task-p) (not (gtd/is-project-subtree-p))) next-headline)
        (t nil)))))
@@ -595,6 +648,7 @@ sub-project tasks, and project related tasks."
            (next-headline (save-excursion (or (outline-next-heading) (point-max))))
            (limit-to-project (marker-buffer org-agenda-restrict-begin)))
       (cond
+       ((gtd/hidden-by-ancestor-state-p) next-headline)
        ((gtd/is-project-p) next-headline)
        ((and (not limit-to-project)
              (gtd/is-project-subtree-p))
@@ -698,7 +752,7 @@ A done task is archivable when it:
 (setq org-agenda-custom-commands
       '((" " "Agenda"
          ((agenda "" nil)
-          (tags-todo "-WAITING-CANCELLED/!NEXT"
+          (tags-todo "/!NEXT"
                      ((org-agenda-overriding-header "Next Tasks")
                       (org-agenda-skip-function #'gtd/skip-projects-and-single-tasks)
                       (org-agenda-todo-ignore-scheduled t)
@@ -708,7 +762,7 @@ A done task is archivable when it:
                       (org-tags-match-list-sublevels t)
                       (org-agenda-sorting-strategy
                        '(todo-state-down priority-down category-keep))))
-          (tags-todo "-refile-CANCELLED-url/!-DEFER-WAITING"
+          (tags-todo "-refile-url/!-DEFER-WAITING"
                      ((org-agenda-overriding-header "Tasks")
                       (org-agenda-skip-function #'gtd/skip-project-tasks-maybe)
                       (org-agenda-todo-ignore-scheduled t)
@@ -716,22 +770,23 @@ A done task is archivable when it:
                       (org-agenda-todo-ignore-with-date t)
                       (org-agenda-sorting-strategy
                        '(priority-down category-keep))))
-          (tags-todo "-CANCELLED/!-DEFER+WAITING"
+          (tags-todo "/!-DEFER+WAITING"
                      ((org-agenda-overriding-header "Waiting")
+                      (org-agenda-skip-function #'gtd/skip-hidden-by-ancestor-state)
                       (org-tags-match-list-sublevels nil)
                       (org-agenda-todo-ignore-scheduled 'future)
                       (org-agenda-todo-ignore-deadlines 'future)))
-          (tags-todo "-CANCELLED/!"
+          (tags-todo "/!"
                      ((org-agenda-overriding-header "Stuck Projects")
                       (org-agenda-skip-function #'gtd/skip-non-stuck-projects)))
-          (tags-todo "-DEFER-CANCELLED/!"
+          (tags-todo "/!"
                      ((org-agenda-overriding-header "Projects")
                       (org-agenda-skip-function #'gtd/skip-non-projects)
                       (org-agenda-sorting-strategy
                        '(priority-down category-keep))))
-          (tags-todo "-CANCELLED/!DEFER"
+          (tags-todo "/!DEFER"
                      ((org-agenda-overriding-header "Deferred")
-                      (org-agenda-skip-function #'gtd/skip-stuck-projects)
+                      (org-agenda-skip-function #'gtd/skip-deferred-block-non-members)
                       (org-tags-match-list-sublevels nil)
                       (org-agenda-todo-ignore-scheduled 'future)
                       (org-agenda-todo-ignore-deadlines 'future)))
@@ -761,10 +816,10 @@ A done task is archivable when it:
           (org-agenda-start-with-entry-text-mode nil)
           (org-agenda-entry-types '())
           (org-agenda-overriding-header "Done Today")))
-        ("S" "Stuck Projects" tags-todo "-CANCELLED/!"
+        ("S" "Stuck Projects" tags-todo "/!"
          ((org-agenda-overriding-header "Stuck Projects")
           (org-agenda-skip-function #'gtd/skip-non-stuck-projects)))
-        ("n" "Next Tasks" tags-todo "-WAITING-CANCELLED/!NEXT"
+        ("n" "Next Tasks" tags-todo "/!NEXT"
          ((org-agenda-overriding-header "Next Tasks")
           (org-agenda-skip-function #'gtd/skip-projects-and-single-tasks)
           (org-agenda-todo-ignore-scheduled t)
@@ -774,7 +829,7 @@ A done task is archivable when it:
           (org-tags-match-list-sublevels t)
           (org-agenda-sorting-strategy
            '(todo-state-down priority-down category-keep))))
-        ("t" "Tasks" tags-todo "-refile-CANCELLED-url/!-DEFER-WAITING"
+        ("t" "Tasks" tags-todo "-refile-url/!-DEFER-WAITING"
          ((org-agenda-overriding-header "Tasks")
           (org-agenda-skip-function #'gtd/skip-project-tasks-maybe)
           (org-agenda-todo-ignore-scheduled t)
@@ -782,13 +837,14 @@ A done task is archivable when it:
           (org-agenda-todo-ignore-with-date t)
           (org-agenda-sorting-strategy
            '(priority-down category-keep))))
-        ("p" "Projects" tags-todo "-DEFER-CANCELLED/!"
+        ("p" "Projects" tags-todo "/!"
          ((org-agenda-overriding-header "Projects")
           (org-agenda-skip-function #'gtd/skip-non-projects)
           (org-agenda-sorting-strategy
            '(priority-down category-keep))))
-        ("w" "Waiting" tags-todo "-CANCELLED/!-DEFER+WAITING"
+        ("w" "Waiting" tags-todo "/!-DEFER+WAITING"
          ((org-agenda-overriding-header "Waiting")
+          (org-agenda-skip-function #'gtd/skip-hidden-by-ancestor-state)
           (org-tags-match-list-sublevels nil)
           (org-agenda-todo-ignore-scheduled 'future)
           (org-agenda-todo-ignore-deadlines 'future)))

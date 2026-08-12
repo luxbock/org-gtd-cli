@@ -1678,18 +1678,32 @@ class TestSetState:
         drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
         assert "\\\\" not in drawer
 
-    def test_waiting_adds_tag(self, org_dir):
-        # pins §7 row 6 (#40)
+    def test_waiting_adds_no_tag(self, org_dir):
+        # #40: state-mirror tags are retired -- view membership reads
+        # ancestor state (§5.2/§5.4), so no :WAITING: tag is ever written.
         stdout, stderr, rc = run_cli(
             "set-state", "Book a rental car", "WAITING",
             "--reason", "vendor has not confirmed", org_dir=org_dir)
         assert rc == 0
-        assert ":WAITING:" in (org_dir / "tasks.org").read_text()
+        text = (org_dir / "tasks.org").read_text()
+        assert ":WAITING:" not in text
+        assert "WAITING Book a rental car" in text
 
-    def test_removing_waiting_removes_tag(self, org_dir):
+    def test_defer_adds_no_tag(self, org_dir):
+        stdout, stderr, rc = run_cli(
+            "set-state", "Book a rental car", "DEFER", org_dir=org_dir)
+        assert rc == 0
+        text = (org_dir / "tasks.org").read_text()
+        assert ":WAITING:" not in text
+        assert ":DEFER:" not in text
+        assert "DEFER Book a rental car" in text
+
+    def test_removing_waiting_leaves_no_tag(self, org_dir):
         stdout, stderr, rc = run_cli("set-state", "Consider buying a new monitor", "TODO", org_dir=org_dir)
         assert rc == 0
-        assert "TODO Consider buying a new monitor" in (org_dir / "tasks.org").read_text()
+        text = (org_dir / "tasks.org").read_text()
+        assert "TODO Consider buying a new monitor" in text
+        assert ":WAITING:" not in text
 
     def test_dry_run(self, org_dir):
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "TODO", "--dry-run", org_dir=org_dir)
@@ -1713,8 +1727,8 @@ class TestSetState:
         assert "not a valid state" in stderr
         assert "TODO, NEXT, DONE, WAITING, DEFER, CANCELLED" in stderr
 
-    def test_defer_to_waiting_cleans_defer_tag(self, org_dir):
-        # pins §7 row 6 (#40)
+    def test_defer_to_waiting_leaves_no_tag(self, org_dir):
+        # #40: neither tag is ever written, in either direction.
         # Multi-step: DEFER then WAITING
         run_cli("set-state", "Book a rental car", "DEFER", org_dir=org_dir)
         stdout, stderr, rc = run_cli(
@@ -1722,10 +1736,10 @@ class TestSetState:
             "--reason", "vendor has not confirmed", org_dir=org_dir)
         assert rc == 0
         text = (org_dir / "tasks.org").read_text()
-        assert ":WAITING:" in text
+        assert ":WAITING:" not in text
         assert ":DEFER:" not in text
 
-    def test_waiting_to_todo_cleans_waiting_tag(self, org_dir):
+    def test_waiting_to_todo_leaves_no_tag(self, org_dir):
         # Multi-step: WAITING then TODO. Only the WAITING setup call
         # changed under #39 (it now carries the required `--reason`); the
         # TODO assertions are the same ones that were green before.
@@ -1733,7 +1747,9 @@ class TestSetState:
                 "--reason", "vendor has not confirmed", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-state", "Book a rental car", "TODO", org_dir=org_dir)
         assert rc == 0
-        assert "TODO Book a rental car" in (org_dir / "tasks.org").read_text()
+        text = (org_dir / "tasks.org").read_text()
+        assert "TODO Book a rental car" in text
+        assert ":WAITING:" not in text
 
 
 # ===========================================================================
@@ -1741,6 +1757,15 @@ class TestSetState:
 # ===========================================================================
 
 class TestSetCancelled:
+    def test_cancel_adds_no_tag(self, org_dir):
+        # #40: state-mirror tags are retired.
+        stdout, stderr, rc = run_cli(
+            "set-cancelled", "Book a rental car", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = (org_dir / "tasks.org").read_text()
+        assert ":CANCELLED:" not in text
+        assert "CANCELLED Book a rental car" in text
+
     def test_cancel_by_id(self, org_dir):
         stdout, stderr, rc = run_cli(
             "set-cancelled", "--id", "test-id-capture-fix", org_dir=org_dir)
@@ -3826,7 +3851,7 @@ class TestRename:
         assert rc == 0
         text = (org_dir / "tasks.org").read_text()
         assert "Get travel insurance from Allianz" in text
-        assert ":WAITING:" in text
+        # #40: the :WAITING: state mirror is gone; the deliberate tag stays.
         assert ":email:" in text
 
     def test_dry_run(self, org_dir):
@@ -6369,8 +6394,9 @@ class TestListTags:
         counts = self._counts(data)
         # calendar.org: one DONE task + one plain heading, both :calpersonal:
         assert counts["calpersonal"] == 2
-        # WAITING-state tasks are counted too (tag shares the keyword name)
-        assert counts["WAITING"] == 2
+        # #40 retired the state-mirror tags, so no fixture heading carries a
+        # tag named after a keyword any more.
+        assert "WAITING" not in counts
 
     def test_local_tags_only(self, org_dir):
         """Inherited tags are not counted — only literal headline tags."""
@@ -13913,6 +13939,175 @@ class TestRefileDryRunPredictsRepairs:
         assert rc == 0, stderr
         assert 'Would demote: "Rwaiter" WAITING -> TODO' in stdout, stdout
         assert 'Would remove blocker link: "Rblocker"' in stdout, stdout
+
+
+class TestAncestorStateBlockMembership:
+    """§5.4 block membership reads ancestor *state*, not inherited tags (#40).
+
+    The dashboard used to express "hide the descent below a shelved or
+    closed ancestor" with `-WAITING-CANCELLED` tag selectors riding
+    `org-todo-state-tags-triggers`.  Those tags are gone; the skip
+    functions walk `gtd/map-task-ancestors` instead, so the exclusion is
+    severing-aware (§2) — a category heading between the shelved ancestor
+    and the entry ends the walk, and the entry stays visible.
+    """
+
+    def _block(self, org_dir, name):
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0, stderr
+        blocks = [b for b in data["blocks"] if b["name"] == name]
+        assert blocks, [b["name"] for b in data["blocks"]]
+        return {t["heading"] for b in blocks for t in b["tasks"]}
+
+    # ── Next Tasks ────────────────────────────────────────────────────
+
+    def test_next_tasks_hidden_by_each_ancestor_state(self, org_dir):
+        _write_repair_org(org_dir, """\
+* WAITING Nwait project
+** NEXT Nwait next
+* DEFER Ndefer project
+** NEXT Ndefer next
+* CANCELLED Ncancel project
+** NEXT Ncancel next
+* DONE Ndone project
+** NEXT Ndone next
+* TODO Nopen project
+** NEXT Nopen next
+""", name="nextblock.org")
+        rows = self._block(org_dir, "Next Tasks")
+        for hidden in ("Nwait next", "Ndefer next",
+                       "Ncancel next", "Ndone next"):
+            assert hidden not in rows, (hidden, rows)
+        # Control: the same shape under an open ancestor is listed.
+        assert "Nopen next" in rows, rows
+
+    def test_next_tasks_severing_control(self, org_dir):
+        # The test that distinguishes ancestor-state walking from the old
+        # tag inheritance: under inheritance the NEXT carried :WAITING:
+        # and was hidden; under §2 descent the bucket severs the walk, so
+        # `Sev P` is not an ancestor of `Sev R` at all.
+        _write_repair_org(org_dir, """\
+* WAITING Sev P
+** Sev Bucket
+*** TODO Sev Q
+**** NEXT Sev R
+""", name="severblock.org")
+        rows = self._block(org_dir, "Next Tasks")
+        assert "Sev R" in rows, rows
+
+    # ── Tasks ─────────────────────────────────────────────────────────
+
+    def test_tasks_hidden_by_each_ancestor_state(self, org_dir):
+        _write_repair_org(org_dir, """\
+* WAITING Twait project
+** TODO Twait child
+* DEFER Tdefer project
+** TODO Tdefer child
+* CANCELLED Tcancel project
+** TODO Tcancel child
+* DONE Tdone project
+** TODO Tdone child
+""", name="tasksblock.org")
+        rows = self._block(org_dir, "Tasks")
+        for hidden in ("Twait child", "Tdefer child",
+                       "Tcancel child", "Tdone child"):
+            assert hidden not in rows, (hidden, rows)
+
+    def test_tasks_severing_control(self, org_dir):
+        _write_repair_org(org_dir, """\
+* WAITING Tsev P
+** Tsev Bucket
+*** TODO Tsev Q
+""", name="taskssever.org")
+        rows = self._block(org_dir, "Tasks")
+        assert "Tsev Q" in rows, rows
+
+    # ── Waiting ───────────────────────────────────────────────────────
+
+    def test_waiting_hidden_under_a_defer_ancestor(self, org_dir):
+        _write_repair_org(org_dir, """\
+* DEFER Wdefer project
+** WAITING Wshelved
+* TODO Wopen project
+** WAITING Wlive
+""", name="waitblock.org")
+        rows = self._block(org_dir, "Waiting")
+        assert "Wshelved" not in rows, rows
+        assert "Wlive" in rows, rows
+
+    def test_waiting_fixture_rows_unchanged(self, org_dir):
+        # Neither fixture WAITING row has a hiding ancestor, so the block's
+        # contents over `fixtures/` are exactly what they were before #40.
+        # ("Consider buying a new monitor" is absent both before and after:
+        # it is scheduled, so the Waiting block's date filter drops it and
+        # the Agenda block carries it — unrelated to the tag scrub.)
+        rows = self._block(org_dir, "Waiting")
+        assert rows == {"Get travel insurance quote"}, rows
+
+    # ── Stuck Projects ────────────────────────────────────────────────
+
+    def test_stuck_excludes_deferred_projects(self, org_dir):
+        _write_repair_org(org_dir, """\
+* DEFER Kdefer project
+** TODO Kdefer child
+* DEFER Kdefer ancestor
+** TODO Kburied project
+*** TODO Kburied child
+* TODO Kstuck project
+** TODO Kstuck child
+""", name="stuckblock.org")
+        rows = self._block(org_dir, "Stuck Projects")
+        assert "Kdefer project" not in rows, rows
+        # Only reachable via ancestor state — no tag ever expressed it
+        # across the deferred ancestor.
+        assert "Kburied project" not in rows, rows
+        # Control: an open, inactive project is still stuck.
+        assert "Kstuck project" in rows, rows
+
+    def test_stuck_next_under_a_waiting_subproject_still_unsticks(self, org_dir):
+        # Pre-change classification, preserved: `gtd/has-active-in-subtree-p`
+        # sees the NEXT (and the WAITING), so the root is active, not stuck.
+        _write_repair_org(org_dir, """\
+* TODO Kactive project
+** WAITING Kwaiting sub
+*** NEXT Kfront
+""", name="stuckwaiting.org")
+        rows = self._block(org_dir, "Stuck Projects")
+        assert "Kactive project" not in rows, rows
+
+    # ── Projects ──────────────────────────────────────────────────────
+
+    def test_projects_excludes_deferred(self, org_dir):
+        _write_repair_org(org_dir, """\
+* DEFER Pdefer project
+** NEXT Pdefer front
+* DEFER Pdefer ancestor
+** TODO Pburied project
+*** NEXT Pburied front
+* TODO Popen project
+** NEXT Popen front
+""", name="projblock.org")
+        rows = self._block(org_dir, "Projects")
+        assert "Pdefer project" not in rows, rows
+        assert "Pburied project" not in rows, rows
+        assert "Popen project" in rows, rows
+
+    # ── Deferred ──────────────────────────────────────────────────────
+
+    def test_deferred_block_membership(self, org_dir):
+        _write_repair_org(org_dir, """\
+* DEFER Ddefer ancestor
+** DEFER Dburied
+* DEFER Dlone project
+** TODO Dlone child
+""", name="deferblock.org")
+        rows = self._block(org_dir, "Deferred")
+        # Represented by its ancestor's row (§5.4).
+        assert "Dburied" not in rows, rows
+        # Intended change: a DEFER project with no NEXT child is an
+        # own-state DEFER task, so it belongs to this block.  The old
+        # `gtd/skip-stuck-projects' hid it.
+        assert "Dlone project" in rows, rows
 
 
 class TestStuckViewSevering:

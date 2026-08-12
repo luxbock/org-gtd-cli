@@ -173,7 +173,7 @@ CLOSED: [2026-01-10 Fri 12:00]
 - State "DONE"       from "TODO"       [2026-01-10 Fri 12:00]
 :END:
 [2026-01-08 Wed]
-**** WAITING Get travel insurance quote :WAITING:email:
+**** WAITING Get travel insurance quote :email:
 [2026-03-08 Sun 10:00]
 Waiting for reply from insurance company
 * Finance                                                                 :finance:
@@ -191,7 +191,7 @@ DEADLINE: <2026-03-15 Sun>
 - Power outage corrupted the database (had to resync from scratch)
 - Need USB UPS with auto-shutdown support
 [2026-03-11 Wed 13:35]
-** WAITING Consider buying a new monitor :WAITING:
+** WAITING Consider buying a new monitor
 SCHEDULED: <2026-03-09 Mon>
 [2026-03-08 Sun 23:51]
 ** DONE Buy new router
