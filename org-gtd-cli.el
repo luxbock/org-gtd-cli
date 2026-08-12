@@ -5173,14 +5173,28 @@ CATEGORY (--category) uses substring match on non-TODO headings in tasks.org."
                                      (goto-char target-pos)
                                      (org-get-heading t t t t)))))
              (if is-dry-run
-                 (if org-gtd-cli/json-mode
-                     (org-gtd-cli/output
-                      `((version . 1) (command . "refile")
-                        (heading . ,heading) (file . ,rel-file)
-                        (target_heading . ,target-heading)
-                        (target_file . ,rel-target) (dry_run . t)))
-                   (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
-                                  heading rel-target target-name rel-file)))
+                 ;; §4.0 dry-run parity: the preview predicts the real
+                 ;; outcome, the repair side effects included — the same
+                 ;; set `org-gtd-cli/refile-repair-invariants' reports,
+                 ;; computed from the pre-move state (the move has not
+                 ;; happened, so the destination is read without it).
+                 (let ((preview (org-gtd-cli/refile-predict-repairs
+                                 target-buf target-pos heading
+                                 (org-get-todo-state)
+                                 (current-buffer) (line-beginning-position))))
+                   (if org-gtd-cli/json-mode
+                       (org-gtd-cli/output
+                        `((version . 1) (command . "refile")
+                          (heading . ,heading) (file . ,rel-file)
+                          (target_heading . ,target-heading)
+                          (target_file . ,rel-target) (dry_run . t)
+                          (side_effects . ,(apply #'vector preview))))
+                     (princ (format "Would refile: \"%s\" -> %s/%s (%s)\n"
+                                    heading rel-target target-name rel-file))
+                     ;; Same printer, same wording as the real path — only
+                     ;; the tense differs (§4.0).
+                     (dolist (e preview)
+                       (org-gtd-cli/princ-waiting-effect e t))))
                ;; Perform the refile. Use a marker for target-pos so it
                ;; tracks correctly when source and target share a buffer
                ;; (deletion of the source subtree can shift positions).
@@ -5311,6 +5325,71 @@ side effects (§4.0/§4.1)."
        ;; nothing cascades there.
        (when (and moved-open (gtd/task-heading-p))
          (setq effects (append effects (org-gtd-cli/closure-repair nil t))))
+       effects))))
+
+(defun org-gtd-cli/refile-predict-repairs (target-buf target-pos moved-heading
+                                                      moved-state src-buf
+                                                      src-pos)
+  "Predict the repairs `refile' would report for a move, without moving.
+TARGET-POS is a position in TARGET-BUF pointing at the destination
+parent; MOVED-HEADING and MOVED-STATE describe the subtree still sitting
+at SRC-POS in SRC-BUF.  Returns the same side-effect alists, in the same order,
+that `org-gtd-cli/refile-repair-invariants' returns for the real move —
+`--dry-run' predicts the real outcome (§4.0), so the two lists must
+agree element for element.
+
+The whole difference from the real path is that the arrival is not there
+yet: the destination is read *without* it, and what the move would add is
+supplied from MOVED-STATE instead.  Concretely — the moved NEXT is
+freestanding iff the destination parent is not itself a task, and its
+duplicate-NEXT test scans the destination's existing children only — the
+source heading itself excluded, since refiling a child to the parent it
+already sits under must not read the mover as its own duplicate.  The destination
+parent has by definition gained a task child, so the keyword-outgrown
+repair's precondition holds without a `org-gtd-cli/has-todo-children-p'
+check, and the closure cascade is walked from that parent with SELF
+exactly as the real path walks it.
+
+Nothing is mutated and no buffer is saved: both repairs are called with
+DRY."
+  (with-current-buffer target-buf
+    (org-with-wide-buffer
+     (goto-char target-pos)
+     (let* ((child-level (1+ (org-current-level)))
+            (subtree-end (save-excursion (org-end-of-subtree t) (point)))
+            (parent-is-task (gtd/task-heading-p))
+            (rel-target (org-gtd-cli/relative-filename (buffer-file-name)))
+            (effects '()))
+       ;; (1) the moved subtree's own NEXT demotion.  Reported against the
+       ;; destination file — that is where the demoted subtree lands, and
+       ;; where the real path reads `buffer-file-name' from.
+       (when (string= moved-state "NEXT")
+         (let ((freestanding (not parent-is-task))
+               (has-other-next nil))
+           (save-excursion
+             (forward-line 1)
+             (while (and (not has-other-next) (< (point) subtree-end)
+                         (re-search-forward org-heading-regexp subtree-end t))
+               (when (and (= (org-current-level) child-level)
+                          (not (and (eq (current-buffer) src-buf)
+                                    (= (line-beginning-position) src-pos)))
+                          (equal (org-get-todo-state) "NEXT"))
+                 (setq has-other-next t))))
+           (when (or freestanding has-other-next)
+             (setq effects
+                   (list `((action . "state-change")
+                           (heading . ,moved-heading)
+                           (old_state . "NEXT")
+                           (new_state . "TODO")
+                           (file . ,rel-target)))))))
+       ;; (2) the destination parent's keyword-outgrown demotion (the
+       ;; WAITING case brings its §4.6 unwinds and `project-needs-review').
+       (goto-char target-pos)
+       (setq effects (append effects (org-gtd-cli/keyword-outgrown-repair t)))
+       ;; (3) the closure cascade, from the destination parent with SELF.
+       (goto-char target-pos)
+       (when (and (not (member moved-state org-done-keywords)) parent-is-task)
+         (setq effects (append effects (org-gtd-cli/closure-repair t t))))
        effects))))
 
 ;; --- set-next ---

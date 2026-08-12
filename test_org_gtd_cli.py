@@ -13652,3 +13652,214 @@ class TestKeywordOutgrownRepair:
         # The move itself happened; only the placement it triggered is
         # left unreported.
         assert_line_before(f, "TODO Rmover", "TODO Rsource")
+
+
+def _refile_dry_then_real(org_dir, *args):
+    """Run `refile ARGS' first as a dry run, then for real.
+
+    §4.0 dry-run parity: returns the predicted side effects only after
+    asserting that (a) the preview wrote nothing to disk and (b) the real
+    call reports exactly the same effect list, element for element.
+    """
+    org_files = sorted(org_dir.glob("*.org"))
+    before = {f: f.read_bytes() for f in org_files}
+    dry, stderr, rc = run_cli_json("refile", *args, "--dry-run",
+                                   org_dir=org_dir)
+    assert rc == 0, stderr
+    assert dry["dry_run"] is True, dry
+    # The key is always present, exactly as in `set-state's dry envelope.
+    assert "side_effects" in dry, dry
+    for f, blob in before.items():
+        assert f.read_bytes() == blob, f"--dry-run wrote to {f.name}"
+    real, stderr, rc = run_cli_json("refile", *args, org_dir=org_dir)
+    assert rc == 0, stderr
+    assert dry["side_effects"] == real["side_effects"], (
+        dry["side_effects"], real["side_effects"])
+    return real["side_effects"]
+
+
+def _actions(effects):
+    """EFFECTS as (action, heading) pairs, in report order."""
+    return [(e["action"], e["heading"]) for e in effects]
+
+
+class TestRefileDryRunPredictsRepairs:
+    """§4.0: `refile --dry-run' predicts the repairs the real call reports.
+
+    The preview is computed from the *pre-move* state — the arrival is not
+    at the destination yet — so every scenario here runs the same refile
+    twice and pins prediction == outcome (#56/#57).
+    """
+
+    def test_waiting_destination_with_a_reason_only(self, org_dir):
+        # (a) The demotion plus the review flag; no link to unwind.
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--reason", "vendor",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rwaiter")
+        assert _actions(effects) == [
+            ("state-change", "Rwaiter"),
+            ("project-needs-review", "Rwaiter"),
+        ]
+        assert _states({"side_effects": effects}) == [
+            ("Rwaiter", "WAITING", "TODO")]
+        assert "TODO Rwaiter" in f.read_text()
+
+    def test_waiting_destination_carrying_a_blocker_link(self, org_dir):
+        # (b) The §4.6 exit cleanup rides along: one blocker-link-removed
+        # per unwound link, between the demotion and the review flag.
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            "--reason", "vendor", org_dir=org_dir)
+        assert rc == 0, stderr
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rwaiter")
+        assert _actions(effects) == [
+            ("state-change", "Rwaiter"),
+            ("blocker-link-removed", "Rblocker"),
+            ("project-needs-review", "Rwaiter"),
+        ]
+        assert _prop_under(f, "Rwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Rblocker", "TRIGGER") is None
+
+    def test_open_arrival_under_a_closed_destination_chain(self, org_dir):
+        # (c) The reopen cascade, nearest ancestor first.
+        f = _write_repair_org(org_dir, """\
+* DONE Rdest
+** DONE Rdest child
+* TODO Rsource
+** TODO Rmover
+""")
+        effects = _refile_dry_then_real(
+            org_dir, "Rmover", "--to", "Rdest child")
+        assert _states({"side_effects": effects}) == [
+            ("Rdest child", "DONE", "TODO"),
+            ("Rdest", "DONE", "TODO"),
+        ]
+        assert "DONE" not in f.read_text()
+
+    def test_arriving_next_that_duplicates_a_sibling_next(self, org_dir):
+        # (d) I6 at the destination.  The predicate must be evaluated
+        # WITHOUT the mover among the destination's children — it is still
+        # at its source — while knowing it is about to arrive.
+        f = _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rdest")
+        assert _states({"side_effects": effects}) == [
+            ("Rmover", "NEXT", "TODO")]
+        assert "** TODO Rmover" in f.read_text()
+
+    def test_arriving_next_that_becomes_freestanding(self, org_dir):
+        # (d, I3 half) A category destination severs: the mover has no task
+        # ancestor there, so the prediction is its own demotion and nothing
+        # else — a category never cascades.
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** Rcategory
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rcategory")
+        assert _states({"side_effects": effects}) == [
+            ("Rmover", "NEXT", "TODO")]
+        assert "DONE Rclosed" in f.read_text()
+
+    def test_a_plain_refile_predicts_an_empty_effect_list(self, org_dir):
+        # (e) Nothing to repair: the key is still there, holding [].
+        _write_repair_org(org_dir, """\
+* TODO Rdest
+** TODO Ralpha
+* TODO Rsource
+** TODO Rmover
+** TODO Rother
+""")
+        assert _refile_dry_then_real(
+            org_dir, "Rmover", "--to", "Rdest") == []
+
+    def test_both_repairs_at_once_are_predicted_in_report_order(self, org_dir):
+        # The destination parent's demotion first, then the cascade above
+        # it — the order `org-gtd-cli/refile-repair-invariants' reports.
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** NEXT Rleaf
+* TODO Rsource
+** TODO Rmover
+""")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rleaf")
+        assert _states({"side_effects": effects}) == [
+            ("Rleaf", "NEXT", "TODO"),
+            ("Rclosed", "DONE", "TODO"),
+        ]
+        assert "DONE" not in f.read_text()
+
+    def test_the_predicted_demotion_names_the_destination_file(self, org_dir):
+        # The mover is reported where it lands, not where it came from —
+        # the preview has to read the destination's file, not the source's.
+        _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+""", name="rdest.org")
+        _write_repair_org(org_dir, """\
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""", name="rsource.org")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rdest")
+        assert [(e["heading"], e["file"]) for e in effects] == [
+            ("Rmover", "rdest.org")]
+
+    def test_text_mode_dry_run_uses_the_preview_wording(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** NEXT Rleaf
+* TODO Rsource
+** TODO Rmover
+""")
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rleaf", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Would refile" in stdout, stdout
+        assert 'Would demote: "Rleaf" NEXT -> TODO' in stdout, stdout
+        assert 'Would reopen: "Rclosed" DONE -> TODO' in stdout, stdout
+        # Machine vocabulary never leaks into text mode.
+        assert "state-change" not in stdout, stdout
+        assert f.read_bytes() == before
+
+    def test_text_mode_dry_run_predicts_the_waiting_unwind(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rwaiter", "--dry-run",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Would demote: "Rwaiter" WAITING -> TODO' in stdout, stdout
+        assert 'Would remove blocker link: "Rblocker"' in stdout, stdout
