@@ -1338,7 +1338,7 @@ def cmd_set_priority(args):
         args.priority = args.substr
         args.substr = None
     if not args.priority and not args.clear:
-        print("Error: provide a PRIORITY (A, B, or C) or --clear", file=sys.stderr)
+        print("Error: provide a PRIORITY (A) or --clear", file=sys.stderr)
         return 1
     if not validate_target(args):
         return 1
@@ -1610,7 +1610,7 @@ Modifying:
   set-done          Mark task DONE (with auto-progress)
   set-state         Change TODO state (DONE here skips set-done's auto-progress)
   set-next          Promote task/child to NEXT
-  set-priority      Set priority A/B/C
+  set-priority      Set the [#A] cookie (A only), or --clear it
   set-cancelled     Mark task CANCELLED
   refile            Move task to a different heading
   move              Reorder a task among siblings
@@ -1751,7 +1751,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--schedule", help="SCHEDULED date")
     p.add_argument("--deadline", help="DEADLINE date")
     p.add_argument("--time", help="Time for scheduled/deadline date (HH:MM)")
-    p.add_argument("--priority", help="Priority: A, B, or C")
+    p.add_argument("--priority", help="Priority: A only ([#A] is the only cookie)")
     p.add_argument("--file", help="Target file (relative to ORG_DIRECTORY)")
     p.add_argument("--category", help="Insert under this heading in tasks.org")
     p.add_argument("--state",
@@ -1775,7 +1775,7 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--tags", help="Comma-separated tags")
     p.add_argument("--schedule", help="SCHEDULED date")
     p.add_argument("--deadline", help="DEADLINE date")
-    p.add_argument("--priority", help="Priority: A, B, or C")
+    p.add_argument("--priority", help="Priority: A only ([#A] is the only cookie)")
     p.add_argument("--state",
                    help="Initial state (default: TODO); NEXT is legal here "
                         "(a hand-declared parallel front), WAITING is "
@@ -1851,11 +1851,13 @@ Run 'org-gtd-cli <command> -h' for command details."""
     p.add_argument("--index", help="Disambiguate with 1-based index")
     p.set_defaults(func=cmd_set_next)
 
-    p = sub.add_parser("set-priority", help="Set priority A/B/C")
+    p = sub.add_parser("set-priority",
+                       help="Set the [#A] cookie (A only), or --clear it")
     p.add_argument("substr", nargs="?", default=None, metavar="SUBSTR",
                    help="Heading substring")
     p.add_argument("priority", nargs="?", default=None, metavar="PRIORITY",
-                   help="Priority: A, B, or C")
+                   help="Priority: A only ([#A] is the only cookie; relative "
+                        "importance within a project is task order)")
     p.add_argument("--id", dest="task_id", help="Resolve the task by its org :ID:")
     p.add_argument("--clear", action="store_true", help="Remove priority")
     p.add_argument("--index", help="Disambiguate with 1-based index")
