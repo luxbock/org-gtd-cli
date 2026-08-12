@@ -522,7 +522,9 @@ Block membership, defined on §2/§3 + 5.2 (the state-semantic blocks):
 - **Stuck Projects** — exactly {p : stuck(p)} (subprojects included:
   stuckness is evaluated per project heading).
 - **Projects** — all open, non-deferred (§5.2 — own or ancestor
-  DEFER) projects.
+  DEFER), non-stuck projects: Stuck Projects and Projects partition
+  the open non-deferred projects, so a stuck project appears only in
+  its own block (ruled intentional 2026-08-12).
 - **Deferred** — own-state DEFER tasks only: a task under a DEFER
   ancestor is represented by that ancestor's row, never listed
   individually; future-dated hidden until due; stuck projects
