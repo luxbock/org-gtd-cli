@@ -5370,9 +5370,10 @@ supplied from MOVED-STATE instead.  Concretely — the moved NEXT is
 freestanding iff the destination parent is not itself a task, and its
 duplicate-NEXT test scans the destination's existing children only — the
 source heading itself excluded, since refiling a child to the parent it
-already sits under must not read the mover as its own duplicate.  The destination
-parent has by definition gained a task child, so the keyword-outgrown
-repair's precondition holds without a `org-gtd-cli/has-todo-children-p'
+already sits under must not read the mover as its own duplicate.  The
+destination parent has by definition gained a task child, so the
+keyword-outgrown repair's precondition holds without a
+`org-gtd-cli/has-todo-children-p'
 check, and the closure cascade is walked from that parent with SELF
 exactly as the real path walks it.
 
