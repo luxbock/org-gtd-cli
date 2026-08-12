@@ -1621,6 +1621,52 @@ class TestSetState:
         assert "\\\\" in drawer
         assert reason in drawer
 
+    def test_repeated_transitions_log_plain_state_strings(self, org_dir):
+        """#80: a LOGBOOK state note never carries elisp read syntax.
+
+        Two transitions of the SAME heading in ONE process is the minimal
+        reproducer, and it needs no daemon: `org-todo' puts an
+        `org-todo-head' text property on the keyword it writes even in
+        batch, so the second transition's `old-state' is a propertized
+        string. The old `%-12S' formatter printed that with `prin1', so
+        the drawer got `from #("WAITING" 0 7 (org-todo-head "WAITING"))'
+        instead of `from "WAITING"' — unreadable to Org's own log
+        parsing. (Under the daemon jit-lock fontification propertizes
+        even the FIRST transition's state; the same strip covers both.)
+        """
+        items = [
+            {"command": "set-state",
+             "args": {"heading": "Book a rental car", "state": "WAITING",
+                      "reason": "vendor has not confirmed"}},
+            {"command": "set-state",
+             "args": {"heading": "Book a rental car", "state": "TODO",
+                      "reason": "vendor confirmed the car class"}},
+        ]
+        data, stderr, rc = run_batch_mixed(
+            items, org_dir=org_dir, env_overrides={"ORG_GTD_CLI_DAEMON": "0"})
+        assert rc == 0
+        assert data is not None
+        assert data["summary"] == {"total": 2, "succeeded": 2, "failed": 0}
+
+        text = (org_dir / "tasks.org").read_text()
+        # The negative invariant: no elisp read syntax anywhere in the file.
+        assert "#(" not in text
+
+        drawer = logbook_for_heading(org_dir / "tasks.org", "Book a rental car")
+        state_lines = [line.strip() for line in drawer.splitlines()
+                       if line.strip().startswith("- State")]
+        assert len(state_lines) == 2
+        for line in state_lines:
+            # Org's own shape: quoted states, 12-column padding, timestamp.
+            assert re.match(
+                r'^- State "[A-Z]+"\s+from "[A-Z]+"\s+'
+                r'\[\d{4}-\d{2}-\d{2} [A-Z][a-z]{2} \d{2}:\d{2}\] \\\\$',
+                line), line
+        assert '- State "WAITING"' in drawer
+        assert 'from "NEXT"' in drawer
+        assert '- State "TODO"' in drawer
+        assert 'from "WAITING"' in drawer
+
     def test_without_reason_does_not_add_reason_note(self, org_dir):
         # DEFER, not WAITING: the §4.6 guardrail (#39) makes a reasonless
         # WAITING entry a rejection, so the reasonless-note shape has to
@@ -9220,16 +9266,20 @@ def run_batch(command, items_json, *extra_args, org_dir):
     return data, result.stderr, result.returncode
 
 
-def run_batch_mixed(items, *, org_dir, json_flag=True, stdin=None):
+def run_batch_mixed(items, *, org_dir, json_flag=True, stdin=None,
+                    env_overrides=None):
     """Run org-gtd-cli [--json] batch with JSON on stdin.
 
     `items` is serialized to JSON unless raw `stdin` text is given.
+    env_overrides, if given, is merged into the subprocess environment.
     Returns (data, stderr, returncode).
     """
     env = os.environ.copy()
     env["ORG_DIRECTORY"] = str(org_dir) + "/"
     env["ORG_GTD_CORE_FILE"] = str(CORE_FILE)
     env["ORG_GTD_ELISP_FILE"] = str(ELISP_FILE)
+    if env_overrides:
+        env.update(env_overrides)
     cmd = ["python3", str(CLI_SCRIPT)]
     if json_flag:
         cmd.append("--json")
