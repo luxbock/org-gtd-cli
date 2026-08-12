@@ -13863,3 +13863,44 @@ class TestRefileDryRunPredictsRepairs:
         assert rc == 0, stderr
         assert 'Would demote: "Rwaiter" WAITING -> TODO' in stdout, stdout
         assert 'Would remove blocker link: "Rblocker"' in stdout, stdout
+
+
+class TestStuckViewSevering:
+    """§2 severing reaches the user-visible stuck view (#58).
+
+    `gtd/skip-non-stuck-projects` asks `gtd/has-active-in-subtree-p`, which
+    walks task descendants rather than the raw outline: a NEXT below one of
+    the project's own category headings belongs to another task world and
+    must not un-stick it.  The old implementation scanned the subtree with
+    `re-search-forward "^\\*+ \\(?:NEXT\\|WAITING\\) "`, which pierced the
+    category heading and reported the project as active — so this fixture
+    discriminates the two readings.
+    """
+
+    def _stuck_headings(self, org_dir):
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0, stderr
+        blocks = [b for b in data["blocks"] if "stuck" in b["name"].lower()]
+        assert blocks, [b["name"] for b in data["blocks"]]
+        return {t["heading"] for b in blocks for t in b["tasks"]}
+
+    def test_a_severed_next_does_not_un_stick_its_ancestor(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Sstuck project
+** TODO Splain child
+** Sbucket
+*** TODO Sburied project
+**** NEXT Sburied next
+* TODO Sactive project
+** NEXT Sfront
+** TODO Sother
+""", name="stuck.org")
+        stuck = self._stuck_headings(org_dir)
+        # The NEXT under Sbucket is severed: Sstuck project has no active
+        # task descendant of its own, so the view reports it (I11).
+        assert "Sstuck project" in stuck, stuck
+        # The sibling with a direct NEXT child is not stuck — the control
+        # that keeps this from passing on a view that lists everything.
+        assert "Sactive project" not in stuck, stuck
+        # The severed subtree is its own project, and it is not stuck.
+        assert "Sburied project" not in stuck, stuck
