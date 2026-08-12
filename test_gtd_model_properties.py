@@ -167,91 +167,30 @@ def models_and_ops(draw, max_ops=6):
 # The main preservation property
 # ---------------------------------------------------------------------------
 
-def _in_closed_subtree(model, node):
-    """True when node or a task ancestor is closed."""
-    chain = [node] + model.task_ancestors(node)
-    return any(n.keyword in CLOSED_STATES for n in chain)
-
-
 def hits_parked_spec_gap(model, op, args, kwargs):
-    """PARKED SPEC QUESTIONS (2026-07-31, awaiting olli's ruling).
+    """PARKED SPEC QUESTIONS — none are open (kept as the routing hook).
 
-    Gap families where a documented-legal operation produces a state
-    the §3 matrix / §6 invariants forbid — the real CLI accepts both
-    (the append-last, demotion-unplaced, and WAITING-above-the-NEXT-
-    prefix families recorded here originally were resolved by the §4.1
-    arrival/NEXT-exit rules and closed by #34):
+    Gap families where a documented-legal operation produced a state the
+    §3 matrix / §6 invariants forbid used to be routed around here, so
+    the preservation properties could stay green while the gap waited
+    for a ruling. Every family recorded here has since been closed, so
+    the properties now run against every generated shape:
 
-    - **I4 outside closure**: §4.3 add-subtask, §4.6 set-state
-      (reopening), and §4.8 refile can place an open task under a closed
-      heading — a closed project with open descendants (§4.0's closure
-      repair closes this; #56, §7 row 10).
-    - **Leaf→project WAITING repair missing**: §4.3/§4.8 only repair a
-      NEXT parent that becomes a project; a WAITING leaf gaining its
-      first task child keeps WAITING on what is now a project heading
-      (§3 allows WAITING on leaves only; #56, §7 row 11).
-
-    Until the fixes land, the preservation property routes around these
-    cases; the xfail test below keeps them visible.
-
-    One further parked question needs NO routing (no property depends
-    on it) but awaits the same ruling batch:
-
-    - **§4.5 step-3 scope**: the all-done-but-open-subproject test
-      scans *direct* task children while the activity test above it
-      scans *descendants*; a category heading inside a subproject makes
-      an all-done subproject pass silently with no review emitted
-      (gtd_reference_model.py, promotion scan). §4.5's prose does not
-      pin the scope.
+    - the append-last, demotion-unplaced and WAITING-above-the-NEXT-
+      prefix families: resolved by the §4.1 arrival/NEXT-exit rules
+      (#34);
+    - **§4.5 step-3 scope** (retired 2026-08-11, #58): §2 severing pins
+      the scope on both sides — the activity test scans *task*
+      descendants, which stop at a category heading, and the
+      all-done-but-open test scans direct task children, so at the
+      subproject's own level the two see the same set;
+    - **I4 outside closure** and **Leaf→project WAITING repair
+      missing** (retired 2026-08-11, #56, §7 rows 10-11): the §4.0
+      closure repair now reopens a closed ancestor chain around an open
+      arrival, and the keyword-outgrown repair demotes a WAITING parent
+      that gains its first task child. Their witnesses are the two
+      deterministic tests below.
     """
-    if op == "add_subtask":
-        parent, _, state = args
-        node, _ = model.find(parent)
-        if node is None:
-            return False
-        return ((state not in CLOSED_STATES
-                 and _in_closed_subtree(model, node))
-                or (node.keyword == "WAITING"
-                    and model.is_leaf_task(node)))
-    if op == "set_state":
-        target, state = args
-        node, _ = model.find(target)
-        if node is None:
-            return False
-        return (state not in CLOSED_STATES
-                and any(n.keyword in CLOSED_STATES
-                        for n in model.task_ancestors(node)))
-    if op == "set_next":
-        # Same I4 family: set-next can reopen (promote) inside a closed
-        # subtree — directly, or via the project path's child promotion.
-        node, _ = model.find(args[0])
-        return (node is not None
-                and any(n.keyword in CLOSED_STATES
-                        for n in model.task_ancestors(node)))
-    if op == "refile":
-        node, _ = model.find(args[0])
-        # Resolve the target the way refile itself does: --to is an
-        # exact any-heading-type match (categories included), --category
-        # is category-scoped. A task-scoped find() here would let
-        # category-heading targets bypass the guard.
-        if "to" in kwargs:
-            target = next(
-                (n for n in model.all_nodes()
-                 if n.heading.lower() == kwargs["to"].lower()), None)
-        else:
-            target, _ = model.find_category(kwargs["category"])
-        if node is None or target is None:
-            return False
-        subtree_open = (node.keyword not in CLOSED_STATES
-                        or any(n.keyword not in CLOSED_STATES
-                               for n in model.task_descendants(node)))
-        subtree_has_task = (node.keyword is not None
-                            or bool(model.task_descendants(node)))
-        makes_waiting_project = (subtree_has_task
-                                 and target.keyword == "WAITING"
-                                 and model.is_leaf_task(target))
-        return ((subtree_open and _in_closed_subtree(model, target))
-                or makes_waiting_project)
     return False
 
 
@@ -276,17 +215,105 @@ def test_invariants_preserved_by_any_operation_sequence(model_and_ops):
             f"after {op}{args}: {violations}")
 
 
-@pytest.mark.xfail(
-    reason="spec gap parked for ruling 2026-07-31: §4.3/§4.6/§4.8 "
-           "preconditions do not protect I4 (closed project can gain "
-           "open descendants); the real CLI accepts all three",
-    strict=True)
-def test_spec_gap_i4_unguarded_outside_closure():
-    """The minimal witness: add-subtask of an open child under a DONE
-    leaf yields a closed project with open descendants."""
+def test_closure_repair_keeps_i4_outside_closure():
+    """§4.0 closure repair (#56, was the parked I4-outside-closure gap).
+
+    The former witness: add-subtask of an open child under a DONE leaf
+    used to yield a closed project with open descendants. The arrival
+    now reopens the ancestor and reports it.
+    """
     model = Model([Node("done-leaf", "DONE")])
     result = model.add_subtask("done-leaf", "open child", "TODO")
     assert result.ok
+    assert model.find("done-leaf")[0].keyword == "TODO"
+    assert [(e.action, e.heading, e.old_state, e.new_state)
+            for e in result.side_effects] == [
+        ("state-change", "done-leaf", "DONE", "TODO")]
+    assert not model.check_invariants()
+
+
+def test_closure_repair_cascades_the_whole_closed_chain():
+    """§4.0: *each* closed ancestor reopens, nearest first, and a
+    category heading severs the chain (§2) — the outer DONE heading
+    above one is left closed."""
+    model = Model([Node("cat", None, children=[
+        Node("outer", "DONE", children=[
+            Node("inner", "CANCELLED")])])])
+    result = model.set_state("inner", "TODO")
+    assert result.ok
+    assert [(e.action, e.heading, e.old_state, e.new_state)
+            for e in result.side_effects] == [
+        ("state-change", "outer", "DONE", "TODO")]
+    assert not model.check_invariants()
+
+
+def test_waiting_parent_demotes_when_it_grows_a_task_child():
+    """§4.0 keyword-outgrown repair (#56, was the parked WAITING gap):
+    state-change + blocker-link-removed + project-needs-review."""
+    model = Model([Node("blocker", "TODO", triggers=("waiter",)),
+                   Node("waiter", "WAITING", waiting_reason="held",
+                        blockers=("blocker",))])
+    result = model.add_subtask("waiter", "child", "TODO")
+    assert result.ok
+    waiter = model.find("waiter")[0]
+    assert waiter.keyword == "TODO"
+    assert waiter.waiting_reason is None and waiter.blockers == ()
+    assert model.find("blocker")[0].triggers == ()
+    assert [(e.action, e.heading) for e in result.side_effects] == [
+        ("state-change", "waiter"),
+        ("blocker-link-removed", "blocker"),
+        ("project-needs-review", "waiter")]
+    assert not model.check_invariants()
+
+
+def test_waiting_parent_without_a_blocker_link_reports_two_effects():
+    """§4.6: no link to unwind → no spurious ``blocker-link-removed``."""
+    model = Model([Node("waiter", "WAITING", waiting_reason="held")])
+    result = model.add_subtask("waiter", "child", "TODO")
+    assert result.ok
+    assert [(e.action, e.heading) for e in result.side_effects] == [
+        ("state-change", "waiter"), ("project-needs-review", "waiter")]
+
+
+def test_set_next_reopens_a_closed_project_child_leaf():
+    """§4.7: a closed *project child* is accepted and reopens straight
+    to NEXT, cascading its closed ancestors."""
+    model = Model([Node("proj", "DONE", children=[Node("aa", "DONE")])])
+    result = model.set_next("aa")
+    assert result.ok, result.error
+    assert result.old_state == "DONE" and result.new_state == "NEXT"
+    assert [(e.action, e.heading, e.old_state, e.new_state)
+            for e in result.side_effects] == [
+        ("state-change", "proj", "DONE", "TODO")]
+    assert not model.check_invariants()
+
+
+def test_set_next_still_rejects_a_closed_lone_task():
+    """§4.7/I3: a *lone* task never takes NEXT, closed or open."""
+    model = Model([Node("lone", "DONE")])
+    before = model.skeleton()
+    result = model.set_next("lone")
+    assert result.ok is False
+    assert model.skeleton() == before  # I12
+
+
+def test_refile_repairs_a_closed_and_waiting_destination():
+    """§4.8: an open subtree arriving under a WAITING leaf demotes it
+    (with the §4.6 cleanup) and reopens the closed chain above it."""
+    model = Model([
+        Node("blocker", "TODO", triggers=("dest",)),
+        Node("outer", "DONE", children=[
+            Node("dest", "WAITING", waiting_reason="held",
+                 blockers=("blocker",))]),
+        Node("mover", "TODO"),
+    ])
+    result = model.refile("mover", to="dest")
+    assert result.ok, result.error
+    assert [(e.action, e.heading) for e in result.side_effects] == [
+        ("state-change", "dest"),
+        ("blocker-link-removed", "blocker"),
+        ("project-needs-review", "dest"),
+        ("state-change", "outer")]
     assert not model.check_invariants()
 
 

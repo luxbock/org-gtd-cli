@@ -1970,8 +1970,28 @@ class TestRefileSelfMatch:
 # ===========================================================================
 
 class TestRefileToExact:
-    def test_exact_match_finds_first(self, org_dir):
+    def test_duplicate_destination_is_rejected(self, org_dir):
+        # §4.0: I12 applies to destinations exactly as to targets — the
+        # fixture has two "Tools" headings, so the exact match is
+        # ambiguous, nothing moves, and the candidates are named.
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in stderr
+        assert "Computers/Tools" in stderr
+        assert "Research/Tools" in stderr
+        assert "Buy groceries" in (org_dir / "inbox.org").read_text()
+
+    def test_duplicate_destination_json_lists_candidates(self, org_dir):
+        envelope, stderr, rc = run_cli_json(
+            "refile", "Buy groceries", "--to", "Tools", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in envelope["error"]
+        assert [m["path"] for m in envelope["matches"]] == [
+            "Computers/Tools", "Research/Tools"]
+        assert "Buy groceries" in (org_dir / "inbox.org").read_text()
+
+    def test_exact_match_resolves_a_unique_destination(self, org_dir):
+        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Shopping", org_dir=org_dir)
         assert rc == 0
         assert "Buy groceries" not in (org_dir / "inbox.org").read_text()
         assert "Refiled" in stdout
@@ -1993,14 +2013,29 @@ class TestRefileToExact:
         assert "Refiled" in stdout
 
     def test_case_insensitive(self, org_dir):
-        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "tools", org_dir=org_dir)
+        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "shopping", org_dir=org_dir)
         assert rc == 0
         assert "Refiled" in stdout
+
+    def test_case_insensitive_duplicates_are_ambiguous_too(self, org_dir):
+        # Matching is case-insensitive on both sides of the uniqueness
+        # test, so a lowercase target still sees both "Tools".
+        stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "tools", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in stderr
 
     def test_dry_run(self, org_dir):
         stdout, stderr, rc = run_cli("refile", "Buy groceries", "--to", "Shopping", "--dry-run", org_dir=org_dir)
         assert rc == 0
         assert "Would refile" in stdout
+        assert "Buy groceries" in (org_dir / "inbox.org").read_text()
+
+    def test_dry_run_predicts_the_ambiguity_failure(self, org_dir):
+        # §4.0: a dry run predicts the real outcome, failure included.
+        stdout, stderr, rc = run_cli(
+            "refile", "Buy groceries", "--to", "Tools", "--dry-run", org_dir=org_dir)
+        assert rc == 2
+        assert "Multiple destination matches" in stderr
         assert "Buy groceries" in (org_dir / "inbox.org").read_text()
 
     def test_intermediate_path_typo_fails(self, org_dir):
@@ -11325,6 +11360,256 @@ class TestReadIdentity:
 
 
 # ===========================================================================
+# §2 severing + the open-severed-tasks warning (issue #58, §7 row 13)
+# ===========================================================================
+#
+# SEMANTICS.md §2: a task's parent task is its immediate parent heading iff
+# that heading is a task; a category heading (no TODO keyword) severs the
+# chain. Task descendants are the transitive closure of *direct* task
+# children, so a task whose only children are category headings is a LEAF.
+# Consequences pinned here: the I4 closure guard no longer blocks on severed
+# work, the promotion rule treats such a task as promotable, and every close
+# (and `archive`) *observes* the open severed tasks it leaves behind through
+# the §4.4/§4.11 `open-severed-tasks` warning.
+
+
+class TestSeveringAndOpenSeveredTasksWarning:
+
+    # "Renovate the bathroom" is a leaf under §2: its only child is the
+    # category heading "Plumbing".
+    SEVERED = (
+        "#+TITLE: Tasks\n\n"
+        "* TODO Home\n"
+        "** TODO Renovate the bathroom\n"
+        "*** Plumbing\n"
+        "**** TODO Call plumber\n"
+        "**** DONE Measure\n"
+    )
+    # Same shape plus an open sibling, for the promotion repro.
+    SEVERED_WITH_SIBLING = (
+        "#+TITLE: Tasks\n\n"
+        "* TODO Home\n"
+        "** TODO Fix the porch light\n"
+        "** TODO Renovate the bathroom\n"
+        "*** Plumbing\n"
+        "**** TODO Call plumber\n"
+    )
+    # Nothing open below the category heading: the clean path.
+    SEVERED_ALL_CLOSED = (
+        "#+TITLE: Tasks\n\n"
+        "* TODO Home\n"
+        "** TODO Renovate the bathroom\n"
+        "*** Plumbing\n"
+        "**** DONE Call plumber\n"
+    )
+
+    @pytest.fixture
+    def severed(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED)
+        return org_dir
+
+    @pytest.fixture
+    def sibling(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED_WITH_SIBLING)
+        return org_dir
+
+    @pytest.fixture
+    def all_closed(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED_ALL_CLOSED)
+        return org_dir
+
+    EXPECTED = {
+        "type": "open-severed-tasks",
+        "file": "tasks.org",
+        "heading": "Renovate the bathroom",
+        "count": 1,
+        "tasks": ["Call plumber"],
+    }
+
+    # --- I4: severed work does not block the close ------------------------
+
+    @pytest.mark.parametrize("command,keyword", [
+        ("set-done", "DONE"), ("set-cancelled", "CANCELLED")])
+    def test_close_over_severed_open_task_succeeds(
+            self, severed, command, keyword):
+        """The confirmed repro: `Call plumber` is open but severed by
+        `Plumbing`, so it is no task descendant of `Renovate the bathroom'
+        and the I4 guard lets the close through."""
+        data, stderr, rc = run_cli_json(
+            command, "Renovate the bathroom", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["new_state"] == keyword
+        text = (severed / "tasks.org").read_text()
+        assert f"** {keyword} Renovate the bathroom" in text
+        # The severed work is untouched, exactly as the warning claims.
+        assert "**** TODO Call plumber" in text
+
+    def test_set_state_close_over_severed_open_task_succeeds(self, severed):
+        data, stderr, rc = run_cli_json(
+            "set-state", "Renovate the bathroom", "DONE", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["new_state"] == "DONE"
+
+    def test_unsevered_open_child_still_blocks(self, org_dir):
+        """The guard is *narrowed*, not removed: a direct open task child
+        still blocks, so I4 keeps its teeth."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* TODO Home\n"
+            "** TODO Renovate the bathroom\n"
+            "*** TODO Call plumber\n")
+        data, _, rc = run_cli_json(
+            "set-done", "Renovate the bathroom", org_dir=org_dir)
+        assert rc == 1
+        assert "incomplete subtask" in data["error"]
+
+    # --- §4.4 warning -----------------------------------------------------
+
+    @pytest.mark.parametrize("command", ["set-done", "set-cancelled"])
+    def test_close_json_carries_the_warning(self, severed, command):
+        data, stderr, rc = run_cli_json(
+            command, "Renovate the bathroom", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+
+    def test_set_state_close_json_carries_the_warning(self, severed):
+        data, stderr, rc = run_cli_json(
+            "set-state", "Renovate the bathroom", "DONE", org_dir=severed)
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+
+    @pytest.mark.parametrize("command", ["set-done", "set-cancelled"])
+    def test_dry_run_previews_the_same_warning(self, severed, command):
+        """The preview observes exactly what the real call will: the
+        warning is computed before any mutation."""
+        preview, _, prc = run_cli_json(
+            command, "Renovate the bathroom", "--dry-run", org_dir=severed)
+        assert prc == 0
+        assert preview["warnings"] == [self.EXPECTED]
+        # ... and the dry run changed nothing.
+        assert (severed / "tasks.org").read_text() == self.SEVERED
+
+    def test_text_mode_mirrors_the_warning_on_stderr(self, severed):
+        stdout, stderr, rc = run_cli(
+            "set-done", "Renovate the bathroom", org_dir=severed)
+        assert rc == 0
+        assert "Done: Renovate the bathroom" in stdout
+        assert "Warning:" in stderr
+        assert '1 open task(s) below "Renovate the bathroom"' in stderr
+        assert '"Call plumber"' in stderr
+        # stdout stays clean — warnings are a stderr channel in text mode.
+        assert "Warning:" not in stdout
+
+    def test_closed_severed_tasks_are_not_warned_about(self, all_closed):
+        """Only *open* severed work is reported; a finished task below a
+        category heading leaves the envelope byte-identical."""
+        data, stderr, rc = run_cli_json(
+            "set-done", "Renovate the bathroom", org_dir=all_closed)
+        assert rc == 0, stderr
+        assert "warnings" not in data
+
+    def test_no_severed_work_no_warnings_key(self, org_dir):
+        data, stderr, rc = run_cli_json(
+            "set-done", "Buy groceries", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "warnings" not in data
+
+    # --- §4.11 archive ----------------------------------------------------
+
+    # Archivable shape: closed long ago (pinned "now" below), and not
+    # inside an active project — "Home" carries no keyword here.
+    SEVERED_ARCHIVABLE = (
+        "#+TITLE: Tasks\n\n"
+        "* Home\n"
+        "** DONE Renovate the bathroom\n"
+        "CLOSED: [2026-01-05 Mon 10:00]\n"
+        "*** Plumbing\n"
+        "**** TODO Call plumber\n"
+    )
+    ARCHIVE_NOW = {"ORG_GTD_CLI_NOW": "2026-06-01"}
+
+    @pytest.fixture
+    def archivable(self, org_dir):
+        (org_dir / "tasks.org").write_text(self.SEVERED_ARCHIVABLE)
+        return org_dir
+
+    def _archive(self, org_dir, *extra):
+        stdout, stderr, rc = run_cli(
+            "--json", "archive", "Renovate the bathroom", *extra,
+            org_dir=org_dir, env_overrides=self.ARCHIVE_NOW)
+        return json.loads(stdout), stderr, rc
+
+    def test_archive_observes_open_severed_tasks(self, archivable):
+        """§4.11: severed work never blocks the archive, but the archive
+        observes it with the same entry — nothing is silently relocated."""
+        data, stderr, rc = self._archive(archivable)
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+        assert "Call plumber" in \
+            (archivable / "tasks.org_archive").read_text()
+
+    def test_archive_dry_run_previews_the_warning(self, archivable):
+        before = (archivable / "tasks.org").read_text()
+        data, stderr, rc = self._archive(archivable, "--dry-run")
+        assert rc == 0, stderr
+        assert data["warnings"] == [self.EXPECTED]
+        assert (archivable / "tasks.org").read_text() == before
+
+    # --- §2 structure: a severed-only task is a LEAF ----------------------
+
+    def test_promotion_treats_severed_only_task_as_a_leaf(self, sibling):
+        """The second confirmed repro: closing `Fix the porch light`
+        promotes `Renovate the bathroom`, which is a leaf under §2 —
+        its only task lives below a category heading."""
+        data, stderr, rc = run_cli_json(
+            "set-done", "Fix the porch light", org_dir=sibling)
+        assert rc == 0, stderr
+        assert data["side_effects"] == [{
+            "action": "state-change",
+            "heading": "Renovate the bathroom",
+            "old_state": "TODO",
+            "new_state": "NEXT",
+            "file": "tasks.org",
+        }]
+        assert "** NEXT Renovate the bathroom" in \
+            (sibling / "tasks.org").read_text()
+
+    def test_all_done_but_open_subproject_ignores_severed_work(self, org_dir):
+        """§4.5 step 3 reads the subproject's *direct* task children, and
+        under §2 that is the whole of its task content at that level: the
+        open `Book electrician` is severed by `Electrics`, so the
+        subproject genuinely is all-done-but-open and gets its review."""
+        (org_dir / "tasks.org").write_text(
+            "#+TITLE: Tasks\n\n"
+            "* TODO Home\n"
+            "** TODO Water the plants\n"
+            "** TODO Renovate the kitchen\n"
+            "*** DONE Order cabinets\n"
+            "*** Electrics\n"
+            "**** TODO Book electrician\n")
+        data, stderr, rc = run_cli_json(
+            "set-done", "Water the plants", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert {
+            "action": "project-needs-review",
+            "heading": "Renovate the kitchen",
+            "file": "tasks.org",
+        } in data["side_effects"]
+        # The severed task is untouched — nothing was promoted inside it.
+        assert "**** TODO Book electrician" in \
+            (org_dir / "tasks.org").read_text()
+
+    def test_set_next_accepts_a_severed_only_task(self, severed):
+        """§4.7 rejects NEXT on a project heading; a task whose only
+        children are category headings is not a project."""
+        _, stderr, rc = run_cli_json(
+            "set-next", "Renovate the bathroom", org_dir=severed)
+        assert rc == 0, stderr
+        assert "** NEXT Renovate the bathroom" in \
+            (severed / "tasks.org").read_text()
+
+
+# ===========================================================================
 # sync-conflict warning (issue #35): the universal `warnings` envelope field
 # ===========================================================================
 #
@@ -12349,7 +12634,12 @@ class TestWaitingConditionalWake:
         assert self._wake_state(org_dir, f) == "TODO"
 
     def test_wakes_as_todo_when_it_has_task_children(self, org_dir):
-        # Criterion 14b: a task that grew children wakes as TODO.
+        # Criterion 14b: a task with children wakes as TODO.  The child is
+        # appended by hand, the way Emacs would: since §4.0 a WAITING leaf
+        # that gains its first task child is demoted on the spot, so
+        # `add-subtask' can no longer leave a WAITING parent asleep (and
+        # the #46 guard refuses to put WAITING on a heading that already
+        # has children).
         f = _write_waiting_org(org_dir, """\
 * TODO Wother project
 ** TODO Wblocker
@@ -12357,8 +12647,7 @@ class TestWaitingConditionalWake:
 ** TODO Wwaiter
 """)
         _link(org_dir)
-        rc = run_cli("add-subtask", "Wwaiter", "Wgrown", org_dir=org_dir)[2]
-        assert rc == 0
+        f.write_text(f.read_text().rstrip("\n") + "\n*** TODO Wgrown\n")
         assert self._wake_state(org_dir, f) == "TODO"
 
     def test_wakes_as_todo_when_an_open_sibling_precedes(self, org_dir):
@@ -13002,3 +13291,666 @@ class TestWaitingReservedProperties:
         assert rc == 1
         assert "reserved" in stderr
         assert _prop_under(f, "Wwaiter", key) is None
+
+
+# ---------------------------------------------------------------------------
+# §4.0 structural repairs (#56)
+# ---------------------------------------------------------------------------
+
+def _write_repair_org(org_dir, content, name="repair.org"):
+    (org_dir / name).write_text(content)
+    return org_dir / name
+
+
+def _states(data):
+    """The `state-change' side effects of DATA as (heading, old, new)."""
+    return [(e["heading"], e["old_state"], e["new_state"])
+            for e in data["side_effects"] if e["action"] == "state-change"]
+
+
+class TestClosureRepair:
+    """§4.0: an open task revealed under a closed chain reopens it."""
+
+    def test_add_subtask_reopens_the_whole_chain_nearest_first(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** CANCELLED Rmiddle
+*** DONE Rleaf
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [
+            ("Rleaf", "DONE", "TODO"),
+            ("Rmiddle", "CANCELLED", "TODO"),
+            ("Rproject", "DONE", "TODO"),
+        ]
+        text = f.read_text()
+        for heading in ("Rproject", "Rmiddle", "Rleaf", "Rchild"):
+            assert f"TODO {heading}" in text, text
+
+    def test_add_subtask_text_mode_reports_each_reopen(self, org_dir):
+        _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rleaf
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Reopened: "Rleaf" DONE -> TODO' in stdout, stdout
+        assert 'Reopened: "Rproject" DONE -> TODO' in stdout, stdout
+        # Machine vocabulary never leaks into text mode.
+        assert "state-change" not in stdout, stdout
+
+    def test_a_closed_child_does_not_reopen_its_ancestors(self, org_dir):
+        # The trigger is an *open* arrival; a closed one leaves the record
+        # closed.
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rleaf
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rchild", "--state", "DONE",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == []
+        assert "DONE Rproject" in f.read_text()
+
+    def test_a_category_heading_severs_the_cascade(self, org_dir):
+        # §2: the walk stops at the first non-task ancestor, so an arrival
+        # under a category reopens nothing above it.  `refile' is the only
+        # way in — `add-subtask' addresses tasks, not category headings.
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** Rbucket
+* TODO Rsource
+** TODO Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rbucket", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = f.read_text()
+        assert "DONE Rclosed" in text, text
+        assert "*** TODO Rmover" in text, text
+
+    def test_set_state_reopening_cascades(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rmiddle
+*** DONE Rtask
+""")
+        data, stderr, rc = run_cli_json(
+            "set-state", "Rtask", "TODO", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [
+            ("Rmiddle", "DONE", "TODO"),
+            ("Rproject", "DONE", "TODO"),
+        ]
+        assert "TODO Rmiddle" in f.read_text()
+
+    def test_set_state_into_a_closed_state_never_cascades(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** TODO Rtask
+""")
+        data, stderr, rc = run_cli_json(
+            "set-state", "Rtask", "DONE", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == []
+        assert "DONE Rproject" in f.read_text()
+
+    def test_set_state_dry_run_predicts_the_cascade_and_writes_nothing(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rmiddle
+*** DONE Rtask
+""")
+        before = f.read_bytes()
+        data, stderr, rc = run_cli_json(
+            "set-state", "Rtask", "TODO", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [
+            ("Rmiddle", "DONE", "TODO"),
+            ("Rproject", "DONE", "TODO"),
+        ]
+        assert f.read_bytes() == before
+
+    def test_set_state_dry_run_text_mode_uses_the_preview_wording(
+            self, org_dir):
+        _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rtask
+""")
+        stdout, stderr, rc = run_cli(
+            "set-state", "Rtask", "TODO", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Would reopen: "Rproject" DONE -> TODO' in stdout, stdout
+
+    def test_refile_into_a_closed_destination_reopens_it(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rdest
+** DONE Rdest child
+* TODO Rsource
+** TODO Rmover
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rdest child", org_dir=org_dir)
+        assert rc == 0, stderr
+        # §4.0: refile reports the cascade, nearest ancestor first.
+        assert _states(data) == [
+            ("Rdest child", "DONE", "TODO"),
+            ("Rdest", "DONE", "TODO"),
+        ]
+        text = f.read_text()
+        assert "TODO Rdest child" in text, text
+        assert "TODO Rdest" in text, text
+        assert "DONE" not in text, text
+
+    def test_refile_of_a_closed_subtree_leaves_the_destination_closed(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rdest
+** DONE Rdest child
+* TODO Rsource
+** DONE Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rdest child", org_dir=org_dir)
+        assert rc == 0, stderr
+        text = f.read_text()
+        assert "DONE Rdest child" in text, text
+        assert "DONE Rdest\n" in text, text
+
+    def test_set_next_on_a_closed_project_child_reopens_the_project(
+            self, org_dir):
+        # §4.7: the closed leaf is accepted and reopens straight to NEXT,
+        # and its closed ancestors cascade behind it.
+        f = _write_repair_org(org_dir, """\
+* DONE Rproject
+** DONE Rleaf
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json("set-next", "Rleaf", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rproject", "DONE", "TODO")]
+        text = f.read_text()
+        assert "NEXT Rleaf" in text, text
+        assert "TODO Rproject" in text, text
+
+    def test_set_next_still_rejects_a_closed_lone_task(self, org_dir):
+        # I3 is enforced before the state check, so admitting closed leaves
+        # cannot admit a lone task.
+        f = _write_repair_org(org_dir, """\
+* DONE Rlone
+""")
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli("set-next", "Rlone", org_dir=org_dir)
+        assert rc == 1
+        assert f.read_bytes() == before
+
+
+class TestKeywordOutgrownRepair:
+    """§4.0: a leaf that grows a child loses a keyword it may no longer hold."""
+
+    def test_add_subtask_demotes_a_next_parent(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rleaf", "NEXT", "TODO")]
+        assert "TODO Rleaf" in f.read_text()
+
+    def test_add_subtask_text_mode_calls_it_a_demotion(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+""")
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Rleaf", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Demoted: "Rleaf" NEXT -> TODO' in stdout, stdout
+        assert "state-change" not in stdout, stdout
+
+    def test_a_second_child_leaves_the_todo_parent_alone(self, org_dir):
+        # The repair fires on the *first* child only — nothing to repair
+        # once the keyword is already legal.
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rleaf
+*** TODO Rfirst
+""")
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rleaf", "Rsecond", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == []
+        assert "TODO Rleaf" in f.read_text()
+
+    def test_add_subtask_demotes_a_waiting_parent_and_unwinds_its_link(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            "--reason", "vendor", org_dir=org_dir)
+        assert rc == 0, stderr
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rwaiter", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rwaiter", "WAITING", "TODO")]
+        assert [e for e in data["side_effects"]
+                if e["action"] == "blocker-link-removed"
+                and e["heading"] == "Rblocker"], data["side_effects"]
+        assert [e for e in data["side_effects"]
+                if e["action"] == "project-needs-review"
+                and e["heading"] == "Rwaiter"], data["side_effects"]
+        # §4.6 exit cleanup ran in full; I10 keeps the record.
+        assert _prop_under(f, "Rwaiter", "REASON") is None
+        assert _prop_under(f, "Rwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Rblocker", "TRIGGER") is None
+        assert ":LOGBOOK:" in logbook_for_heading(f, "Rwaiter")
+        assert "TODO Rwaiter" in f.read_text()
+
+    def test_a_reason_only_waiting_parent_demotes_without_a_link_unwind(
+            self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rwaiter
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--reason", "vendor",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        data, stderr, rc = run_cli_json(
+            "add-subtask", "Rwaiter", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert [e["action"] for e in data["side_effects"]] == [
+            "state-change", "project-needs-review"]
+        assert _prop_under(f, "Rwaiter", "REASON") is None
+
+    def test_waiting_demotion_text_mode_reports_the_whole_repair(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        stdout, stderr, rc = run_cli(
+            "add-subtask", "Rwaiter", "Rchild", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Demoted: "Rwaiter" WAITING -> TODO' in stdout, stdout
+        assert 'Removed blocker link: "Rblocker"' in stdout, stdout
+        assert "project-needs-review" not in stdout, stdout
+
+    def test_refile_onto_a_waiting_parent_demotes_it(self, org_dir):
+        # The repair runs whatever caused the growth, and refile reports
+        # it in the same vocabulary the primitive commands use (§4.0).
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            "--reason", "vendor", org_dir=org_dir)
+        assert rc == 0, stderr
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rwaiter", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert sorted((e["action"], e["heading"])
+                      for e in data["side_effects"]) == [
+            ("blocker-link-removed", "Rblocker"),
+            ("project-needs-review", "Rwaiter"),
+            ("state-change", "Rwaiter"),
+        ]
+        assert _states(data) == [("Rwaiter", "WAITING", "TODO")]
+        text = f.read_text()
+        assert "** TODO Rwaiter" in text, text
+        assert "WAITING Rwaiter" not in text, text
+        assert _prop_under(f, "Rwaiter", "REASON") is None
+        assert _prop_under(f, "Rwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Rblocker", "TRIGGER") is None
+
+    def test_refile_onto_a_next_parent_demotes_it(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+* TODO Rsource
+** TODO Rmover
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rleaf", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rleaf", "NEXT", "TODO")]
+        text = f.read_text()
+        assert "** TODO Rleaf" in text, text
+        assert "NEXT Rleaf" not in text, text
+
+    def test_refile_reports_the_moved_next_demotion(self, org_dir):
+        # I6 at the destination: the arriving NEXT duplicates a sibling,
+        # and the demotion is a machine-made state change like any other.
+        f = _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rdest", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rmover", "NEXT", "TODO")]
+        assert "** TODO Rmover" in f.read_text()
+
+    def test_refile_reports_the_freestanding_next_demotion(self, org_dir):
+        # I3: a NEXT that lands outside any task ancestry demotes.
+        f = _write_repair_org(org_dir, """\
+* Rcategory
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rcategory", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert _states(data) == [("Rmover", "NEXT", "TODO")]
+        assert "** TODO Rmover" in f.read_text()
+
+    def test_refile_text_mode_reports_the_repairs(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** NEXT Rleaf
+** TODO Rother
+* TODO Rsource
+** TODO Rmover
+""")
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rleaf", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Refiled" in stdout, stdout
+        assert 'Demoted: "Rleaf" NEXT -> TODO' in stdout, stdout
+
+    def test_refile_placement_is_never_a_side_effect(self, org_dir):
+        # BOUNDARY: the arrival reorder is the outcome, not a repair.
+        f = _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+** TODO Ralpha
+** DONE Rclosed
+* TODO Rsource
+** TODO Rmover
+** TODO Rother
+""")
+        data, stderr, rc = run_cli_json(
+            "refile", "Rmover", "--to", "Rdest", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert data["side_effects"] == []
+        # The move itself happened; only the placement it triggered is
+        # left unreported.
+        assert_line_before(f, "TODO Rmover", "TODO Rsource")
+
+
+def _refile_dry_then_real(org_dir, *args):
+    """Run `refile ARGS' first as a dry run, then for real.
+
+    §4.0 dry-run parity: returns the predicted side effects only after
+    asserting that (a) the preview wrote nothing to disk and (b) the real
+    call reports exactly the same effect list, element for element.
+    """
+    org_files = sorted(org_dir.glob("*.org"))
+    before = {f: f.read_bytes() for f in org_files}
+    dry, stderr, rc = run_cli_json("refile", *args, "--dry-run",
+                                   org_dir=org_dir)
+    assert rc == 0, stderr
+    assert dry["dry_run"] is True, dry
+    # The key is always present, exactly as in `set-state's dry envelope.
+    assert "side_effects" in dry, dry
+    for f, blob in before.items():
+        assert f.read_bytes() == blob, f"--dry-run wrote to {f.name}"
+    real, stderr, rc = run_cli_json("refile", *args, org_dir=org_dir)
+    assert rc == 0, stderr
+    assert dry["side_effects"] == real["side_effects"], (
+        dry["side_effects"], real["side_effects"])
+    return real["side_effects"]
+
+
+def _actions(effects):
+    """EFFECTS as (action, heading) pairs, in report order."""
+    return [(e["action"], e["heading"]) for e in effects]
+
+
+class TestRefileDryRunPredictsRepairs:
+    """§4.0: `refile --dry-run' predicts the repairs the real call reports.
+
+    The preview is computed from the *pre-move* state — the arrival is not
+    at the destination yet — so every scenario here runs the same refile
+    twice and pins prediction == outcome (#56/#57).
+    """
+
+    def test_waiting_destination_with_a_reason_only(self, org_dir):
+        # (a) The demotion plus the review flag; no link to unwind.
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--reason", "vendor",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rwaiter")
+        assert _actions(effects) == [
+            ("state-change", "Rwaiter"),
+            ("project-needs-review", "Rwaiter"),
+        ]
+        assert _states({"side_effects": effects}) == [
+            ("Rwaiter", "WAITING", "TODO")]
+        assert "TODO Rwaiter" in f.read_text()
+
+    def test_waiting_destination_carrying_a_blocker_link(self, org_dir):
+        # (b) The §4.6 exit cleanup rides along: one blocker-link-removed
+        # per unwound link, between the demotion and the review flag.
+        f = _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            "--reason", "vendor", org_dir=org_dir)
+        assert rc == 0, stderr
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rwaiter")
+        assert _actions(effects) == [
+            ("state-change", "Rwaiter"),
+            ("blocker-link-removed", "Rblocker"),
+            ("project-needs-review", "Rwaiter"),
+        ]
+        assert _prop_under(f, "Rwaiter", "BLOCKER") is None
+        assert _prop_under(f, "Rblocker", "TRIGGER") is None
+
+    def test_open_arrival_under_a_closed_destination_chain(self, org_dir):
+        # (c) The reopen cascade, nearest ancestor first.
+        f = _write_repair_org(org_dir, """\
+* DONE Rdest
+** DONE Rdest child
+* TODO Rsource
+** TODO Rmover
+""")
+        effects = _refile_dry_then_real(
+            org_dir, "Rmover", "--to", "Rdest child")
+        assert _states({"side_effects": effects}) == [
+            ("Rdest child", "DONE", "TODO"),
+            ("Rdest", "DONE", "TODO"),
+        ]
+        assert "DONE" not in f.read_text()
+
+    def test_arriving_next_that_duplicates_a_sibling_next(self, org_dir):
+        # (d) I6 at the destination.  The predicate must be evaluated
+        # WITHOUT the mover among the destination's children — it is still
+        # at its source — while knowing it is about to arrive.
+        f = _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rdest")
+        assert _states({"side_effects": effects}) == [
+            ("Rmover", "NEXT", "TODO")]
+        assert "** TODO Rmover" in f.read_text()
+
+    def test_arriving_next_that_becomes_freestanding(self, org_dir):
+        # (d, I3 half) A category destination severs: the mover has no task
+        # ancestor there, so the prediction is its own demotion and nothing
+        # else — a category never cascades.
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** Rcategory
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rcategory")
+        assert _states({"side_effects": effects}) == [
+            ("Rmover", "NEXT", "TODO")]
+        assert "DONE Rclosed" in f.read_text()
+
+    def test_a_plain_refile_predicts_an_empty_effect_list(self, org_dir):
+        # (e) Nothing to repair: the key is still there, holding [].
+        _write_repair_org(org_dir, """\
+* TODO Rdest
+** TODO Ralpha
+* TODO Rsource
+** TODO Rmover
+** TODO Rother
+""")
+        assert _refile_dry_then_real(
+            org_dir, "Rmover", "--to", "Rdest") == []
+
+    def test_both_repairs_at_once_are_predicted_in_report_order(self, org_dir):
+        # The destination parent's demotion first, then the cascade above
+        # it — the order `org-gtd-cli/refile-repair-invariants' reports.
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** NEXT Rleaf
+* TODO Rsource
+** TODO Rmover
+""")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rleaf")
+        assert _states({"side_effects": effects}) == [
+            ("Rleaf", "NEXT", "TODO"),
+            ("Rclosed", "DONE", "TODO"),
+        ]
+        assert "DONE" not in f.read_text()
+
+    def test_the_predicted_demotion_names_the_destination_file(self, org_dir):
+        # The mover is reported where it lands, not where it came from —
+        # the preview has to read the destination's file, not the source's.
+        _write_repair_org(org_dir, """\
+* TODO Rdest
+** NEXT Rkeeper
+""", name="rdest.org")
+        _write_repair_org(org_dir, """\
+* TODO Rsource
+** NEXT Rmover
+** TODO Rother
+""", name="rsource.org")
+        effects = _refile_dry_then_real(org_dir, "Rmover", "--to", "Rdest")
+        assert [(e["heading"], e["file"]) for e in effects] == [
+            ("Rmover", "rdest.org")]
+
+    def test_text_mode_dry_run_uses_the_preview_wording(self, org_dir):
+        f = _write_repair_org(org_dir, """\
+* DONE Rclosed
+** NEXT Rleaf
+* TODO Rsource
+** TODO Rmover
+""")
+        before = f.read_bytes()
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rleaf", "--dry-run", org_dir=org_dir)
+        assert rc == 0, stderr
+        assert "Would refile" in stdout, stdout
+        assert 'Would demote: "Rleaf" NEXT -> TODO' in stdout, stdout
+        assert 'Would reopen: "Rclosed" DONE -> TODO' in stdout, stdout
+        # Machine vocabulary never leaks into text mode.
+        assert "state-change" not in stdout, stdout
+        assert f.read_bytes() == before
+
+    def test_text_mode_dry_run_predicts_the_waiting_unwind(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Rproject
+** TODO Rblocker
+** TODO Rwaiter
+* TODO Rsource
+** TODO Rmover
+""")
+        _, stderr, rc = run_cli(
+            "set-state", "Rwaiter", "WAITING", "--blocked-by", "Rblocker",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        stdout, stderr, rc = run_cli(
+            "refile", "Rmover", "--to", "Rwaiter", "--dry-run",
+            org_dir=org_dir)
+        assert rc == 0, stderr
+        assert 'Would demote: "Rwaiter" WAITING -> TODO' in stdout, stdout
+        assert 'Would remove blocker link: "Rblocker"' in stdout, stdout
+
+
+class TestStuckViewSevering:
+    """§2 severing reaches the user-visible stuck view (#58).
+
+    `gtd/skip-non-stuck-projects` asks `gtd/has-active-in-subtree-p`, which
+    walks task descendants rather than the raw outline: a NEXT below one of
+    the project's own category headings belongs to another task world and
+    must not un-stick it.  The old implementation scanned the subtree with
+    `re-search-forward "^\\*+ \\(?:NEXT\\|WAITING\\) "`, which pierced the
+    category heading and reported the project as active — so this fixture
+    discriminates the two readings.
+    """
+
+    def _stuck_headings(self, org_dir):
+        data, stderr, rc = run_cli_json("agenda-view", org_dir=org_dir)
+        assert rc == 0, stderr
+        blocks = [b for b in data["blocks"] if "stuck" in b["name"].lower()]
+        assert blocks, [b["name"] for b in data["blocks"]]
+        return {t["heading"] for b in blocks for t in b["tasks"]}
+
+    def test_a_severed_next_does_not_un_stick_its_ancestor(self, org_dir):
+        _write_repair_org(org_dir, """\
+* TODO Sstuck project
+** TODO Splain child
+** Sbucket
+*** TODO Sburied project
+**** NEXT Sburied next
+* TODO Sactive project
+** NEXT Sfront
+** TODO Sother
+""", name="stuck.org")
+        stuck = self._stuck_headings(org_dir)
+        # The NEXT under Sbucket is severed: Sstuck project has no active
+        # task descendant of its own, so the view reports it (I11).
+        assert "Sstuck project" in stuck, stuck
+        # The sibling with a direct NEXT child is not stuck — the control
+        # that keeps this from passing on a view that lists everything.
+        assert "Sactive project" not in stuck, stuck
+        # The severed subtree is its own project, and it is not stuck.
+        assert "Sburied project" not in stuck, stuck

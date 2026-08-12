@@ -69,7 +69,14 @@
 
 (setq org-log-done 'time
       org-log-into-drawer t
-      org-enforce-todo-dependencies t
+      ;; I4 closure blocking is ours, not org's: see
+      ;; `gtd/block-todo-from-open-task-descendants' below.  Org's own
+      ;; blocker walks the *whole* subtree, which pierces the category
+      ;; headings SEMANTICS.md §2 severs, so `org-enforce-todo-dependencies'
+      ;; stays nil (that also makes org's blocker a no-op should any
+      ;; `org-mode' call re-add it) and `org-blocker-hook' names ours.
+      org-enforce-todo-dependencies nil
+      org-blocker-hook '(gtd/block-todo-from-open-task-descendants)
       org-refile-use-outline-path t
       org-outline-path-complete-in-steps nil
       org-refile-allow-creating-parent-nodes 'confirm
@@ -97,49 +104,113 @@ exercise date-sensitive archiving against fixed fixtures). Nil = live clock.")
 
 (setq org-refile-target-verify-function #'gtd/verify-refile-target)
 
+;; ── §2 task descent (severing) ──────────────────────────────────────────────
+;; SEMANTICS.md §2: task structure follows *immediate* task parentage.  A
+;; category heading -- one with no TODO keyword -- SEVERS the chain: tasks
+;; below it are an independent task world, never descendants of anything
+;; above it, wherever that heading sits.  Every traversal that asks a
+;; *task-structure* question (project/leaf detection, ancestry, activity,
+;; the I4 closure guard) goes through the two primitives below rather than
+;; scanning the raw subtree.  Traversals that ask a *textual* question
+;; (dates in the subtree, archive relocation) keep scanning the outline.
+
+(defun gtd/task-heading-p ()
+  "Non-nil when the heading at point carries a TODO keyword (§2: a task)."
+  (member (org-get-todo-state) org-todo-keywords-1))
+
+(defun gtd/map-subtree-task-headings (fun)
+  "Call FUN with point on each task heading inside the subtree at point.
+FUN receives one argument: non-nil when that task is SEVERED from the
+entry -- it lies below one of the entry's category headings (§2) and so
+is not a task descendant of it.  The entry itself is never visited.  FUN
+may exit early with `throw'.  Returns nil."
+  (save-restriction
+    (widen)
+    (save-excursion
+      (org-back-to-heading t)
+      (let ((subtree-end (save-excursion (org-end-of-subtree t)))
+            ;; Level of the outermost category heading whose subtree we
+            ;; are currently inside, or nil when in the entry's own task
+            ;; world.  Everything at a deeper level is severed.
+            (severed-at nil))
+        (outline-next-heading)
+        (while (and (not (eobp)) (< (point) subtree-end))
+          (let ((level (funcall outline-level)))
+            (when (and severed-at (<= level severed-at))
+              (setq severed-at nil))
+            (cond
+             ((gtd/task-heading-p) (funcall fun (and severed-at t)))
+             (severed-at nil)           ; a category below a category
+             (t (setq severed-at level))))
+          (outline-next-heading))
+        nil))))
+
+(defun gtd/map-task-descendants (fun)
+  "Call FUN with point on each task descendant of the entry at point.
+Task descendants are the transitive closure of *direct task children*
+\(§2\): the walk never enters a category heading, so nothing below one is
+visited.  The entry itself is not visited.  FUN may exit early with
+`throw'.  Returns nil."
+  (gtd/map-subtree-task-headings
+   (lambda (severed) (unless severed (funcall fun)))))
+
+(defun gtd/first-task-descendant (pred)
+  "Return the first task descendant of the entry at point satisfying PRED.
+PRED is called with point on the candidate and its non-nil return value
+is what this function returns.  Severing-aware (§2); see
+`gtd/map-task-descendants'."
+  (catch 'gtd--found
+    (gtd/map-task-descendants
+     (lambda ()
+       (let ((hit (funcall pred)))
+         (when hit (throw 'gtd--found hit)))))
+    nil))
+
+(defun gtd/map-task-ancestors (fun)
+  "Call FUN with point on each task ancestor of the entry at point.
+The walk goes upward, nearest ancestor first, and stops at the first
+heading that is not itself a task: a category heading SEVERS the chain
+\(§2\), so nothing above it is an ancestor of the entry.  The entry
+itself is not visited.  FUN may exit early with `throw'.  Returns nil.
+
+The upward counterpart of `gtd/map-task-descendants': the §4.0 closure
+repair walks it so the cascade inherits severing rather than
+re-deriving it."
+  (save-restriction
+    (widen)
+    (save-excursion
+      (org-back-to-heading t)
+      (catch 'gtd--severed
+        (while (org-up-heading-safe)
+          (unless (gtd/task-heading-p)
+            (throw 'gtd--severed nil))
+          (save-excursion (funcall fun))))
+      nil)))
+
 ;; ── Project detection ───────────────────────────────────────────────────────
 
 (defun gtd/is-project-p ()
-  "Any task with a todo keyword subtask."
-  (save-restriction
-    (widen)
-    (let ((has-subtask)
-          (subtree-end (save-excursion (org-end-of-subtree t)))
-          (is-a-task (member (org-get-todo-state) org-todo-keywords-1)))
-      (save-excursion
-        (forward-line 1)
-        (while (and (not has-subtask)
-                    (< (point) subtree-end)
-                    (re-search-forward "^\*+ " subtree-end t))
-          (when (member (org-get-todo-state) org-todo-keywords-1)
-            (setq has-subtask t))))
-      (and is-a-task has-subtask))))
+  "Any task with a task child (§2: at least one task descendant).
+Tasks below the entry's own category headings are severed and do not
+count -- a task whose only children are category headings is a leaf."
+  (and (gtd/task-heading-p)
+       (and (gtd/first-task-descendant (lambda () t)) t)))
 
 (defun gtd/is-task-p ()
-  "Any task with a todo keyword and no subtask."
-  (save-restriction
-    (widen)
-    (let ((has-subtask)
-          (subtree-end (save-excursion (org-end-of-subtree t)))
-          (is-a-task (member (org-get-todo-state) org-todo-keywords-1)))
-      (save-excursion
-        (forward-line 1)
-        (while (and (not has-subtask)
-                    (< (point) subtree-end)
-                    (re-search-forward "^\*+ " subtree-end t))
-          (when (member (org-get-todo-state) org-todo-keywords-1)
-            (setq has-subtask t))))
-      (and is-a-task (not has-subtask)))))
+  "Any task with a todo keyword and no task child (§2: a leaf task).
+Tasks below the entry's own category headings are severed and do not
+make it a project."
+  (and (gtd/task-heading-p)
+       (not (gtd/first-task-descendant (lambda () t)))
+       t))
 
 (defun gtd/is-subproject-p ()
-  "Any task which is a subtask of another project."
-  (let ((is-subproject)
-        (is-a-task (member (org-get-todo-state) org-todo-keywords-1)))
-    (save-excursion
-      (while (and (not is-subproject) (org-up-heading-safe))
-        (when (member (org-get-todo-state) org-todo-keywords-1)
-          (setq is-subproject t))))
-    (and is-a-task is-subproject)))
+  "Any task whose immediate parent heading is itself a task (§2).
+A category heading between the two severs the chain, so the entry is a
+lone task / top-level project rather than a subtask."
+  (and (gtd/task-heading-p)
+       (save-excursion
+         (and (org-up-heading-safe) (gtd/task-heading-p) t))))
 
 (defun gtd/is-project-subtree-p ()
   "Any task with a todo keyword that is in a project subtree.
@@ -154,32 +225,71 @@ Callers of this function already widen the buffer view."
         t))))
 
 (defun gtd/find-project-task ()
-  "Move point to the parent (project) task if any."
+  "Move point to the root of the entry's task chain, if any.
+Walks up while each next heading is itself a task; the first category
+heading ends the walk (§2 severing), so a task under a bucket is its own
+root.  Returns the position."
   (save-restriction
     (widen)
     (let ((parent-task
            (save-excursion
              (org-back-to-heading 'invisible-ok)
              (point))))
-      (while (org-up-heading-safe)
-        (when (member (org-get-todo-state) org-todo-keywords-1)
+      (save-excursion
+        (goto-char parent-task)
+        (while (and (org-up-heading-safe) (gtd/task-heading-p))
           (setq parent-task (point))))
       (goto-char parent-task)
       parent-task)))
 
+;; ── I4 closure blocking ─────────────────────────────────────────────────────
+
+(defun gtd/block-todo-from-open-task-descendants (change-plist)
+  "Block closing a task while it has an open *task* descendant (I4).
+The single entry on `org-blocker-hook', replacing org's own
+`org-block-todo-from-children-or-siblings-or-parent': that one walks the
+whole subtree, so a task below a category heading -- severed from the
+task tree by SEMANTICS.md §2 -- blocked its enclosing task's closure.
+This one descends only through headings that are themselves tasks, so
+severed work never blocks; §4.4 has the close observe it in `warnings'
+instead.
+
+The `:ORDERED:' sibling rules org's blocker also implements are not
+reimplemented: SEMANTICS.md gives ordering no role, and the property
+appears nowhere in this system.
+
+CHANGE-PLIST is org's state-change description (see `org-blocker-hook').
+Returns non-nil to allow the change; on a block it returns nil after
+recording the offending heading in `org-block-entry-blocking', which is
+what the CLI reports as the blocker's name."
+  (catch 'gtd--allow
+    ;; Only a todo→done transition can be blocked; leaving a done state
+    ;; or moving to another open state never is.
+    (when (or (not (eq (plist-get change-plist :type) 'todo-state-change))
+              (member (plist-get change-plist :from)
+                      (cons 'done org-done-keywords))
+              (member (plist-get change-plist :to)
+                      (cons 'todo org-not-done-keywords))
+              (not (plist-get change-plist :to)))
+      (throw 'gtd--allow t))
+    (let ((blocker
+           (gtd/first-task-descendant
+            (lambda ()
+              (unless (member (org-get-todo-state) org-done-keywords)
+                (org-get-heading))))))
+      (if blocker
+          (progn (setq org-block-entry-blocking blocker) nil)
+        t))))
+
 ;; ── Project progression helpers ────────────────────────────────────────────
 
 (defun gtd/has-active-in-subtree-p ()
-  "Return non-nil if any heading in the subtree at point has NEXT or WAITING state."
-  (save-excursion
-    (let ((subtree-end (save-excursion (org-end-of-subtree t)))
-          (found nil))
-      (forward-line 1)
-      (while (and (not found)
-                  (< (point) subtree-end)
-                  (re-search-forward "^\\*+ \\(?:NEXT\\|WAITING\\) " subtree-end t))
-        (setq found t))
-      found)))
+  "Return non-nil if any task descendant of point is NEXT or WAITING.
+§5.2 active(p).  Severing-aware (§2): a NEXT below one of the entry's
+own category headings belongs to another task world and does not make
+this project active."
+  (gtd/first-task-descendant
+   (lambda () (member (org-get-todo-state) '("NEXT" "WAITING")))))
 
 (defun gtd/promote-first-child-task ()
   "Promote the first TODO non-project child of heading at point to NEXT.
@@ -409,15 +519,14 @@ lists all subtasks."
     (widen)
     (let ((next-headline (save-excursion (or (outline-next-heading) (point-max)))))
       (if (gtd/is-project-p)
-          (let* ((subtree-end (save-excursion (org-end-of-subtree t)))
-                 (has-next))
-            (save-excursion
-              (forward-line 1)
-              (while (and (not has-next)
-                          (< (point) subtree-end)
-                          (re-search-forward "^\\*+ NEXT " subtree-end t))
-                (unless (member "WAITING" (org-get-tags))
-                  (setq has-next t))))
+          ;; Severing-aware (§2): a NEXT below one of this project's own
+          ;; category headings is another task world's, so it does not
+          ;; un-stick this project.
+          (let ((has-next
+                 (gtd/first-task-descendant
+                  (lambda ()
+                    (and (equal (org-get-todo-state) "NEXT")
+                         (not (member "WAITING" (org-get-tags))))))))
             (if has-next
                 nil
               next-headline))            ; a stuck project
@@ -430,14 +539,8 @@ lists all subtasks."
     (widen)
     (let ((next-headline (save-excursion (or (outline-next-heading) (point-max)))))
       (if (gtd/is-project-p)
-          (let* ((subtree-end (save-excursion (org-end-of-subtree t)))
-                 (has-next))
-            (save-excursion
-              (forward-line 1)
-              (while (and (not has-next)
-                          (< (point) subtree-end)
-                          (re-search-forward "^\\*+ \\(?:NEXT\\|WAITING\\) " subtree-end t))
-                (setq has-next t)))
+          ;; Severing-aware (§2), same reading as §5.2 active(p).
+          (let ((has-next (gtd/has-active-in-subtree-p)))
             (if (or has-next (member "DEFER" (org-get-tags)))
                 next-headline
               nil))                      ; a stuck project
@@ -545,16 +648,17 @@ sub-project tasks, and project related tasks."
 
 (defun gtd/inside-active-project-p ()
   "Return non-nil if point is inside a project that is still active.
-Walks up via `org-up-heading-safe'.  An ancestor is \"active\" if it has
-a TODO keyword that is NOT in `org-done-keywords'."
+Walks up the chain of *task* ancestors (§2 severing): the first
+keyword-less heading ends the chain, so a task below a category heading
+is not inside anything above it.  An ancestor is \"active\" if its TODO
+keyword is not in `org-done-keywords'."
   (save-excursion
-    (let ((result nil))
-      (while (and (not result) (org-up-heading-safe))
+    (let ((result nil) (climbing t))
+      (while (and (not result) climbing (org-up-heading-safe))
         (let ((state (org-get-todo-state)))
-          (when (and state
-                     (member state org-todo-keywords-1)
-                     (not (member state org-done-keywords)))
-            (setq result t))))
+          (cond
+           ((not (member state org-todo-keywords-1)) (setq climbing nil))
+           ((not (member state org-done-keywords)) (setq result t)))))
       result)))
 
 (defun gtd/skip-non-archivable-tasks ()
