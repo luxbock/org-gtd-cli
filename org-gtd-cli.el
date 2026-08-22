@@ -806,6 +806,27 @@ this function only returns a value when a [#X] cookie is actually present."
   (let ((pri (nth 3 (org-heading-components))))
     (when pri (char-to-string pri))))
 
+(defun org-gtd-cli/validate-priority (priority)
+  "Reject PRIORITY unless it is the only legal cookie, exiting 1.
+SEMANTICS.md §3/§4.10: `[#A]' is the sole cookie (urgent AND important);
+`[#B]' is org's implicit default and carries no information, and relative
+importance inside a project is sibling order, never a cookie.  PRIORITY is
+the raw user string (nil, the literal \"nil\", and the empty string all mean
+\"no cookie asked for\" and pass).  Comparison is case-insensitive, so `a'
+is accepted like `A'.  Called from every entry point that accepts a
+priority — `set-priority', `add-task', `add-subtask' — which is what makes
+the `--batch' forms of all three inherit the check, since batch delegates to
+these same implementations."
+  (when (and priority (not (string-empty-p priority))
+             (not (equal priority "nil"))
+             (not (equal (upcase priority) "A")))
+    (org-gtd-cli/reject-with-hint
+     (format "Error: \"%s\" is not a valid priority: [#A] is the only cookie"
+             priority)
+     (concat "Priorities are [#A]-only ([#A] = urgent AND important); "
+             "relative importance within a project is expressed by task "
+             "order, not cookies.  Use A, or --clear to remove a cookie."))))
+
 (defun org-gtd-cli/strip-priority-cookie (s)
   "Strip priority cookies like [#A], [#B], [#C] from S.
 Agents sometimes paste headings including the priority cookie."
@@ -1406,8 +1427,10 @@ If INACTIVE is non-nil, use square brackets (inactive timestamp)."
         (scheduled (nth 6 r))
         (deadline (nth 7 r)))
     (concat state
-            (when (and priority-char (not (string= priority-char "B")))
-              (concat " [#" priority-char "]"))
+            ;; §3: [#A] is the only cookie, so there is no default letter
+            ;; to suppress -- print whatever cookie the heading carries,
+            ;; exactly as the JSON `priority' field reports it (#41).
+            (when priority-char (concat " [#" priority-char "]"))
             " " heading
             (when tags-str (concat " " tags-str))
             (format " (%s)" rel-file)
@@ -1932,9 +1955,10 @@ MATCH is (BUFFER POS FILE HEADING-PATH)."
            (let* ((state (let ((s (cdr (assq 'state child))))
                            (if (or (null s) (eq s :null)) "-" s)))
                   (h (cdr (assq 'heading child)))
+                  ;; §3: no default letter to suppress -- text prints the
+                  ;; cookie JSON reports, [#B] legacy cookies included (#41).
                   (priority (let ((p (cdr (assq 'priority child))))
-                              (unless (or (eq p :null) (null p)
-                                          (string= p "B")) p)))
+                              (unless (or (eq p :null) (null p)) p)))
                   (deadline (let ((d (cdr (assq 'deadline child))))
                               (unless (eq d :null) d)))
                   (scheduled (let ((s (cdr (assq 'scheduled child))))
@@ -2037,7 +2061,9 @@ lookup (a task parent must have subtasks)."
              (dolist (child (nreverse children))
                (let ((line-str (concat "  " (nth 0 child) " " (nth 1 child)
                                        " (" rel-file ")")))
-                 (when (and (nth 4 child) (not (string= (nth 4 child) "B")))
+                 ;; §3: no default letter to suppress -- text prints the
+                 ;; cookie JSON reports (#41).
+                 (when (nth 4 child)
                    (setq line-str (concat line-str " [#" (nth 4 child) "]")))
                  (when (nth 3 child)
                    (setq line-str (concat line-str "  D:" (nth 3 child))))
@@ -2828,9 +2854,13 @@ any state (including DONE) and plain category/note headings."
          (time-str (when (and time-str (not (string-empty-p time-str))
                               (not (equal time-str "nil")))
                      time-str))
+         ;; §3: [#A] is the only cookie.  Validated before anything is
+         ;; created, so a rejected call writes nothing; `upcase' normalizes
+         ;; the accepted lowercase `a'.
+         (_ (org-gtd-cli/validate-priority priority))
          (priority (when (and priority (not (string-empty-p priority))
                               (not (equal priority "nil")))
-                     priority)))
+                     (upcase priority))))
     (when (and time-str (not schedule) (not deadline))
       (org-gtd-cli/error "Error: --time requires --schedule or --deadline")
       (kill-emacs 1))
@@ -3002,9 +3032,12 @@ any state (including DONE) and plain category/note headings."
          (deadline (when (and deadline (not (string-empty-p deadline))
                               (not (equal deadline "nil")))
                      deadline))
+         ;; §3: [#A] is the only cookie.  Checked before the parent is even
+         ;; resolved, so a rejected call touches nothing.
+         (_ (org-gtd-cli/validate-priority priority))
          (priority (when (and priority (not (string-empty-p priority))
                               (not (equal priority "nil")))
-                     priority))
+                     (upcase priority)))
          ;; §4.3: create never mints WAITING — its guardrail lives on the
          ;; `set-state' entry (§4.6).  Checked before the parent is even
          ;; resolved, so a rejected call touches nothing.  `--state NEXT'
@@ -4144,10 +4177,13 @@ PROMOTE runs the §4.5 promotion rule.  I9 admits it from
 `set-done'/`set-cancelled' only — a close driven through `set-state'
 passes nil.
 
-This is the single seam for the close post-conditions still to land:
-#41 (§7 row 7) adds the priority-cookie strip here.  #39 (§7 row 5)
-landed the §4.4 auto-unblock AND-gate and the §4.6 WAITING exit cleanup
-here — a close is a WAITING exit site like any other.  Because all three
+This is the single seam for the close post-conditions: #41 (§7 row 7)
+landed the §3/§4.4 priority-cookie strip here — a closed task carries no
+cookie, and because the removal is part of the task's own state (not an
+action taken on something else) it is reported in the `task' field, never
+as a `side_effect'.  #39 (§7 row 5) landed the §4.4 auto-unblock AND-gate
+and the §4.6 WAITING exit cleanup here — a close is a WAITING exit site
+like any other.  Because all three
 commands route through this helper, each lands once and reaches
 `set-state' for free — which is how issue #46's criterion A14 is
 satisfied structurally (its behavioral check is #39's
@@ -4160,6 +4196,18 @@ still feed `org-gtd-cli/parse-side-effects' for the auto-progress
 vocabulary; the WAITING effects are structured from the start and are
 appended, never string-matched."
   (let* ((done-marker (copy-marker pos))
+         ;; §3/§4.4: a close strips any priority cookie.  Done first, on
+         ;; the closed task itself, so everything below (promotion,
+         ;; reorder, the `task' re-read the callers' `mutation-output'
+         ;; does) sees the stripped heading.  `org-priority' signals a
+         ;; `user-error' on an entry with no cookie — that is the common
+         ;; case, hence the guard.
+         (_ (save-excursion
+              (goto-char done-marker)
+              (when (org-gtd-cli/get-explicit-priority)
+                (condition-case nil
+                    (org-priority 'remove)
+                  (user-error nil)))))
          ;; Track the closed task with a marker: auto-progress may move
          ;; the promoted sibling above it (§4.1 placement), and
          ;; auto-unblock may edit a waiter's drawer earlier in the same
@@ -6071,22 +6119,22 @@ Preserves TODO state, priority, and tags."
 
 (defun org-gtd-cli/set-priority (substring priority &optional clear index dry-run)
   "Set or clear the priority on an existing task.
-PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie."
+PRIORITY must be A — SEMANTICS.md §3/§4.10 make `[#A]' the only cookie, so
+anything else is rejected and nothing is touched.  If CLEAR is non-nil,
+remove the priority cookie."
   (let* ((idx (org-gtd-cli/parse-index index))
          (is-dry-run (and dry-run (not (equal dry-run "nil"))
                           (not (string-empty-p dry-run))))
          (is-clear (and clear (not (equal clear "nil"))
                         (not (string-empty-p clear))))
+         ;; §3: validated on the raw argument, and *before* the task is even
+         ;; resolved, so a rejected call touches nothing and reports the
+         ;; letter the user actually typed.
+         (_ (unless is-clear (org-gtd-cli/validate-priority priority)))
          (priority (when (and priority (not (string-empty-p priority))
                               (not (equal priority "nil")))
                      (upcase priority)))
          (buf-pos (org-gtd-cli/find-task substring idx t)))
-    ;; Validate priority value
-    (when (and (not is-clear) priority
-               (not (member priority '("A" "B" "C"))))
-      (org-gtd-cli/error "Error: \"%s\" is not a valid priority\nValid priorities: A, B, C"
-                         priority)
-      (kill-emacs 1))
     (with-current-buffer (car buf-pos)
       (org-with-wide-buffer
        (goto-char (cdr buf-pos))
@@ -6133,8 +6181,10 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
                       (old_priority . ,(or old-priority :null))
                       (new_priority . ,priority)
                       (dry_run . t)))
-                 (princ (format "Would set priority: \"%s\" [#%s] -> [#%s] (%s)\n"
-                                heading (or old-priority "B") priority rel-file)))
+                 (princ (format "Would set priority: \"%s\" %s -> [#%s] (%s)\n"
+                                heading
+                                (if old-priority (format "[#%s]" old-priority) "none")
+                                priority rel-file)))
              (org-priority (string-to-char priority))
              (save-buffer)
              (if org-gtd-cli/json-mode
@@ -6146,10 +6196,12 @@ PRIORITY should be A, B, or C.  If CLEAR is non-nil, remove the priority cookie.
                     (old_priority . ,(or old-priority :null))
                     (new_priority . ,priority))
                   buf-pos)
-               (princ (format "Priority: \"%s\" [#%s] -> [#%s] (%s)\n"
-                              heading (or old-priority "B") priority rel-file)))))
+               (princ (format "Priority: \"%s\" %s -> [#%s] (%s)\n"
+                              heading
+                              (if old-priority (format "[#%s]" old-priority) "none")
+                              priority rel-file)))))
           (t
-           (org-gtd-cli/error "Error: provide a PRIORITY (A, B, or C) or --clear")
+           (org-gtd-cli/error "Error: provide a PRIORITY (A) or --clear")
            (kill-emacs 1)))))))
   (kill-emacs 0))
 

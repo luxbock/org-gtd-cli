@@ -79,6 +79,17 @@
       org-refile-allow-creating-parent-nodes 'confirm
       org-tags-column 0)
 
+;; ── Priority scheme: [#A]-only ──────────────────────────────────────────────
+;; SEMANTICS.md §3: no cookie by default; `[#A]' is the ONLY cookie, meaning
+;; urgent AND important.  `[#B]' is org's implicit default, so it carries no
+;; information, and relative importance inside a project is sibling order,
+;; never a cookie.  Collapsing highest/lowest/default onto ?A makes `A' the
+;; single point of the range, for the CLI's batch Emacs and the interactive
+;; Emacs alike -- one definition, no Doom-side duplicate.
+(setq org-priority-highest ?A
+      org-priority-lowest ?A
+      org-priority-default ?A)
+
 (setq org-archive-location "%s_archive::* Archived Tasks"
       org-archive-mark-done nil)
 

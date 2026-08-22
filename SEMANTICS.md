@@ -375,8 +375,7 @@ state-neutral. Pre: body text must contain no heading delimiters
 (`* ` at line start); `set-priority` accepts only `A` or clear (§3 —
 anything else is rejected with the sibling-order hint). Post: only the
 addressed attribute changes — no keyword change, no reorder, no
-promotion. *Divergence: set-priority validation not yet implemented —
-#41.*
+promotion.
 
 ### 4.11 archive
 
@@ -600,7 +599,7 @@ the issue that closes the gap (strictly doc → tests → implementation).
 | 4 | *Retired 2026-08-08: promotion reports every all-done-but-open subproject it passes as `project-needs-review` and continues past it — advisory only, nothing is closed (#38, olli ruling E5).* | — | — |
 | 5 | *Retired 2026-08-10: the WAITING mechanism landed whole — entry needs a reason or a blocker link (self-blocks, cycles, already-closed blockers and multi-line reasons rejected; a WAITING→WAITING re-entry amends by replacing), `add-task`/`add-subtask` reject `--state WAITING`, closing a blocker fires the AND-gated auto-unblock with its conditional wake, every exit runs the cleanup, `delete` guards the blocker side and unwinds the waiting side, `archive` holds back a blocker for an open task, and `waiting_reason`/`blocked_by` are surfaced (#39).* | — | — |
 | 6 | *Retired 2026-08-13: view membership reads ancestor state, never state-mirror tags — the trigger table is an explicit nil, the Next Tasks/Tasks/Waiting blocks exclude on a severing-aware DEFER/WAITING/CANCELLED/DONE ancestor walk (the Waiting block gains its previously-missing DEFER-ancestor exclusion), stuckness is the shared §5.2 predicate (own-or-ancestor DEFER, never a tag), and the Deferred block is own-state DEFER rows only (#40).* | — | — |
-| 7 | `set-priority` accepts any cookie; `set-done`/`set-cancelled` leave priority cookies in place | §3, §4.4, §4.10 | #41 |
+| 7 | *Retired 2026-08-13: the `[#A]`-only scheme landed whole — the priority range is defined once in `+gtd-core.el` (highest/lowest/default all `?A`), every entry point that accepts a priority (`set-priority`, `add-task`, `add-subtask`, and their `--batch` forms) rejects anything but `A`/`a` with the sibling-order hint and mutates nothing, and every close strips the cookie at the single close seam — `set-done`, `set-cancelled` and a close through `set-state` alike — with the removal reported in the `task` state, never as a side effect (#41).* | — | — |
 | 8 | *Retired 2026-08-10: `set-state` rejects NEXT on a project/subproject heading and WAITING on a project heading (§3 matrix), and a blocked DONE/CANCELLED is the same structured rejection `set-done`/`set-cancelled` produce — a close driven through `set-state` is a genuine close running the §4.4 post-conditions, the promotion rule alone excepted (I9); `set-next`'s project path promotes the first TODO non-project direct child (§4.7) (#46).* | — | — |
 | 9 | *Retired 2026-08-07: `move` guards the full §4.9 zone invariant — completed block, NEXT prefix, and DEFER block — rejecting any reordering that would put the moved entry on the wrong side of a boundary (#37 interim, #47 full).* | — | — |
 | 10 | *Retired 2026-08-11: the §4.0 closure repair runs — an open task placed or revealed in the task descent of a closed ancestor reopens that whole chain (`add-subtask`, `set-state` reopening, `refile`), each reopened ancestor a `state-change` side effect, and `set-next` accepts a closed project-child leaf, reopening it straight to NEXT (a closed lone task stays rejected, I3) (#56).* | — | — |

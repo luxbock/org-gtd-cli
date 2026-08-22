@@ -388,15 +388,47 @@ def test_s7row5_create_never_mints_waiting(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-@pytest.mark.xfail(reason="§7 row 7 (#41): set-priority accepts any "
-                          "cookie; close leaves cookies in place",
-                   strict=True)
+# §7 row 7 retired 2026-08-13 (#41): [#A] is the only cookie and every
+# close strips it, so these witnesses now pin agreeing behavior.
 def test_s7row7_priority_rules(cli):
     model = Model([Node("lone", "TODO")], Divergences.normative())
     _, rc, result = run_normative(
         cli, model, "set_priority", ("lone", "B"), {})
     assert result.ok is False
     assert rc != 0
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row7_priority_a_accepted(cli):
+    model = Model([Node("lone", "TODO")], Divergences.normative())
+    _, rc, result = run_normative(
+        cli, model, "set_priority", ("lone", "A"), {})
+    assert result.ok is True
+    assert rc == 0
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row7_close_strips_cookie(cli):
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "TODO", priority="A"), Node("bb", "TODO"),
+    ])], Divergences.normative())
+    _, rc, result = run_normative(cli, model, "set_done", ("aa",), {})
+    assert result.ok is True
+    assert rc == 0
+    # The skeleton carries the priority column, so this is where the
+    # strip is compared against the model.
+    assert cli.read_skeleton() == model.skeleton()
+
+
+def test_s7row7_set_state_close_strips_cookie(cli):
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "TODO", priority="A"), Node("bb", "TODO"),
+    ])], Divergences.normative())
+    _, rc, result = run_normative(
+        cli, model, "set_state", ("aa", "CANCELLED"), {})
+    assert result.ok is True
+    assert rc == 0
+    assert cli.read_skeleton() == model.skeleton()
 
 
 # §7 row 8 retired 2026-08-10 (#46): the set-state legality guards, the

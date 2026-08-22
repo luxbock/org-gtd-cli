@@ -421,16 +421,33 @@ def test_set_state_close_runs_the_close_post_conditions():
 
 
 def test_set_state_close_strips_priority_like_close_does():
-    """A13: the model's set_state close path gates the cookie strip on
-    ``d7_no_priority_rules`` exactly as ``_close`` does, so #41 (§7 row
-    7) retires it in one place."""
-    for divs, expected in ((Divergences.normative(), None),
-                           (Divergences.current(), "A")):
+    """A13: the model's set_state close path strips the cookie exactly as
+    ``_close`` does — in both modes, since #41 (§7 row 7) retired
+    ``d7_no_priority_rules`` and the two modes now agree here."""
+    for divs in (Divergences.normative(), Divergences.current()):
         model = Model([Node("proj", "TODO", children=[
             Node("aa", "TODO", priority="A")])], divs)
         # Close the leaf so the project is not blocked.
         assert model.set_state("aa", "DONE").ok
-        assert model.find("aa")[0].priority == expected
+        assert model.find("aa")[0].priority is None
+        model = Model([Node("proj", "TODO", children=[
+            Node("aa", "TODO", priority="A")])], divs)
+        assert model.set_done("aa").ok
+        assert model.find("aa")[0].priority is None
+
+
+def test_set_priority_admits_only_a_or_clear():
+    """§3/§4.10 (#41, §7 row 7): anything but A or clear is rejected and
+    leaves the node's cookie untouched, in both divergence modes."""
+    for divs in (Divergences.normative(), Divergences.current()):
+        model = Model([Node("lone", "TODO", priority="A")], divs)
+        for bad in ("B", "C"):
+            assert model.set_priority("lone", bad).ok is False
+            assert model.find("lone")[0].priority == "A"
+        assert model.set_priority("lone", None).ok
+        assert model.find("lone")[0].priority is None
+        assert model.set_priority("lone", "A").ok
+        assert model.find("lone")[0].priority == "A"
 
 
 # ---------------------------------------------------------------------------
