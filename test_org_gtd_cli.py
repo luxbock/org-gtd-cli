@@ -1855,23 +1855,27 @@ class TestSetPriority:
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         assert rc == 0
         assert "Priority:" in stdout
-        assert "[#B] -> [#A]" in stdout
+        # §7 row 7 (#41): a task with no cookie has no old priority — text
+        # mode says so instead of fabricating the retired [#B] default,
+        # matching JSON's `old_priority: null`.
+        assert "none -> [#A]" in stdout
+        assert "[#B]" not in stdout
         assert "[#A] Buy groceries" in (org_dir / "inbox.org").read_text()
 
-    def test_change_priority_a_to_c(self, org_dir):
-        # pins §7 row 7 (#41)
-        # Set A first, then change to C
+    def test_c_rejected_leaves_existing_a_alone(self, org_dir):
+        # pins §7 row 7 (#41): [#A] is the only cookie, so an attempt to
+        # move an [#A] task to [#C] is rejected and mutates nothing.
         run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "C", org_dir=org_dir)
-        assert rc == 0
-        assert "[#A] -> [#C]" in stdout
-        assert "[#C] Buy groceries" in (org_dir / "inbox.org").read_text()
+        assert rc == 1
+        assert "[#A] is the only cookie" in stderr
+        assert "[#A] Buy groceries" in (org_dir / "inbox.org").read_text()
+        assert "[#C]" not in (org_dir / "inbox.org").read_text()
 
     def test_clear_priority(self, org_dir):
-        # anchor §7 row 7 (#41) — non-flipping: only the unasserted 'C' setup
-        # call changes under #41; the --clear assertions stay green
+        # anchor §7 row 7 (#41) — non-flipping: the --clear assertions were
+        # green before and after the [#A]-only scheme landed
         run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
-        run_cli("set-priority", "Buy groceries", "C", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "--clear", org_dir=org_dir)
         assert rc == 0
         assert "Cleared priority:" in stdout
@@ -1887,7 +1891,24 @@ class TestSetPriority:
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "D", org_dir=org_dir)
         assert rc == 1
         assert "not a valid priority" in stderr
-        assert "A, B, C" in stderr
+        assert "[#A] is the only cookie" in stderr
+        assert "A, B, C" not in stderr
+
+    def test_b_rejected_with_sibling_order_hint(self, org_dir):
+        # pins §7 row 7 (#41): B is the retired default; the rejection
+        # carries the sibling-order hint and nothing is written.
+        stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "B", org_dir=org_dir)
+        assert rc == 1
+        assert "task order" in stderr
+        assert "[#" not in (org_dir / "inbox.org").read_text()
+
+    def test_b_rejected_json_carries_hint(self, org_dir):
+        data, stderr, rc = run_cli_json("set-priority", "Buy groceries", "B",
+                                        org_dir=org_dir)
+        assert rc == 1
+        assert "[#A] is the only cookie" in data["error"]
+        assert "task order" in data["hint"]
+        assert "[#" not in (org_dir / "inbox.org").read_text()
 
     def test_dry_run(self, org_dir):
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "A", "--dry-run", org_dir=org_dir)
@@ -1896,11 +1917,49 @@ class TestSetPriority:
         assert "[#A] Buy groceries" not in (org_dir / "inbox.org").read_text()
 
     def test_change_existing_priority(self, org_dir):
-        # pins §7 row 7 (#41)
-        stdout, stderr, rc = run_cli("set-priority", "Pay quarterly taxes", "C", org_dir=org_dir)
+        # pins §7 row 7 (#41): re-setting A on an already-[#A] task is the
+        # only "change" the scheme admits; the old cookie is reported.
+        stdout, stderr, rc = run_cli("set-priority", "Pay quarterly taxes", "A", org_dir=org_dir)
         assert rc == 0
-        assert "[#A] -> [#C]" in stdout
-        assert "[#C] Pay quarterly taxes" in (org_dir / "tasks.org").read_text()
+        assert "[#A] -> [#A]" in stdout
+        assert "[#A] Pay quarterly taxes" in (org_dir / "tasks.org").read_text()
+
+    def test_add_task_rejects_non_a_priority(self, org_dir):
+        stdout, stderr, rc = run_cli("add-task", "Priced task", "--priority", "B",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "[#A] is the only cookie" in stderr
+        assert "Priced task" not in (org_dir / "inbox.org").read_text()
+
+    def test_add_task_accepts_a(self, org_dir):
+        stdout, stderr, rc = run_cli("add-task", "Urgent task", "--priority", "a",
+                                     org_dir=org_dir)
+        assert rc == 0
+        assert "[#A] Urgent task" in (org_dir / "inbox.org").read_text()
+
+    def test_add_subtask_rejects_non_a_priority(self, org_dir):
+        stdout, stderr, rc = run_cli("add-subtask", "Prepare onboarding guide",
+                                     "Priced subtask", "--priority", "C",
+                                     org_dir=org_dir)
+        assert rc == 1
+        assert "[#A] is the only cookie" in stderr
+        assert "Priced subtask" not in (org_dir / "tasks.org").read_text()
+
+    def test_batch_entry_points_reject_non_a_priority(self, org_dir):
+        """The --batch forms inherit the guard: batch delegates to the same
+        implementations the single calls use."""
+        for command, items, shared in (
+                ("set-priority", [{"heading": "Buy groceries", "priority": "B"}], None),
+                ("add-task", [{"title": "Batch priced", "priority": "B"}], None),
+                ("add-subtask", [{"title": "Batch priced sub", "priority": "B"}],
+                 "Prepare onboarding guide")):
+            args = [command, items] + ([shared] if shared else [])
+            data, stderr, rc = run_batch(*args, org_dir=org_dir)
+            r = data["results"][0]
+            assert r["success"] is False, command
+            assert "[#A] is the only cookie" in r["error"], command
+        assert "[#" not in (org_dir / "inbox.org").read_text()
+        assert "Batch priced" not in (org_dir / "tasks.org").read_text()
 
     def test_lowercase_input(self, org_dir):
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "a", org_dir=org_dir)
@@ -1910,6 +1969,50 @@ class TestSetPriority:
     def test_index_disambiguation(self, org_dir):
         stdout, stderr, rc = run_cli("set-priority", "Buy", "A", "--index", "1", org_dir=org_dir)
         assert rc == 0
+
+
+class TestPriorityStrippedOnClose:
+    """§3/§4.4 (#41, §7 row 7): a close removes any priority cookie, at the
+    one seam `org-gtd-cli/run-close-post-conditions', so set-done,
+    set-cancelled and a close driven through set-state all strip it.  The
+    removal is part of the task's own state — reported in the `task' field,
+    never as a side effect."""
+
+    def _make_a_task(self, org_dir, title="Buy groceries"):
+        rc = run_cli("set-priority", title, "A", org_dir=org_dir)[2]
+        assert rc == 0
+        return title
+
+    def test_set_done_strips_cookie(self, org_dir):
+        title = self._make_a_task(org_dir)
+        data, stderr, rc = run_cli_json("set-done", title, org_dir=org_dir)
+        assert rc == 0
+        assert data["task"]["priority"] is None
+        assert data["side_effects"] == []
+        inbox = (org_dir / "inbox.org").read_text()
+        assert "DONE Buy groceries" in inbox
+        assert "[#A]" not in inbox
+
+    def test_set_cancelled_strips_cookie(self, org_dir):
+        title = self._make_a_task(org_dir)
+        data, stderr, rc = run_cli_json("set-cancelled", title, org_dir=org_dir)
+        assert rc == 0
+        assert data["task"]["priority"] is None
+        assert "[#A]" not in (org_dir / "inbox.org").read_text()
+
+    def test_set_state_close_strips_cookie(self, org_dir):
+        title = self._make_a_task(org_dir)
+        data, stderr, rc = run_cli_json("set-state", title, "DONE", org_dir=org_dir)
+        assert rc == 0
+        assert data["task"]["priority"] is None
+        assert "[#A]" not in (org_dir / "inbox.org").read_text()
+
+    def test_reopening_does_not_restore_the_cookie(self, org_dir):
+        title = self._make_a_task(org_dir)
+        assert run_cli("set-done", title, org_dir=org_dir)[2] == 0
+        data, stderr, rc = run_cli_json("set-state", title, "TODO", org_dir=org_dir)
+        assert rc == 0
+        assert data["task"]["priority"] is None
 
 
 # ===========================================================================
@@ -9646,7 +9749,7 @@ class TestBatchDelegation:
         data, stderr, rc = run_batch(
             "add-subtask",
             [{"title": "Scheduled subtask", "schedule": "2026-04-02",
-              "priority": "B"}],
+              "priority": "A"}],
             "Prepare onboarding guide",
             org_dir=org_dir)
         assert rc == 0
@@ -9655,7 +9758,7 @@ class TestBatchDelegation:
         assert r["heading"] == "Scheduled subtask"
         assert r["parent"] == "Prepare onboarding guide"
         tasks = (org_dir / "tasks.org").read_text()
-        assert "*** TODO [#B] Scheduled subtask" in tasks
+        assert "*** TODO [#A] Scheduled subtask" in tasks
         assert "SCHEDULED: <2026-04-02" in tasks
 
     def test_batch_add_event_tag_and_file(self, org_dir):

@@ -15,8 +15,7 @@ two modes:
 
 - ``Divergences.normative()`` — the document's semantics, exactly.
 - ``Divergences.current()`` — reproduces today's CLI behavior by enabling
-  one named flag per applicable §7 row (``d7_no_priority_rules`` = §7
-  row 7, and so on). The tier-2 conformance harness runs the model in this
+  one named flag per applicable §7 row. The tier-2 conformance harness runs the model in this
   mode and expects an exact match against the real CLI; per-row
   expected-failure tests run the normative mode and flip green as each
   stage-2c fix lands (2026-07-31 ruling on #45).
@@ -129,7 +128,10 @@ class Divergences:
     # reason or a blocker link, ``add-task``/``add-subtask`` reject
     # ``WAITING``, and the blocker links, the AND-gated auto-unblock with
     # its conditional wake, and the exit cleanup all exist.
-    d7_no_priority_rules: bool = False  # §7 row 7 → #41
+    # §7 row 7 (#41, retired 2026-08-13 with the [#A]-only scheme):
+    # ``d7_no_priority_rules`` is gone — ``set_priority`` accepts only
+    # ``A`` or clear, and every close (``_close`` and ``set_state``'s
+    # close path alike) strips the cookie.
     # §7 row 8 (#46, retired 2026-08-10 with the set-state/set-next
     # legality guards and close-path parity): ``d8_lax_state_guards`` is
     # gone — the CLI now rejects NEXT on a project/subproject heading and
@@ -159,7 +161,7 @@ class Divergences:
 
     @classmethod
     def current(cls):
-        return cls(d7_no_priority_rules=True)
+        return cls()
 
 
 class Model:
@@ -779,8 +781,7 @@ class Model:
             return replace(result, old_state=old_state)
         node.keyword = new_state
         node.logbook += 1  # I10 (CLOSED stamp + LOGBOOK)
-        if not self.div.d7_no_priority_rules:
-            node.priority = None  # §4.4: strip cookie on close (§7 row 7)
+        node.priority = None  # §4.4/§3: strip the cookie on close
         # Ordering: §4.5 promotion runs on the state the close left, so
         # #39 changes nothing about it. It matters in one shape only — a
         # waiter that is a sibling of the closed task: promotion's step-1
@@ -847,13 +848,11 @@ class Model:
             effects.extend(self.waiting_exit_cleanup(node))
         node.keyword = new_state
         node.logbook += 1  # I10
-        if new_state in CLOSED_STATES and not self.div.d7_no_priority_rules:
+        if new_state in CLOSED_STATES:
             # §4.6 (PR #68): a transition *into* a closed state runs the
             # same §4.4 close post-conditions as ``_close`` — the
             # promotion rule alone excepted (I9), so ``_promotion_rule``
-            # is deliberately NOT called here.  Gated exactly like
-            # ``_close``'s strip so #41 (§7 row 7) retires it in one
-            # place.
+            # is deliberately NOT called here.
             node.priority = None
         if new_state == "WAITING":
             node.waiting_reason = reason
@@ -1088,7 +1087,7 @@ class Model:
         node, error = self.find(substring)
         if node is None:
             return Result(False, error)
-        if priority not in (None, "A") and not self.div.d7_no_priority_rules:
+        if priority not in (None, "A"):
             return Result(False, "only [#A] or clear (§3)")
         node.priority = priority
         return Result(True, new_state=node.keyword)
