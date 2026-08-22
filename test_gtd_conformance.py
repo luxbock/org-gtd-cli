@@ -166,8 +166,8 @@ def model_side_effects(result):
 # ---------------------------------------------------------------------------
 
 # Deterministic pins for the narrow reorder shapes whose hand-written
-# regression tests were DROPped into this property (see
-# test-migration-manifest.md, TestAddSubtaskStateReorder): under the
+# regression tests were DROPped into this property (formerly
+# TestAddSubtaskStateReorder): under the
 # fast profile's small budget these shapes arise rarely per default
 # run, so each is pinned as an @example — one CLI dispatch apiece,
 # per the conftest.py rule that inputs worth keeping live in test code.
