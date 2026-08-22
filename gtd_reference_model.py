@@ -283,13 +283,20 @@ class Model:
         return any(n.keyword in ("NEXT", "WAITING")
                    for n in self.task_descendants(project))
 
+    def deferred(self, node):
+        """§5.2: own DEFER, or some task ancestor is DEFER (§2 descent)."""
+        return (node.keyword == "DEFER"
+                or any(a.keyword == "DEFER"
+                       for a in self.task_ancestors(node)))
+
     def stuck(self, project):
-        """§5.2 / I11: open, not DEFER, not active — including all-closed
-        descendants (the persistent surface for the closure decision)."""
+        """§5.2 / I11: open, not deferred (own or ancestor DEFER), not
+        active — including all-closed descendants (the persistent surface
+        for the closure decision)."""
         return (self.is_project(project)
                 and project.keyword in ("TODO", "NEXT", "WAITING")
                 and project.keyword not in CLOSED_STATES
-                and project.keyword != "DEFER"
+                and not self.deferred(project)
                 and not self.active(project))
 
     def progress(self, project):
