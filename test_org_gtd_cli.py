@@ -10085,18 +10085,24 @@ class TestBatchExtendedCommands:
         assert "state" in data["results"][0]["error"]
 
     def test_batch_set_priority_and_clear(self, org_dir):
-        """--batch set-priority sets a priority, and clear:true removes one."""
+        """--batch set-priority sets a priority, and clear:true removes one.
+
+        No fixture task carries a cookie, so the clear item removes the
+        cookie the preceding item in the same batch just wrote.
+        """
         data, stderr, rc = run_batch(
             "set-priority",
             [{"heading": "Write quarterly report", "priority": "A"},
+             {"heading": "Add aliases to common systemctl", "priority": "A"},
              {"heading": "Add aliases to common systemctl", "clear": True}],
             org_dir=org_dir,
         )
         assert rc == 0
-        assert data["summary"]["succeeded"] == 2
+        assert data["summary"]["succeeded"] == 3
         tasks = (org_dir / "tasks.org").read_text()
         assert "** TODO [#A] Write quarterly report" in tasks
-        assert "[#B] Add aliases" not in tasks
+        assert "*** TODO Add aliases" in tasks
+        assert "[#A] Add aliases" not in tasks
 
     def test_batch_set_schedule_clear_false_still_schedules(self, org_dir):
         """clear:false must NOT be read as a clear request (JSON false → :false).

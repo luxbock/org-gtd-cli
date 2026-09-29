@@ -122,7 +122,7 @@ CLOSED: [2026-03-18 Wed 09:00]
 [2026-03-17 Tue 10:00]
 **** TODO Run smoke tests
 [2026-03-17 Tue 10:00]
-*** TODO [#B] Add aliases to common systemctl commands
+*** TODO Add aliases to common systemctl commands
 [2026-03-11 Wed 13:21]
 ** Tools
 *** TODO Fix the =find= command in org-gtd-cli
