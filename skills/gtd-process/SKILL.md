@@ -220,7 +220,7 @@ org-gtd-cli --json set-done "task heading"
 `set-done` handles project progression automatically:
 - Moves the closed task to the bottom of the completed block; nothing else moves (SEMANTICS.md §4.1)
 - Promotes the next actionable sibling to NEXT (skipping subprojects that already have active children, drilling into stuck subprojects)
-- Promotion fires only when no sibling is NEXT or WAITING, so the promoted task becomes NEXT in place, at the top of the active zone (SEMANTICS.md §4.5)
+- Promotion fires only when no sibling is NEXT or WAITING; the promoted task moves to the top of the active zone, as any task entering NEXT does (SEMANTICS.md §4.1, §4.5)
 - If all siblings are now done, leaves the parent project open and reports a `project-needs-review` side effect (in JSON: `{"action": "project-needs-review", ...}`)
 
 **Caution:** Completing the final subtask does NOT auto-complete the parent project. When you see `project-needs-review`, check whether the project is genuinely finished: if yes, close it with an explicit `set-done` on the project heading; if more work remains, add those subtasks instead.
