@@ -1,11 +1,10 @@
 """Tier 1 (issue #45): fast Hypothesis properties against the reference
 model alone — no Emacs, no subprocess, runs in seconds.
 
-The model under test is gtd_reference_model.Model in NORMATIVE mode
-(SEMANTICS.md exactly). Properties assert the §6 invariants: the
-structural ones (I1-I5) via Model.check_invariants() after every
-operation, the operational ones (I6, I8, I9, I12) as explicit
-transition properties.
+The model under test is gtd_reference_model.Model (SEMANTICS.md
+exactly). Properties assert the §6 invariants: the structural ones
+(I1-I5) via Model.check_invariants() after every operation, the
+operational ones (I6, I8, I9, I12) as explicit transition properties.
 
 Profiles: see conftest.py — 'fast' (default) vs 'thorough'
 (ORG_GTD_TEST_PROFILE=thorough).
@@ -17,7 +16,7 @@ import pytest
 from hypothesis import assume, given, settings, strategies as st
 
 from gtd_reference_model import (
-    CLOSED_STATES, Divergences, Model, Node, parse_org_text, zone_of,
+    CLOSED_STATES, Model, Node, parse_org_text, zone_of,
 )
 
 # ---------------------------------------------------------------------------
@@ -88,7 +87,7 @@ def forests(draw, max_depth=3, max_width=4):
 
     width = draw(st.integers(1, max_width))
     roots = [build_node(0, must_be_task=False) for _ in range(width)]
-    model = Model(roots, Divergences.normative())
+    model = Model(roots)
 
     # Legalize: NEXT is only assignable to project-child leaves (I3);
     # give some legal spots a NEXT, at most one per sibling group (I6 is
@@ -177,18 +176,16 @@ def hits_parked_spec_gap(model, op, args, kwargs):
     the properties now run against every generated shape:
 
     - the append-last, demotion-unplaced and WAITING-above-the-NEXT-
-      prefix families: resolved by the §4.1 arrival/NEXT-exit rules
-      (#34);
-    - **§4.5 step-3 scope** (retired 2026-08-11, #58): §2 severing pins
-      the scope on both sides — the activity test scans *task*
-      descendants, which stop at a category heading, and the
-      all-done-but-open test scans direct task children, so at the
-      subproject's own level the two see the same set;
+      prefix families: resolved by the §4.1 arrival/NEXT-exit rules;
+    - **§4.5 step-3 scope**: §2 severing pins the scope on both sides —
+      the activity test scans *task* descendants, which stop at a
+      category heading, and the all-done-but-open test scans direct
+      task children, so at the subproject's own level the two see the
+      same set;
     - **I4 outside closure** and **Leaf→project WAITING repair
-      missing** (retired 2026-08-11, #56, §7 rows 10-11): the §4.0
-      closure repair now reopens a closed ancestor chain around an open
-      arrival, and the keyword-outgrown repair demotes a WAITING parent
-      that gains its first task child. Their witnesses are the two
+      missing**: the §4.0 closure repair reopens a closed ancestor
+      chain around an open arrival, and the keyword-outgrown repair
+      demotes a WAITING parent that gains its first task child. Their witnesses are the two
       deterministic tests below.
     """
     return False
@@ -372,9 +369,9 @@ def test_reported_new_state_is_actually_reached(model_and_ops):
 
 
 def test_blocked_close_via_set_state_is_not_reported_as_success():
-    """The #46 witness, deterministic: a project with an open task
+    """Deterministic: a project with an open task
     descendant cannot be closed through ``set-state`` — and the failure
-    is reported as one (§7 row 8, retired 2026-08-10)."""
+    is reported as one (§4.6)."""
     model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])])
     before = model.skeleton()
     for state in ("DONE", "CANCELLED"):
@@ -422,32 +419,29 @@ def test_set_state_close_runs_the_close_post_conditions():
 
 def test_set_state_close_strips_priority_like_close_does():
     """A13: the model's set_state close path strips the cookie exactly as
-    ``_close`` does — in both modes, since #41 (§7 row 7) retired
-    ``d7_no_priority_rules`` and the two modes now agree here."""
-    for divs in (Divergences.normative(), Divergences.current()):
-        model = Model([Node("proj", "TODO", children=[
-            Node("aa", "TODO", priority="A")])], divs)
-        # Close the leaf so the project is not blocked.
-        assert model.set_state("aa", "DONE").ok
-        assert model.find("aa")[0].priority is None
-        model = Model([Node("proj", "TODO", children=[
-            Node("aa", "TODO", priority="A")])], divs)
-        assert model.set_done("aa").ok
-        assert model.find("aa")[0].priority is None
+    ``_close`` does (§4.4)."""
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "TODO", priority="A")])])
+    # Close the leaf so the project is not blocked.
+    assert model.set_state("aa", "DONE").ok
+    assert model.find("aa")[0].priority is None
+    model = Model([Node("proj", "TODO", children=[
+        Node("aa", "TODO", priority="A")])])
+    assert model.set_done("aa").ok
+    assert model.find("aa")[0].priority is None
 
 
 def test_set_priority_admits_only_a_or_clear():
-    """§3/§4.10 (#41, §7 row 7): anything but A or clear is rejected and
-    leaves the node's cookie untouched, in both divergence modes."""
-    for divs in (Divergences.normative(), Divergences.current()):
-        model = Model([Node("lone", "TODO", priority="A")], divs)
-        for bad in ("B", "C"):
-            assert model.set_priority("lone", bad).ok is False
-            assert model.find("lone")[0].priority == "A"
-        assert model.set_priority("lone", None).ok
-        assert model.find("lone")[0].priority is None
-        assert model.set_priority("lone", "A").ok
+    """§3/§4.10: anything but A or clear is rejected and leaves the
+    node's cookie untouched."""
+    model = Model([Node("lone", "TODO", priority="A")])
+    for bad in ("B", "C"):
+        assert model.set_priority("lone", bad).ok is False
         assert model.find("lone")[0].priority == "A"
+    assert model.set_priority("lone", None).ok
+    assert model.find("lone")[0].priority is None
+    assert model.set_priority("lone", "A").ok
+    assert model.find("lone")[0].priority == "A"
 
 
 # ---------------------------------------------------------------------------
@@ -589,14 +583,14 @@ def test_next_demotion_moves_minimally():
     of the active zone."""
     model = Model([Node("p", "TODO", children=[
         Node("a", "NEXT"), Node("b", "TODO"), Node("c", "TODO"),
-    ])], Divergences.normative())
+    ])])
     model.set_state("a", "TODO")
     group = model.roots[0].children
     assert [n.heading for n in group] == ["a", "b", "c"]
 
     model = Model([Node("p", "TODO", children=[
         Node("n1", "NEXT"), Node("a", "NEXT"), Node("b", "TODO"),
-    ])], Divergences.normative())
+    ])])
     model.set_state("n1", "TODO")
     group = model.roots[0].children
     assert [n.heading for n in group] == ["a", "n1", "b"]
@@ -656,14 +650,12 @@ def _linked(waiter_state="WAITING"):
     """proj/[bb, aa] with aa waiting on bb, both link sides wired."""
     blocker = Node("bb", "TODO", triggers=("aa",))
     waiter = Node("aa", waiter_state, blockers=("bb",))
-    return Model([Node("proj", "TODO", children=[blocker, waiter])],
-                 Divergences.normative())
+    return Model([Node("proj", "TODO", children=[blocker, waiter])])
 
 
 def test_waiting_entry_requires_reason_or_link():
     """§4.6 guardrail: a bare WAITING entry is rejected, nothing changes."""
-    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
-                  Divergences.normative())
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])])
     before = model.skeleton()
     result = model.set_state("aa", "WAITING")
     assert result.ok is False
@@ -677,7 +669,7 @@ def test_waiting_entry_edge_case_rulings():
     """§4.6 rulings 2026-08-10 (a)/(b)/(d), all atomic (I12)."""
     model = Model([Node("proj", "TODO", children=[
         Node("bb", "TODO"), Node("cc", "DONE"), Node("aa", "TODO"),
-    ])], Divergences.normative())
+    ])])
     aa = model.roots[0].children[2]
     # (a) self-block
     assert model.set_state("aa", "WAITING", blocked_by=["aa"]).ok is False
@@ -697,7 +689,7 @@ def test_waiting_entry_rejects_cycles_and_accepts_diamonds():
     model = Model([Node("proj", "TODO", children=[
         Node("root", "TODO"), Node("left", "TODO"),
         Node("right", "TODO"), Node("top", "TODO"),
-    ])], Divergences.normative())
+    ])])
     assert model.set_state("left", "WAITING", blocked_by=["root"]).ok
     assert model.set_state("right", "WAITING", blocked_by=["root"]).ok
     # A diamond: two disjoint paths to "root", no cycle.
@@ -714,7 +706,7 @@ def test_waiting_reentry_amends_by_replacing():
     """§4.6 ruling (c): the amend unwinds first, then writes."""
     model = Model([Node("proj", "TODO", children=[
         Node("b1", "TODO"), Node("b2", "TODO"), Node("aa", "TODO"),
-    ])], Divergences.normative())
+    ])])
     assert model.set_state("aa", "WAITING", reason="r1", blocked_by=["b1"]).ok
     result = model.set_state("aa", "WAITING", blocked_by=["b2"])
     assert result.ok
@@ -736,7 +728,7 @@ def test_and_gate_fires_only_when_all_closed():
         Node("b1", "TODO", triggers=("aa",)),
         Node("b2", "TODO", triggers=("aa",)),
         Node("aa", "WAITING", waiting_reason="r", blockers=("b1", "b2")),
-    ])], Divergences.normative())
+    ])])
     aa = model.roots[0].children[2]
     result = model.set_done("b1")
     assert result.ok
@@ -756,7 +748,7 @@ def test_and_gate_tolerates_dangling_links():
     model = Model([Node("proj", "TODO", children=[
         Node("bb", "TODO", triggers=("aa", "gone")),
         Node("aa", "WAITING", blockers=("bb", "also-gone")),
-    ])], Divergences.normative())
+    ])])
     result = model.set_done("bb")
     assert result.ok
     # The dangling trigger is dropped, the live one still wakes; the
@@ -785,7 +777,7 @@ def test_conditional_wake_state(group, expected):
         Node("proj", "TODO",
              children=[Node(h, k, blockers=("bb",) if h == "aa" else ())
                        for h, k in group]),
-    ], Divergences.normative())
+    ])
     order_before = [n.heading for n in model.roots[1].children]
     result = model.set_done("bb")
     assert result.ok
@@ -808,7 +800,7 @@ def test_conditional_wake_is_todo_off_the_leaf_child_shape(shape):
         roots = [Node("other", "TODO",
                       children=[Node("bb", "TODO", triggers=("aa",))]),
                  waiter]
-    model = Model(roots, Divergences.normative())
+    model = Model(roots)
     result = model.set_done("bb")
     woken = [e for e in result.side_effects if e.action == "unblocked"]
     assert len(woken) == 1 and woken[0].new_state == "TODO"
@@ -833,8 +825,7 @@ def test_every_waiting_exit_unwinds_the_link_pair(exit_op):
 def test_create_never_mints_waiting():
     """§4.2/§4.3: add-task and add-subtask reject WAITING; NEXT stays legal
     on add-subtask (the deliberate asymmetry)."""
-    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
-                  Divergences.normative())
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])])
     before = model.skeleton()
     assert model.add_task("new1", state="WAITING").ok is False
     assert model.add_subtask("proj", "new2", state="WAITING").ok is False

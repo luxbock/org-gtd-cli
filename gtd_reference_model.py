@@ -1,4 +1,4 @@
-"""Pure-Python reference model of SEMANTICS.md (issue #45, stage 2b).
+"""Pure-Python reference model of SEMANTICS.md.
 
 This module implements exactly the semantics specified in SEMANTICS.md
 §§2-6: the state object (§2), the state spaces and legality matrix (§3),
@@ -8,17 +8,10 @@ derived predicates (§5.2). Naming is traceable to the document: section
 references (§n.m) and invariant numbers (I1-I12) appear at each rule's
 implementation site.
 
-Divergence modes (§7). SEMANTICS.md is forward-looking: §7 tabulates the
-places where today's CLI deliberately disagrees with the document, each
-tied to the issue that closes the gap. The model therefore runs in one of
-two modes:
-
-- ``Divergences.normative()`` — the document's semantics, exactly.
-- ``Divergences.current()`` — reproduces today's CLI behavior by enabling
-  one named flag per applicable §7 row. The tier-2 conformance harness runs the model in this
-  mode and expects an exact match against the real CLI; per-row
-  expected-failure tests run the normative mode and flip green as each
-  stage-2c fix lands (2026-07-31 ruling on #45).
+The model runs the document's semantics only. The tier-2 conformance
+harness (``test_gtd_conformance.py``) checks the real CLI against it and
+expects an exact match; any mismatch is a bug in the CLI or the model,
+triaged against SEMANTICS.md.
 
 The model is Emacs-free and I/O-free except for the org-text projection
 helpers at the bottom (``to_org_text`` / ``parse_org_text``), which the
@@ -101,79 +94,14 @@ class Result:
     side_effects: list = field(default_factory=list)
 
 
-@dataclass
-class Divergences:
-    """§7 rows as named flags; True = reproduce today's divergent behavior.
-
-    Row 6 (view predicates reading legacy tags) has no flag yet: part 1
-    does not model the derived views it affects.
-    """
-
-    # §7 rows 1 and 14 (#34, retired 2026-08-07 with the minimal-move
-    # primitive): ``d1_full_sort`` and ``d14_no_toplevel_reorder`` are
-    # gone — the CLI now implements §4.1 exactly, in every sibling
-    # group including the top level.
-    # §7 row 2 (#34) has no flag: the recorded divergence (refile not
-    # placing arrivals in the destination's zones) does NOT reproduce on
-    # 2026-07-31 master — the destination reorder runs unconditionally.
-    # Row flagged to olli for re-examination when #34 lands.
-    # §7 rows 3 and 4 (#38, retired 2026-08-08 with the whole-group
-    # promotion scan): ``d3_scan_from_closed`` and
-    # ``d4_no_subproject_review`` are gone — the CLI now scans the whole
-    # sibling group in document order and emits a per-subproject
-    # ``project-needs-review`` when it passes an all-done-but-open
-    # subproject (olli ruling E5, 2026-07-28).
-    # §7 row 5 (#39, retired 2026-08-10 with the WAITING mechanism):
-    # ``d5_no_waiting_reason`` is gone — WAITING entry now requires a
-    # reason or a blocker link, ``add-task``/``add-subtask`` reject
-    # ``WAITING``, and the blocker links, the AND-gated auto-unblock with
-    # its conditional wake, and the exit cleanup all exist.
-    # §7 row 7 (#41, retired 2026-08-13 with the [#A]-only scheme):
-    # ``d7_no_priority_rules`` is gone — ``set_priority`` accepts only
-    # ``A`` or clear, and every close (``_close`` and ``set_state``'s
-    # close path alike) strips the cookie.
-    # §7 row 8 (#46, retired 2026-08-10 with the set-state/set-next
-    # legality guards and close-path parity): ``d8_lax_state_guards`` is
-    # gone — the CLI now rejects NEXT on a project/subproject heading and
-    # WAITING on a project heading, rejects a blocked DONE/CANCELLED
-    # through ``set-state`` instead of reporting a false success, and
-    # ``set-next``'s project path promotes the first TODO *non-project*
-    # direct child (§4.7).
-    # §7 row 9 (#47, retired 2026-08-07): ``d9_completed_block_only`` is
-    # gone — move now guards the full §4.9 zone invariant (completed
-    # block, NEXT prefix, DEFER block), so current and normative agree.
-    # §7 rows 10 and 11 (#56, retired 2026-08-11 with the §4.0 repairs):
-    # ``dx_setnext_rejects_closed_leaf`` is gone — the closure repair
-    # cascade now runs from ``add-subtask``, ``set-state``, ``refile``
-    # and ``set-next`` (a closed *project-child* leaf reopens straight
-    # to NEXT, a closed lone task stays rejected, I3), and a WAITING
-    # parent gaining its first task child demotes with the §4.6 exit
-    # cleanup plus ``project-needs-review``.
-    # §7 row 12 (#57, retired 2026-08-11): no flag ever existed — the
-    # row is gone because ``refile --to`` is now unique-or-error (I12 on
-    # the destination) and refile reports every repair it performs as a
-    # side effect, in the primitive commands' vocabulary. Zone placement
-    # and reorder remain outside ``side_effects``.
-
-    @classmethod
-    def normative(cls):
-        return cls()
-
-    @classmethod
-    def current(cls):
-        return cls()
-
-
 class Model:
     """The state object: a forest of headings in one file (§2)."""
 
-    def __init__(self, roots=None, divergences=None):
+    def __init__(self, roots=None):
         self.roots = roots if roots is not None else []
-        self.div = divergences or Divergences.normative()
 
     def clone(self):
-        return Model([r.clone() for r in self.roots],
-                     replace(self.div))
+        return Model([r.clone() for r in self.roots])
 
     # ── §2 structure predicates ───────────────────────────────────────
 
@@ -359,9 +287,9 @@ class Model:
         is the keyword before the change; None means the task newly
         arrived in this group (add/refile) and enters at the end of its
         zone (§4.1 arrival rule). Mixed groups: never reordered (§2).
-        Top-level groups place like any other — a uniform top-level
-        group is an implicit category bucket (ruling 2026-08-02,
-        ex-§7 row 14).
+        Top-level groups place like any other — a file's top level is a
+        sibling group too (§2), so a uniform top-level group is an
+        implicit category bucket.
         """
         if not self.is_uniform(group):
             return
@@ -431,9 +359,7 @@ class Model:
     def _promotion_rule(self, closed_child):
         """§4.5: runs only from a just-closed project child.
 
-        Returns the side-effect list. Steps 1-3 exactly as specified —
-        the two scan divergences (ex-§7 rows 3-4) were retired with #38,
-        so there is nothing left to switch here.
+        Returns the side-effect list. Steps 1-3 exactly as specified.
         """
         effects = []
         if not self.is_project_child(closed_child):
