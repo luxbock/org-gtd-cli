@@ -60,7 +60,7 @@ org-gtd-cli --json agenda --state WAITING                          # blocked tas
 # Overdue (scheduled/deadlined before today, still open)
 org-gtd-cli --json agenda --to YESTERDAY_DATE
 
-# Built-in views (human-formatted, --json NOT supported)
+# Built-in views (--json supported; the envelope carries `warnings`)
 org-gtd-cli agenda-view S    # stuck projects
 org-gtd-cli agenda-view p    # all projects
 org-gtd-cli agenda-view w    # waiting
@@ -91,7 +91,8 @@ These three queries give you the full picture — what's slipped, what's time-bo
 After gathering data, apply judgment:
 
 - **Deduplicate** — a task scheduled today will appear in both the date query and the NEXT query. Deduplicate by `heading` field. Show it once.
-- **Ignore conflicted copies** — filter out tasks where the `file` field contains `conflicted copy`. Only show items from `tasks.org`, `inbox.org`, `calendar.org`, or `family-calendar.org`.
+- **Relay sync conflicts** — if a `--json` response's `warnings` contains a `sync-conflict` entry, tell the user the org files may be stale before presenting the view (see the `gtd` skill, "Relay the `sync-conflict` warning to the human").
+- Only show items from `tasks.org`, `inbox.org`, `calendar.org`, or `family-calendar.org`.
 - **Hide non-actionable project siblings** — if a NEXT task from a project is shown, hide TODO siblings from the same project. They aren't actionable until the NEXT task is done. Use the `parent` field from JSON to identify siblings sharing the same parent project. Only show these if the user specifically asks about a project.
 - **Prioritize** — `priority: "A"` items and overdue items are most urgent. NEXT tasks are more actionable than TODO tasks.
 - **Group meaningfully** — organize by urgency/actionability, not just by raw state. Suggested sections:

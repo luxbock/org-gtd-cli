@@ -69,7 +69,7 @@ org-gtd-cli --json rename "vague task name" "Specific actionable task name"
 
 ### Path B: Break into a project
 
-For tasks that require multiple steps, create subtasks to form a project. `add-subtask`'s parent MUST be a task heading (one with a TODO keyword) — to add a task under a category heading (a plain heading like `Computers/NixOS`), use `add-task --category "Full/Path"` with a path from `categories` output instead:
+For tasks that require multiple steps, create subtasks to form a project (execution order, promotion, and NEXT apply only inside projects — see "Projects vs. lone tasks" in the `gtd` skill's `references/conventions.md`). `add-subtask`'s parent MUST be a task heading (one with a TODO keyword) — to add a task under a category heading (a plain heading like `Computers/NixOS`), use `add-task --category "Full/Path"` with a path from `categories` output instead:
 
 ```bash
 # Create subtasks in execution order — use batch for multiple at once

@@ -36,12 +36,20 @@ ORG_GTD_CORE_FILE=+gtd-core.el ORG_GTD_ELISP_FILE=org-gtd-cli.el \
 
 ## Workflow
 
-Tasks move through a two-track state machine:
+Task states form an active track, two holding states, and two terminals:
 
 ```
-TODO → NEXT → DONE
-WAITING → DEFER → CANCELLED
+active track:   TODO → NEXT → DONE
+holding states: WAITING (concrete external blocker), DEFER (intentionally shelved)
+terminals:      DONE, CANCELLED
 ```
+
+WAITING is typically entered from NEXT and exits to NEXT (resume), DONE,
+CANCELLED, or TODO; it wakes automatically when its last linked blocker
+closes. Which state is legal where depends on structure — NEXT only on a
+leaf project child, never on a lone task or a project heading.
+[`SEMANTICS.md`](SEMANTICS.md) is the normative specification (§3 state
+spaces, §4.6 WAITING).
 
 ## Usage
 
@@ -493,28 +501,21 @@ nix develop --command python3 -m pytest -q -n 4
 The dev shell is the *complete* environment: a factory VM worker (or any
 fresh checkout) needs nothing beyond `nix develop` to run every test.
 
-### Semantics tests: reference model + two tiers (#45)
+### Semantics tests: reference model + two tiers
 
 `SEMANTICS.md` is executable: `gtd_reference_model.py` implements it as a
-pure-Python model, and two test tiers derive from that (design + rulings
-on issue #45):
+pure-Python model, and two test tiers derive from that:
 
 - **Tier 1** (`test_gtd_model_properties.py`) — Hypothesis properties
   against the model alone in *normative* mode. Emacs-free, runs in
   seconds, asserts the §6 invariants over generated operation sequences.
 - **Tier 2** (`test_gtd_conformance.py`) — bounded, daemon-backed
   conformance: generated sequences run through the real CLI and the
-  model in *current* mode (every §7 divergence flag on) and must match
-  exactly (exit class, file skeleton, `side_effects`; `warnings` is
-  never compared). Most §7 rows also have a minimal witness test against
-  the *normative* model, marked `xfail(strict=True)` with its closing
-  issue — a stage-2c fix flips its witness green, and the row, its
-  `Divergences` flag, and the xfail marker retire together. Row 2 was
-  retired 2026-08-01 (its recorded divergence did not reproduce on
-  master — a plain regression test pins the agreeing behavior). Row 6
-  (view predicates that read legacy tags) is not modelled in part 1, so
-  it has neither witness nor `Divergences` flag; the tag-write pins
-  that #40's tests stage will flip live inline in `test_org_gtd_cli.py`.
+  model, and must match exactly (exit class, file skeleton,
+  `side_effects`; `warnings` is never compared). The model's *current*
+  and *normative* modes coincide: no known code-vs-document divergence
+  is open, so `Divergences` carries no flags. The divergence-flag and
+  `xfail` witness mechanism that tracked such rows is retired.
 
 Hypothesis profiles: `fast` (default) keeps the whole run quick;
 `ORG_GTD_TEST_PROFILE=thorough` is the deep opt-in run. The tier-2

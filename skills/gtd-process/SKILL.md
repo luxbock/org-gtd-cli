@@ -66,7 +66,7 @@ Ask these questions (you MAY answer some yourself if obvious from context):
 
 2. **What's the next action?** Ensure the title is a concrete action starting with a verb. `rename` if needed.
 
-3. **Is it a single action or a project?** If it needs multiple steps, discuss breaking it into subtasks with `add-subtask`.
+3. **Is it a single action or a project?** If it needs multiple steps, discuss breaking it into subtasks with `add-subtask`. Execution order, promotion, and NEXT apply only inside projects — see "Projects vs. lone tasks" in the `gtd` skill's `references/conventions.md`.
 
 4. **Where does it belong?** Check the projects and categories lists. Categories can exist inside projects, so both lists may have relevant targets.
    - To refile under a **task or project heading**: use `refile --to` with the full path from `projects` output (e.g. `refile SUBSTR --to "Computers/Agents/org-gtd-cli tool"`).
@@ -77,7 +77,7 @@ Ask these questions (you MAY answer some yourself if obvious from context):
 
 6. **When?** Add a schedule or deadline only if there's a real time constraint. Most tasks SHOULD NOT have dates.
 
-7. **Priority?** Only set `[#A]` if genuinely urgent. Most tasks SHOULD NOT have a priority.
+7. **Priority?** Most tasks SHOULD NOT have a priority. `[#A]` (urgent AND important) is the only cookie; if the item seems genuinely urgent, propose it and set it only on the user's explicit confirmation. Within a project, sibling order carries importance, never cookies (SEMANTICS.md §3).
 
 ### Step 3: Refile
 
@@ -218,7 +218,9 @@ org-gtd-cli --json set-done "task heading"
 ```
 
 `set-done` handles project progression automatically:
+- Moves the closed task to the bottom of the completed block; nothing else moves (SEMANTICS.md §4.1)
 - Promotes the next actionable sibling to NEXT (skipping subprojects that already have active children, drilling into stuck subprojects)
+- Promotion fires only when no sibling is NEXT or WAITING, so the promoted task becomes NEXT in place, at the top of the active zone (SEMANTICS.md §4.5)
 - If all siblings are now done, leaves the parent project open and reports a `project-needs-review` side effect (in JSON: `{"action": "project-needs-review", ...}`)
 
 **Caution:** Completing the final subtask does NOT auto-complete the parent project. When you see `project-needs-review`, check whether the project is genuinely finished: if yes, close it with an explicit `set-done` on the project heading; if more work remains, add those subtasks instead.

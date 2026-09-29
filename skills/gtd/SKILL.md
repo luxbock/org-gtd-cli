@@ -75,7 +75,7 @@ JSON returns structured data with a `version` field and command-specific fields.
 
 `warnings` is a **universal** envelope field (present on any command, reads and mutations alike). One entry you MUST NOT silently swallow is `{"type": "sync-conflict", ...}` (text mode: a `Warning: org sync conflict pending — local view may be stale/diverged` line on stderr). It means `~/org` has diverged from the other machines' view — a git sync conflict is pending and the local clone may be **stale**. When you see it, **tell the human** rather than continuing to plan or mutate on a possibly-stale view: the task you are about to act on may have moved, been completed, or been re-filed on another host. The CLI is a pure consumer of this signal (it never resolves or clears the conflict); resolution is a human/sync-infrastructure job, so surface it and let the human decide before you proceed.
 
-> Note: the **deployed** copies of the GTD skills live in `nixos-config` and are updated there separately; this note lives in the org-gtd-cli repo's own `skills/gtd/SKILL.md`.
+> Note: the deployed GTD skills are this repo's `skills/` directory, taken from nixos-config's `org-gtd-cli` flake input — a change here reaches deployed agents once that input's pin is bumped.
 
 ## Substring matching
 
@@ -205,10 +205,11 @@ org-gtd-cli --json add-task "Buy milk" --tags "buy,@errand"
 org-gtd-cli --json add-task "Review PR" --category "Work" --priority A
 org-gtd-cli --json add-task "Call dentist" --schedule 2026-03-20 --tags "@phone"
 org-gtd-cli --json add-task "Pay rent" --deadline 2026-04-01 --category "Finance"
-org-gtd-cli --json add-task "Set up monitoring" --state NEXT --category "Computers/NixOS/epiphyte"
 ```
 
 TITLE MUST be the first argument, before any flags. Without `--category`, the task goes to `inbox.org` — you MUST NOT use `--category inbox`, as "inbox" is not a category heading and will match incorrectly. With `--category`, the task is placed under that heading in `tasks.org`. Use the slash-delimited path from `categories` output to target nested headings.
+
+`add-task` rejects `--state NEXT` and `--state WAITING` (SEMANTICS.md §4.2). A task filed with `add-task` — in the inbox or under a category heading — is a lone task, and a lone task is never NEXT; enter WAITING via `set-state`.
 
 `add-task` has no `--parent` flag — to add a child under an existing task or project, use `add-subtask PARENT_SUBSTR TITLE` (next section).
 
@@ -219,7 +220,7 @@ org-gtd-cli --json add-subtask "improve agent" "Write unit tests" --state NEXT
 org-gtd-cli --json add-subtask "Finland trip" "Book flights" --schedule 2026-04-01
 ```
 
-The first argument is a SUBSTR matching the parent task — it MUST be a task heading (one with a TODO keyword). Category headings (plain headings like `Computers` or `NixOS`) never match; to add a task under one of those, use `add-task --category "Full/Path"` instead. **After adding a subtask, consider whether the project has at least one NEXT subtask** — projects without a NEXT action are "stuck."
+The first argument is a SUBSTR matching the parent task — it MUST be a task heading (one with a TODO keyword). Category headings (plain headings like `Computers` or `NixOS`) never match; to add a task under one of those, use `add-task --category "Full/Path"` instead. **After adding a subtask, consider whether the project has at least one NEXT subtask** — a project with no NEXT and no WAITING in its task descent is "stuck" (SEMANTICS.md §5.2).
 
 ### add-event — calendar event
 
@@ -249,6 +250,8 @@ The org tree has three kinds of headings:
 - **Project** — a task heading that has child task headings. No special keyword — the nesting makes it a project. The parent keeps its TODO keyword.
 - **Category** — a plain heading with no TODO keyword (e.g., `* Work`, `** Emacs`, `*** Tools`). Used to organize the tree. Categories can appear at any level, including inside tasks and projects.
 
+A category heading severs task descent, even inside a task: tasks beneath it are not subtasks of the enclosing task, and a task whose only children are category headings is a leaf, not a project (SEMANTICS.md §2).
+
 The distinction matters for `refile` and `categories`:
 - `categories` lists all category headings as slash-delimited paths, even those nested inside tasks/projects.
 - `refile --category` targets category headings only. When a category is nested inside a project, use the full path (e.g., `refile SUBSTR --category "Computers/Agents/Virtual Assistant/Research Leads"`) to avoid ambiguity.
@@ -258,7 +261,9 @@ The distinction matters for `refile` and `categories`:
 
 A project is any task that has sub-tasks (child TODO headings). There is no special keyword — the nesting itself makes it a project. The parent keeps its TODO keyword.
 
-Every project should have at least one `NEXT` subtask — this is the concrete next physical action. A project with only `TODO` subtasks and no `NEXT` is considered "stuck" (nothing is actively being worked on).
+Every project should have at least one `NEXT` subtask — this is the concrete next physical action. A project is "stuck" when it is open, not deferred (neither it nor a task ancestor is DEFER), and has no `NEXT` and no `WAITING` anywhere in its task descent — tasks below a category heading don't count. This includes an open project whose tasks are all closed: stuckness is where the closure decision waits (SEMANTICS.md §5.2, I11).
+
+A project heading is `TODO` while open; `DEFER` is legal and shelves the whole project; `DONE`/`CANCELLED` only once every descendant task is closed. It is never `NEXT` or `WAITING` — `set-state` rejects both (SEMANTICS.md §3, §4.6). Execution order, promotion, stuck, and `NEXT` apply only inside projects; lone tasks (no parent task) are independent — see "Projects vs. lone tasks" and "Sibling order and zones" in [references/conventions.md](references/conventions.md).
 
 `set-done` enforces this automatically with project-aware promotion:
 - When you complete a subtask, the **first open TODO sibling in document order** is promoted to NEXT — the whole sibling group is scanned, so the promoted task may sit *earlier* in the list than the one you just completed
@@ -267,7 +272,7 @@ Every project should have at least one `NEXT` subtask — this is the concrete n
 - If the candidate is a subproject whose own subtasks are all done but which is still open, it is reported for review (a `project-needs-review` side effect naming the subproject — advisory only, nothing is closed) and the scan continues past it
 - **If all siblings are now done, the parent project is left open for review** — it is *not* auto-completed. The CLI emits an advisory ("All subtasks done — project left open for review: ..."), which in JSON surfaces as a side effect `{"action": "project-needs-review", ...}`. Closing the project is an explicit, separate `set-done` on the project heading — do that only when the project is genuinely complete, not just because the side effect appeared.
 
-`set-state` does not promote — the scan above is `set-done`/`set-cancelled` only. A `set-state DONE`/`CANCELLED` still does everything else a close does (CLOSED timestamp, LOGBOOK, reorder into the completed block, and the same rejection when the target is blocked by an open subtask).
+`set-state` does not promote — the scan above is `set-done`/`set-cancelled` only. A `set-state DONE`/`CANCELLED` still does everything else a close does (CLOSED timestamp, LOGBOOK, priority cookie strip, reorder into the completed block, auto-unblock, and the same rejection when the target is blocked by an open subtask).
 
 ## Modifying
 
@@ -313,6 +318,13 @@ flags are repeatable and combine with `--reason`.
   close, or the automatic wake — removes `:REASON:` and unwinds the link
   pair, reporting one `blocker-link-removed` side effect per link. The
   LOGBOOK record stays.
+- Agents MUST NOT set WAITING without a concrete, *named* external blocker —
+  a placeholder `--reason` ("waiting", "blocked", "later") does not satisfy
+  this. Inside a project, agents MUST NOT move a task `TODO → WAITING`
+  without explicit instruction; that transition is human-only. WAITING is
+  never a way to park work for later — sibling position already encodes
+  "later" (SEMANTICS.md §4.6; see "WAITING transitions" in
+  [references/conventions.md](references/conventions.md)).
 - `delete` **refuses** a task something is waiting on (cancel it instead, or
   take the waiter out of WAITING first); deleting the *waiter* succeeds and
   unwinds its own links. `archive` holds a blocker back while an open task
@@ -322,7 +334,7 @@ flags are repeatable and combine with `--reason`.
   WAITING task derives its displayed reason from the blocker's heading and
   current state, so you can see whether the blocker is still open.
 
-`set-done` is the only state-specific command. All other state changes use `set-state`. `set-done` does more than just changing the keyword — it adds a CLOSED timestamp, reorders the completed task, and auto-promotes the first actionable sibling in document order to NEXT (project-aware: skips subprojects with active children, drills into stuck subprojects, reports all-done-but-open subprojects for review). If all siblings are done, the parent project is left open and a `project-needs-review` side effect is reported; closing the project requires an explicit `set-done` on the project heading. You SHOULD use `set-done` rather than `set-state DONE` when completing tasks — **because it promotes**. `set-state DONE`/`CANCELLED` is a genuine close too (CLOSED timestamp, LOGBOOK, reorder into the completed block, same blocked-by-open-subtask rejection); the promotion scan is the only thing it does not run. Use it when you deliberately want to close without moving the project's front.
+`set-done` is the only state-specific command. All other state changes use `set-state`. `set-done` does more than just changing the keyword — it adds a CLOSED timestamp, strips any priority cookie, moves the closed task to the bottom of the completed block (nothing else moves), wakes linked WAITING tasks whose last open blocker this was, and auto-promotes the first actionable sibling in document order to NEXT (project-aware: skips subprojects with active children, drills into stuck subprojects, reports all-done-but-open subprojects for review). Promotion only fires when no sibling is NEXT or WAITING, so the chosen TODO already sits at the top of the active zone and becomes NEXT there (SEMANTICS.md §4.1, §4.4, §4.5). If all siblings are done, the parent project is left open and a `project-needs-review` side effect is reported; closing the project requires an explicit `set-done` on the project heading. You SHOULD use `set-done` rather than `set-state DONE` when completing tasks — **because it promotes**. `set-state DONE`/`CANCELLED` is a genuine close too (CLOSED timestamp, LOGBOOK, priority cookie strip, reorder into the completed block, auto-unblock, same blocked-by-open-subtask rejection); the promotion scan is the only thing it does not run. Use it when you deliberately want to close without moving the project's front.
 
 `set-next` is not an alias for `set-state SUBSTR NEXT`. On a **leaf** it sets that task to NEXT (same guard: NEXT is only legal on a project child that is a leaf). On a **project heading** it promotes the project's first TODO *non-project* direct child to NEXT — subproject headings are never promoted — or reports the existing NEXT child and changes nothing. On a **subproject heading** it is rejected.
 
@@ -380,6 +392,8 @@ org-gtd-cli --json move "write tests" --before "deploy app"
 - **`--category CAT`** — substring match against category (non-task) headings, including those nested inside tasks/projects. Exits 2 on ambiguous match. Use the full slash-delimited path from `categories` output for nested targets to avoid ambiguity. **Prefer this for most refiling.**
 - **`--to TARGET`** — exact match (case-insensitive) on any heading text, including tasks. Use when you need to refile under a task or project heading directly.
 
+`move` reorders within one sibling group, but rejects a move that would carry the task across a zone boundary (completed block on top, NEXT entries at the top of the active zone, DEFER block at the bottom); moves within a zone are always legal (SEMANTICS.md §4.9). See "Sibling order and zones" in [references/conventions.md](references/conventions.md).
+
 ### Delete
 
 ```bash
@@ -387,7 +401,11 @@ org-gtd-cli --json delete "Accidental duplicate task"        # permanently remov
 org-gtd-cli --json delete "Accidental duplicate task" --dry-run  # preview first
 ```
 
-Permanently removes a task from the file. Unlike `archive` or `set-state CANCELLED`, this leaves no trace. HEADING must match the full task heading exactly (case-insensitive). Cannot delete projects (tasks with subtasks) — remove subtasks first or use `set-state CANCELLED` instead.
+Permanently removes a task from the file. Unlike `archive` or `set-state CANCELLED`, this leaves no trace. HEADING must match the full task heading exactly (case-insensitive). Delete is rejected when (SEMANTICS.md §4.12):
+- the target has **any** child heading, task or category — empty the subtree first, or use `set-state CANCELLED` instead;
+- the target blocks a WAITING task (it carries a `TRIGGER` entry resolving to an existing task) — use `set-state CANCELLED`, a close that can wake the waiter for re-triage, or take the waiter out of WAITING first.
+
+Deleting a waiter that nothing waits on succeeds and unwinds its own blocker links.
 
 Use `delete` for tasks created by mistake or duplicates. For tasks you decided not to do, prefer `set-state CANCELLED` (keeps a record). For completed tasks, use `archive`.
 
@@ -398,7 +416,7 @@ org-gtd-cli --json archive "old project"    # archive one task
 org-gtd-cli --json archive --all            # archive all eligible DONE/CANCELLED
 ```
 
-Tasks are only archived if they are finished and added more than a month ago.
+Tasks are only archived if they are finished, added more than a month ago, and not still blocking an open task (no `TRIGGER` entry resolving to an open task). `archive --all` skips an ineligible task; single `archive` on one fails (SEMANTICS.md §4.11). Open tasks below the entry's category headings don't block archiving but are reported in an `open-severed-tasks` warning.
 
 Use `--dry-run` on any modifying command that supports it to preview changes.
 
@@ -538,7 +556,7 @@ org-gtd-cli --json set-done "parent task"
 
 ```bash
 org-gtd-cli --json subtasks "project name"
-# If no NEXT subtask exists, promote one:
+# If no NEXT or WAITING subtask exists, promote one:
 org-gtd-cli --json set-next "subtask heading"
 ```
 
