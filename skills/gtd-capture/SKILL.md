@@ -23,6 +23,7 @@ From the user's description and the current conversation context, determine:
 - **Priority** — only set `[#A]` if the user indicates urgency. Most tasks don't need a priority.
 - **Schedule/deadline** — only if the user mentions a specific date or timeframe.
 - **State** — default is TODO. Use NEXT only if the user says they want to work on it right away.
+  NEXT is only valid when adding a subtask into a project (`add-subtask`); `add-task` rejects `--state NEXT` (SEMANTICS.md §4.2).
 
 When the task lies outside the domain you are currently working in, write the title and body for a future reader who has none of this session's context. Describe the task in terms of the category/project it is filed under — drop session-specific jargon, codenames, and file paths that only make sense here, and keep only what is needed to act on the task later.
 
