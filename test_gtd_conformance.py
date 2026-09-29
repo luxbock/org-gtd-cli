@@ -1,26 +1,19 @@
-"""Tier 2 (issue #45): bounded daemon-backed CLI-vs-model conformance.
+"""Tier 2: bounded daemon-backed CLI-vs-model conformance.
 
 Generated operation sequences run through the real CLI (daemon mode —
-tier 2 is daemon-only per the 2026-07-31 ruling on #45) and through the
-reference model in **current** divergence mode (Divergences.current():
-every §7 row switched to today's behavior). Results must match exactly:
-exit-code class, the resulting file skeleton, and the reported
-side_effects. A mismatch here is an *unknown* divergence — a bug in
-code, document, or model.
+tier 2 is daemon-only) and through the reference model, which implements
+SEMANTICS.md exactly. Results must match exactly: exit-code class, the
+resulting file skeleton, and the reported side_effects. A mismatch is a
+bug in code, document, or model, triaged against SEMANTICS.md.
 
-The **normative** mode runs in the expected-failure tests at the bottom:
-one per applicable §7 row, each a minimal witness of the divergence,
-marked xfail(strict=True) with its closing issue. When a stage-2c fix
-lands, its witness flips loudly and the §7 row (plus its Divergences
-flag) is retired together with the xfail marker.
+The single-shot tests at the bottom pin shapes the generator reaches
+rarely, one CLI dispatch apiece, each against the same model.
 
 Comparison surface notes:
-- ``warnings`` is never compared: per the 2026-07-28 warnings-channel
-  ruling the model predicts ``side_effects`` exactly and ignores
-  ``warnings``.
-- ``refile`` side_effects ARE compared (since #57, §7 row 12): refile
-  reports every repair it performs in the same vocabulary the primitive
-  commands use (§4.0).
+- ``warnings`` is never compared: the model predicts ``side_effects``
+  exactly and ignores ``warnings``.
+- ``refile`` side_effects ARE compared: refile reports every repair it
+  performs in the same vocabulary the primitive commands use (§4.0).
 """
 
 import json
@@ -34,7 +27,7 @@ from hypothesis import example, given, settings
 
 from conftest import tier2_max_examples
 from gtd_reference_model import (
-    Divergences, Model, Node, parse_org_text,
+    Model, Node, parse_org_text,
 )
 from test_gtd_model_properties import models_and_ops
 from test_org_gtd_cli import (
@@ -162,7 +155,7 @@ def model_side_effects(result):
 
 
 # ---------------------------------------------------------------------------
-# The generative conformance property (current mode — must be green)
+# The generative conformance property (must be green)
 # ---------------------------------------------------------------------------
 
 # Deterministic pins for the narrow reorder shapes whose hand-written
@@ -175,30 +168,27 @@ def model_side_effects(result):
     # add-subtask DONE onto a parent whose children are NEXT-then-TODO
     # (the issue-#20 shape of the dropped test_add_done_reorders_above_next)
     Model([Node("proj", "TODO", children=[
-        Node("aa", "NEXT"), Node("bb", "TODO")])],
-        Divergences.normative()),
+        Node("aa", "NEXT"), Node("bb", "TODO")])]),
     [("add_subtask", ("proj", "new900", "DONE"), {})],
 ))
 @example(model_and_ops=(
     # add-subtask NEXT to an empty parent (dropped
     # test_add_next_to_empty_parent)
-    Model([Node("proj", "TODO")], Divergences.normative()),
+    Model([Node("proj", "TODO")]),
     [("add_subtask", ("proj", "new901", "NEXT"), {})],
 ))
 @example(model_and_ops=(
     # add-subtask NEXT above existing TODO siblings (dropped
     # test_add_next_reorders_above_todo)
     Model([Node("proj", "TODO", children=[
-        Node("aa", "TODO"), Node("bb", "TODO")])],
-        Divergences.normative()),
+        Node("aa", "TODO"), Node("bb", "TODO")])]),
     [("add_subtask", ("proj", "new902", "NEXT"), {})],
 ))
 @given(models_and_ops())
 @settings(max_examples=tier2_max_examples(), deadline=None)
-def test_cli_conforms_to_current_mode_model(cli, model_and_ops):
+def test_cli_conforms_to_model(cli, model_and_ops):
     initial, ops = model_and_ops
     model = initial.clone()
-    model.div = Divergences.current()
     cli.write_state(model)
     for op, args, kwargs in ops:
         envelope, rc = cli.run(*cli_args(op, args, kwargs))
@@ -250,52 +240,47 @@ def assert_response_integrity(op, args, kwargs, envelope, rc, disk):
 
 
 # ---------------------------------------------------------------------------
-# §7 witnesses (normative mode — xfail until the closing issue lands)
+# Single-shot pins: one op, CLI vs model, on a fixed shape
 # ---------------------------------------------------------------------------
 
 def run_normative(cli, model, op, args, kwargs):
-    """Run one op through CLI and normative model; return both outcomes."""
+    """Run one op through the CLI and the model; return both outcomes."""
     cli.write_state(model)
     envelope, rc = cli.run(*cli_args(op, args, kwargs))
     result = getattr(model, op)(*args, **kwargs)
     return envelope, rc, result
 
 
-# §7 row 1 retired 2026-08-07 (#34): the reorder primitive is the §4.1
-# minimal move — this witness now pins the agreeing behavior.
-def test_s7row1_minimal_move_preserves_interleaving(cli):
+# §4.1: the reorder primitive is the minimal move — only the changed task
+# moves, the rest of the group keeps its interleaving.
+def test_minimal_move_preserves_interleaving(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"), Node("ww", "WAITING"), Node("bb", "TODO"),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(cli, model, "set_done", ("aa",), {})
     assert rc == 0 and result.ok
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 2 (#34) intentionally has NO xfail witness: the recorded
-# divergence does not reproduce on 2026-07-31 master (refile's
-# destination reorder runs unconditionally and places arrivals). Row
-# flagged for re-examination; this plain regression test pins the
-# agreeing behavior meanwhile.
-def test_s7row2_refile_places_arrival_in_zone(cli):
+# §4.1/§4.8: refile places the arrival in the destination's zones.
+def test_refile_places_arrival_in_zone(cli):
     model = Model([
         Node("proj", "TODO", children=[
             Node("aa", "TODO"), Node("dd", "DEFER")]),
         Node("lone", "TODO"),
-    ], Divergences.normative())
+    ])
     _, rc, result = run_normative(
         cli, model, "refile", ("lone",), {"to": "proj"})
     assert rc == 0 and result.ok
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 rows 3 and 4 retired 2026-08-08 (#38): the promotion scan walks the
-# whole sibling group in document order and reports every all-done-but-open
-# subproject it passes, so both witnesses now pin agreeing behavior.
-def test_s7row3_promotion_scans_whole_group(cli):
+# §4.5: the promotion scan walks the whole sibling group in document order
+# and reports every all-done-but-open subproject it passes.
+def test_promotion_scans_whole_group(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"), Node("bb", "TODO"),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(cli, model, "set_done", ("bb",), {})
     assert rc == 0 and result.ok
     # Normative: aa (first open TODO in document order) is promoted.
@@ -304,12 +289,12 @@ def test_s7row3_promotion_scans_whole_group(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row4_subproject_review_emitted(cli):
+def test_subproject_review_emitted(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"),
         Node("sub", "TODO", children=[Node("done1", "DONE")]),
         Node("bb", "TODO"),
-    ])], Divergences.normative())
+    ])])
     # Closing aa: the scan passes the all-done-but-open subproject "sub"
     # (emitting review for it) and promotes bb.
     envelope, rc, result = run_normative(cli, model, "set_done", ("aa",), {})
@@ -319,13 +304,10 @@ def test_s7row4_subproject_review_emitted(cli):
     assert envelope_side_effects(envelope) == model_side_effects(result)
 
 
-# §7 row 5 retired 2026-08-10 (#39): the whole WAITING mechanism landed —
-# entry guardrail, blocker links, the AND-gated auto-unblock with its
-# conditional wake, and the exit cleanup — so these witnesses now pin
-# agreeing behavior.
-def test_s7row5_waiting_requires_reason(cli):
-    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
-                  Divergences.normative())
+# §4.6/§4.4: the WAITING mechanism — entry guardrail, blocker links, the
+# AND-gated auto-unblock with its conditional wake, and the exit cleanup.
+def test_waiting_requires_reason(cli):
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])])
     envelope, rc, result = run_normative(
         cli, model, "set_state", ("aa", "WAITING"), {})
     # Normative: a bare WAITING entry is rejected on both sides.
@@ -336,11 +318,11 @@ def test_s7row5_waiting_requires_reason(cli):
     assert envelope_side_effects(envelope) == []
 
 
-def test_s7row5_blocker_link_and_wake(cli):
+def test_blocker_link_and_wake(cli):
     """The full round trip: link, AND-gate, conditional wake, cleanup."""
     model = Model([Node("proj", "TODO", children=[
         Node("bb", "TODO"), Node("aa", "TODO"),
-    ])], Divergences.normative())
+    ])])
     envelope, rc, result = run_normative(
         cli, model, "set_state", ("aa", "WAITING"), {"blocked_by": ["bb"]})
     assert rc == 0 and result.ok
@@ -356,12 +338,12 @@ def test_s7row5_blocker_link_and_wake(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row5_multi_blocker_and_gate(cli):
+def test_multi_blocker_and_gate(cli):
     """Two blockers: the first close leaves the waiter untouched."""
     model = Model([Node("proj", "TODO", children=[
         Node("b1", "TODO"), Node("b2", "TODO"),
         Node("aa", "WAITING", blockers=("b1", "b2")),
-    ])], Divergences.normative())
+    ])])
     # Wire the blockers' trigger sides the way a linked state is on disk.
     for node in model.all_nodes():
         if node.heading in ("b1", "b2"):
@@ -373,9 +355,8 @@ def test_s7row5_multi_blocker_and_gate(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row5_create_never_mints_waiting(cli):
-    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
-                  Divergences.normative())
+def test_create_never_mints_waiting(cli):
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])])
     _, rc, result = run_normative(
         cli, model, "add_task", ("new950", "WAITING"), {})
     assert result.ok is False
@@ -388,10 +369,9 @@ def test_s7row5_create_never_mints_waiting(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 7 retired 2026-08-13 (#41): [#A] is the only cookie and every
-# close strips it, so these witnesses now pin agreeing behavior.
-def test_s7row7_priority_rules(cli):
-    model = Model([Node("lone", "TODO")], Divergences.normative())
+# §3/§4.10/§4.4: [#A] is the only cookie and every close strips it.
+def test_priority_rules(cli):
+    model = Model([Node("lone", "TODO")])
     _, rc, result = run_normative(
         cli, model, "set_priority", ("lone", "B"), {})
     assert result.ok is False
@@ -399,8 +379,8 @@ def test_s7row7_priority_rules(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row7_priority_a_accepted(cli):
-    model = Model([Node("lone", "TODO")], Divergences.normative())
+def test_priority_a_accepted(cli):
+    model = Model([Node("lone", "TODO")])
     _, rc, result = run_normative(
         cli, model, "set_priority", ("lone", "A"), {})
     assert result.ok is True
@@ -408,10 +388,10 @@ def test_s7row7_priority_a_accepted(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row7_close_strips_cookie(cli):
+def test_close_strips_cookie(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO", priority="A"), Node("bb", "TODO"),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(cli, model, "set_done", ("aa",), {})
     assert result.ok is True
     assert rc == 0
@@ -420,10 +400,10 @@ def test_s7row7_close_strips_cookie(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row7_set_state_close_strips_cookie(cli):
+def test_set_state_close_strips_cookie(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO", priority="A"), Node("bb", "TODO"),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(
         cli, model, "set_state", ("aa", "CANCELLED"), {})
     assert result.ok is True
@@ -431,13 +411,12 @@ def test_s7row7_set_state_close_strips_cookie(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 8 retired 2026-08-10 (#46): the set-state legality guards, the
-# blocked-close rejection and set-next's non-project candidate rule all
-# landed, so these four witnesses now pin agreeing behavior.
-def test_s7row8_next_guard_rejects_subproject_heading(cli):
+# §4.6/§4.7: the set-state legality guards, the blocked-close rejection
+# and set-next's non-project candidate rule.
+def test_next_guard_rejects_subproject_heading(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("sub", "TODO", children=[Node("aa", "TODO")]),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(
         cli, model, "set_state", ("sub", "NEXT"), {})
     assert result.ok is False
@@ -445,10 +424,10 @@ def test_s7row8_next_guard_rejects_subproject_heading(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row8_waiting_guard_rejects_project_heading(cli):
+def test_waiting_guard_rejects_project_heading(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"), Node("bb", "TODO"),
-    ])], Divergences.normative())
+    ])])
     envelope, rc, result = run_normative(
         cli, model, "set_state", ("proj", "WAITING"), {"reason": "because"})
     assert result.ok is False
@@ -458,9 +437,8 @@ def test_s7row8_waiting_guard_rejects_project_heading(cli):
     assert envelope_side_effects(envelope) == []
 
 
-def test_s7row8_blocked_close_via_set_state_is_rejected(cli):
-    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])],
-                  Divergences.normative())
+def test_blocked_close_via_set_state_is_rejected(cli):
+    model = Model([Node("proj", "TODO", children=[Node("aa", "TODO")])])
     envelope, rc, result = run_normative(
         cli, model, "set_state", ("proj", "DONE"), {})
     # Normative: a blocked close is an error, never a false success.
@@ -473,11 +451,11 @@ def test_s7row8_blocked_close_via_set_state_is_rejected(cli):
     assert envelope_side_effects(envelope) == []
 
 
-def test_s7row8_set_next_skips_subproject_first_child(cli):
+def test_set_next_skips_subproject_first_child(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("sub", "TODO", children=[Node("ss", "TODO")]),
         Node("bb", "TODO"),
-    ])], Divergences.normative())
+    ])])
     envelope, rc, result = run_normative(cli, model, "set_next", ("proj",), {})
     assert rc == 0 and result.ok
     # The non-project child later in the group is promoted, not "sub".
@@ -487,13 +465,12 @@ def test_s7row8_set_next_skips_subproject_first_child(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 9 retired 2026-08-07 (#47, after the #37 interim subset): move
-# guards the full §4.9 zone invariant, so both witnesses now pin
-# agreeing behavior.
-def test_s7row9_completed_block_guard(cli):
+# §4.9: move guards the full zone invariant — completed block, NEXT
+# prefix, DEFER block.
+def test_completed_block_guard(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("done1", "DONE"), Node("aa", "TODO"),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(
         cli, model, "move", ("aa",), {"direction": "up"})
     # Crossing into the completed block is rejected, file unchanged.
@@ -502,10 +479,10 @@ def test_s7row9_completed_block_guard(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row9_full_zone_guard(cli):
+def test_full_zone_guard(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("nn", "NEXT"), Node("aa", "TODO"),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(
         cli, model, "move", ("aa",), {"direction": "up"})
     # Crossing above the NEXT prefix is rejected, file unchanged.
@@ -514,10 +491,10 @@ def test_s7row9_full_zone_guard(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row9_defer_block_guard(cli):
+def test_defer_block_guard(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("aa", "TODO"), Node("dd", "DEFER"),
-    ])], Divergences.normative())
+    ])])
     _, rc, result = run_normative(
         cli, model, "move", ("aa",), {"direction": "down"})
     # Sinking an open task into the DEFER block is rejected.
@@ -526,14 +503,12 @@ def test_s7row9_defer_block_guard(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 10 retired 2026-08-11 (#56): the §4.0 closure repair runs — an
-# open task placed or revealed below a closed heading reopens that whole
-# ancestor chain, and `set-next' accepts a closed project-child leaf
-# (§4.7) instead of rejecting it. One witness per trigger; each pins the
-# agreeing behavior on the shape row 10 recorded as divergent.
-def test_s7row10_add_subtask_reopens_the_closed_chain(cli):
+# §4.0 closure repair: an open task placed or revealed below a closed
+# heading reopens that whole ancestor chain, and `set-next' accepts a
+# closed project-child leaf (§4.7). One test per trigger.
+def test_add_subtask_reopens_the_closed_chain(cli):
     model = Model([Node("proj", "DONE", children=[
-        Node("leaf", "DONE")])], Divergences.normative())
+        Node("leaf", "DONE")])])
     envelope, rc, result = run_normative(
         cli, model, "add_subtask", ("leaf", "kid", "TODO"), {})
     assert rc == 0 and result.ok
@@ -544,10 +519,10 @@ def test_s7row10_add_subtask_reopens_the_closed_chain(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row10_closed_arrival_reopens_nothing(cli):
+def test_closed_arrival_reopens_nothing(cli):
     # The trigger is an *open* arrival; the record stays closed otherwise.
     model = Model([Node("proj", "DONE", children=[
-        Node("leaf", "DONE")])], Divergences.normative())
+        Node("leaf", "DONE")])])
     envelope, rc, result = run_normative(
         cli, model, "add_subtask", ("leaf", "kid", "DONE"), {})
     assert rc == 0 and result.ok
@@ -556,10 +531,9 @@ def test_s7row10_closed_arrival_reopens_nothing(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row10_set_state_reopening_cascades(cli):
+def test_set_state_reopening_cascades(cli):
     model = Model([Node("proj", "DONE", children=[
-        Node("mid", "DONE", children=[Node("leaf", "DONE")])])],
-        Divergences.normative())
+        Node("mid", "DONE", children=[Node("leaf", "DONE")])])])
     envelope, rc, result = run_normative(
         cli, model, "set_state", ("leaf", "TODO"), {})
     assert rc == 0 and result.ok
@@ -570,15 +544,15 @@ def test_s7row10_set_state_reopening_cascades(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row10_refile_into_a_closed_destination_cascades(cli):
+def test_refile_into_a_closed_destination_cascades(cli):
     model = Model([
         Node("dest", "DONE", children=[Node("host", "DONE")]),
         Node("src", "TODO", children=[Node("mover", "TODO")]),
-    ], Divergences.normative())
+    ])
     envelope, rc, result = run_normative(
         cli, model, "refile", ("mover",), {"to": "host"})
     assert rc == 0 and result.ok
-    # Since #57 (row 12) refile reports the cascade it performs.
+    # §4.8: refile reports the cascade it performs.
     assert model_side_effects(result) == sorted([
         ("state-change", "host", "DONE", "TODO"),
         ("state-change", "dest", "DONE", "TODO")])
@@ -586,10 +560,9 @@ def test_s7row10_refile_into_a_closed_destination_cascades(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row10_set_next_accepts_a_closed_project_child(cli):
+def test_set_next_accepts_a_closed_project_child(cli):
     model = Model([Node("proj", "DONE", children=[
-        Node("aa", "DONE"), Node("bb", "TODO")])],
-        Divergences.normative())
+        Node("aa", "DONE"), Node("bb", "TODO")])])
     envelope, rc, result = run_normative(cli, model, "set_next", ("aa",), {})
     assert rc == 0 and result.ok
     assert model_side_effects(result) == [
@@ -598,24 +571,23 @@ def test_s7row10_set_next_accepts_a_closed_project_child(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row10_set_next_still_rejects_a_closed_lone_task(cli):
+def test_set_next_still_rejects_a_closed_lone_task(cli):
     # I3 outranks the §4.7 acceptance: a lone task is never NEXT.
-    model = Model([Node("lone", "DONE")], Divergences.normative())
+    model = Model([Node("lone", "DONE")])
     _, rc, result = run_normative(cli, model, "set_next", ("lone",), {})
     assert result.ok is False
     assert rc != 0
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 11 retired 2026-08-11 (#56): the §4.0 keyword-outgrown repair
-# runs — a NEXT or WAITING leaf that grows its first task child demotes
-# to TODO, the WAITING case through the §4.6 exit cleanup plus
-# `project-needs-review'.
-def test_s7row11_waiting_parent_demotes_with_the_exit_cleanup(cli):
+# §4.0 keyword-outgrown repair: a NEXT or WAITING leaf that grows its
+# first task child demotes to TODO, the WAITING case through the §4.6
+# exit cleanup plus `project-needs-review'.
+def test_waiting_parent_demotes_with_the_exit_cleanup(cli):
     model = Model([Node("proj", "TODO", children=[
         Node("blk", "TODO", triggers=("wait",)),
         Node("wait", "WAITING", waiting_reason="vendor", blockers=("blk",)),
-    ])], Divergences.normative())
+    ])])
     envelope, rc, result = run_normative(
         cli, model, "add_subtask", ("wait", "kid", "TODO"), {})
     assert rc == 0 and result.ok
@@ -627,10 +599,9 @@ def test_s7row11_waiting_parent_demotes_with_the_exit_cleanup(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row11_next_parent_demotes(cli):
+def test_next_parent_demotes(cli):
     model = Model([Node("proj", "TODO", children=[
-        Node("aa", "NEXT"), Node("bb", "TODO")])],
-        Divergences.normative())
+        Node("aa", "NEXT"), Node("bb", "TODO")])])
     envelope, rc, result = run_normative(
         cli, model, "add_subtask", ("aa", "kid", "TODO"), {})
     assert rc == 0 and result.ok
@@ -640,18 +611,18 @@ def test_s7row11_next_parent_demotes(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 12 retired 2026-08-11 (#57): `refile --to' is unique-or-error
-# (I12 applies to destinations exactly as to targets) and refile reports
-# every repair it performs in the primitive commands' own vocabulary.
+# §4.8: `refile --to' is unique-or-error (I12 applies to destinations
+# exactly as to targets) and refile reports every repair it performs in
+# the primitive commands' own vocabulary.
 # Zone placement and reorder stay out of `side_effects' — they are the
 # outcome, not a repair.
-def test_s7row12_duplicate_destination_is_rejected(cli):
+def test_duplicate_destination_is_rejected(cli):
     model = Model([
         Node("home", "TODO", children=[Node("Plumbing", None)]),
         Node("work", "TODO", children=[Node("Plumbing", None)]),
         Node("src", "TODO", children=[
             Node("mover", "TODO"), Node("stay", "TODO")]),
-    ], Divergences.normative())
+    ])
     envelope, rc, result = run_normative(
         cli, model, "refile", ("mover",), {"to": "Plumbing"})
     assert result.ok is False
@@ -663,7 +634,7 @@ def test_s7row12_duplicate_destination_is_rejected(cli):
         "home/Plumbing", "work/Plumbing"]
 
 
-def test_s7row12_unique_category_destination_still_resolves(cli):
+def test_unique_category_destination_still_resolves(cli):
     # Any heading type is a legal destination, and the arrival placement
     # it triggers is never a side effect.
     model = Model([
@@ -672,7 +643,7 @@ def test_s7row12_unique_category_destination_still_resolves(cli):
             Node("aa", "TODO")]),
         Node("src", "TODO", children=[
             Node("mover", "TODO"), Node("stay", "TODO")]),
-    ], Divergences.normative())
+    ])
     envelope, rc, result = run_normative(
         cli, model, "refile", ("mover",), {"to": "Plumbing"})
     assert rc == 0 and result.ok
@@ -681,12 +652,12 @@ def test_s7row12_unique_category_destination_still_resolves(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row12_moved_next_demotion_is_reported(cli):
+def test_moved_next_demotion_is_reported(cli):
     model = Model([
         Node("dst", "TODO", children=[Node("keep", "NEXT")]),
         Node("src", "TODO", children=[
             Node("movern", "NEXT"), Node("stay", "TODO")]),
-    ], Divergences.normative())
+    ])
     envelope, rc, result = run_normative(
         cli, model, "refile", ("movern",), {"to": "dst"})
     assert rc == 0 and result.ok
@@ -697,7 +668,7 @@ def test_s7row12_moved_next_demotion_is_reported(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row12_waiting_destination_unwinds_and_reports(cli):
+def test_waiting_destination_unwinds_and_reports(cli):
     model = Model([
         Node("proj", "TODO", children=[
             Node("blk", "TODO", triggers=("wait",)),
@@ -705,7 +676,7 @@ def test_s7row12_waiting_destination_unwinds_and_reports(cli):
                  blockers=("blk",))]),
         Node("src", "TODO", children=[
             Node("mover", "TODO"), Node("stay", "TODO")]),
-    ], Divergences.normative())
+    ])
     envelope, rc, result = run_normative(
         cli, model, "refile", ("mover",), {"to": "wait"})
     assert rc == 0 and result.ok
@@ -718,36 +689,32 @@ def test_s7row12_waiting_destination_unwinds_and_reports(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 13 retired 2026-08-11 (#58): task traversal severs at category
-# headings per §2 — the closure guard, the activity/stuckness predicates
-# and project detection all stop at the first keyword-less heading. Both
-# witnesses pin the agreeing behavior on the shapes row 13 recorded as
-# divergent. (`warnings` is not compared here — the §4.4 severed-task
-# warning is exercised in test_org_gtd_cli.py; the model predicts
-# `side_effects` only.)
-def test_s7row13_close_over_severed_open_task_succeeds(cli):
+# §2: task traversal severs at category headings — the closure guard,
+# the activity/stuckness predicates and project detection all stop at the
+# first keyword-less heading. (`warnings` is not compared here — the
+# §4.4 severed-task warning is exercised in test_org_gtd_cli.py; the
+# model predicts `side_effects` only.)
+def test_close_over_severed_open_task_succeeds(cli):
     # "Call plumber" is open but sits below the category heading
     # "Plumbing", so it is no task descendant of "reno" and does not
     # block the close (I4).
     model = Model([Node("home", "TODO", children=[
         Node("reno", "TODO", children=[
             Node("Plumbing", None, children=[
-                Node("plumber", "TODO"), Node("measure", "DONE")])])])],
-        Divergences.normative())
+                Node("plumber", "TODO"), Node("measure", "DONE")])])])])
     _, rc, result = run_normative(cli, model, "set_done", ("reno",), {})
     assert rc == 0 and result.ok
     assert cli.read_skeleton() == model.skeleton()
 
 
-def test_s7row13_severed_only_task_is_a_leaf_and_promotes(cli):
+def test_severed_only_task_is_a_leaf_and_promotes(cli):
     # "reno"'s only task lives below a category heading, so under §2
     # severing "reno" is a LEAF, not a project — the promotion rule
     # picks it up when its sibling closes.
     model = Model([Node("home", "TODO", children=[
         Node("porch", "TODO"),
         Node("reno", "TODO", children=[
-            Node("Plumbing", None, children=[Node("plumber", "TODO")])])])],
-        Divergences.normative())
+            Node("Plumbing", None, children=[Node("plumber", "TODO")])])])])
     envelope, rc, result = run_normative(cli, model, "set_done", ("porch",), {})
     assert rc == 0 and result.ok
     assert model_side_effects(result) == [
@@ -756,15 +723,14 @@ def test_s7row13_severed_only_task_is_a_leaf_and_promotes(cli):
     assert cli.read_skeleton() == model.skeleton()
 
 
-# §7 row 14 retired 2026-08-07 (#34): the level-1 guard is gone — a
-# uniform top-level group places like an implicit category bucket
-# (ruling 2026-08-02). This witness now pins the agreeing behavior.
-def test_s7row14_toplevel_group_sorts_as_category_bucket(cli):
+# §2/§4.1: a file's top level is a sibling group like any other, so a
+# uniform top-level group places like an implicit category bucket.
+def test_toplevel_group_sorts_as_category_bucket(cli):
     # Uniform flat top-level group (NEXT is illegal at top level, so
     # the bucket's zones are TODO/WAITING -> DEFER -> closed).
     model = Model([
         Node("aa", "TODO"), Node("bb", "TODO"), Node("dd", "DEFER"),
-    ], Divergences.normative())
+    ])
     _, rc, result = run_normative(
         cli, model, "set_state", ("aa", "DEFER"), {})
     assert rc == 0 and result.ok

@@ -12,11 +12,6 @@ CLAUDE.md — all derive from here). A disagreement between the code and
 this document is a bug — one of the two is wrong — and the discrepancy
 is triaged to a ruling before either side changes.
 
-*(Transitional: during the semantics overhaul, §7 lists the known
-code-vs-document disagreements and the issue that closes each. A row
-is deleted when its fix lands; when the table is empty, §7, every
-inline divergence marker, and this paragraph are removed.)*
-
 Declarative statements in this document are normative. The historical
 ruling ledger lives in the decision note
 (`nixos-config/notes/decisions/gtd-task-state-semantics.md`); this
@@ -236,8 +231,6 @@ exactly as found. It is *not* removed, and nothing else reaps it, so
 dead back-links persist on disk indefinitely. This is deliberate
 tolerance for on-disk states created outside the CLI — which the §4.12
 delete guard cannot police — and not a cleanup mechanism.
-
-*Divergence: strip-on-close not yet implemented — #41.*
 
 ### 4.5 The promotion rule
 
@@ -579,31 +572,3 @@ state.
   children are all closed (the persistent surface for the closure
   decision).
 - **I12** A failed or ambiguous match mutates nothing.
-
-## 7. Known divergences
-
-**This section is transitional scaffolding**: each row is deleted when
-its issue lands, and the whole section — plus every inline
-`*Divergence…*` marker in §§4–5 and §1's transitional paragraph — is
-removed once the table is empty. This document stays forward-looking;
-resolved history lives in git and the forge.
-
-Each row: where the code currently disagrees with this document, and
-the issue that closes the gap (strictly doc → tests → implementation).
-
-| # | Current behavior (divergent) | Normative | Issue |
-|---|---|---|---|
-| 1 | *Retired 2026-08-07: the reorder primitive is the §4.1 minimal move — arrivals, NEXT-exit, and the WAITING no-move rule included; the full stable state-sort, the append-last arrivals, and the skip-sort mitigation's I5 leak are gone (#34).* | — | — |
-| 2 | *Retired 2026-08-01: not reproducible on master — refile placement already conforms to §4.1's arrival rule; pinned by a plain regression test (PR #55). #34's scope is row 1 only.* | — | — |
-| 3 | *Retired 2026-08-08: the promotion scan walks the whole sibling group in document order — the first open TODO is promoted wherever it sits relative to the closed task, so a project whose only open TODO precedes the task being driven is no longer stranded (#38).* | — | — |
-| 4 | *Retired 2026-08-08: promotion reports every all-done-but-open subproject it passes as `project-needs-review` and continues past it — advisory only, nothing is closed (#38, olli ruling E5).* | — | — |
-| 5 | *Retired 2026-08-10: the WAITING mechanism landed whole — entry needs a reason or a blocker link (self-blocks, cycles, already-closed blockers and multi-line reasons rejected; a WAITING→WAITING re-entry amends by replacing), `add-task`/`add-subtask` reject `--state WAITING`, closing a blocker fires the AND-gated auto-unblock with its conditional wake, every exit runs the cleanup, `delete` guards the blocker side and unwinds the waiting side, `archive` holds back a blocker for an open task, and `waiting_reason`/`blocked_by` are surfaced (#39).* | — | — |
-| 6 | *Retired 2026-08-13: view membership reads ancestor state, never state-mirror tags — the trigger table is an explicit nil, the Next Tasks/Tasks/Waiting blocks exclude on a severing-aware DEFER/WAITING/CANCELLED/DONE ancestor walk (the Waiting block gains its previously-missing DEFER-ancestor exclusion), stuckness is the shared §5.2 predicate (own-or-ancestor DEFER, never a tag), and the Deferred block is own-state DEFER rows only (#40).* | — | — |
-| 7 | *Retired 2026-08-13: the `[#A]`-only scheme landed whole — the priority range is defined once in `+gtd-core.el` (highest/lowest/default all `?A`), every entry point that accepts a priority (`set-priority`, `add-task`, `add-subtask`, and their `--batch` forms) rejects anything but `A`/`a` with the sibling-order hint and mutates nothing, and every close strips the cookie at the single close seam — `set-done`, `set-cancelled` and a close through `set-state` alike — with the removal reported in the `task` state, never as a side effect (#41).* | — | — |
-| 8 | *Retired 2026-08-10: `set-state` rejects NEXT on a project/subproject heading and WAITING on a project heading (§3 matrix), and a blocked DONE/CANCELLED is the same structured rejection `set-done`/`set-cancelled` produce — a close driven through `set-state` is a genuine close running the §4.4 post-conditions, the promotion rule alone excepted (I9); `set-next`'s project path promotes the first TODO non-project direct child (§4.7) (#46).* | — | — |
-| 9 | *Retired 2026-08-07: `move` guards the full §4.9 zone invariant — completed block, NEXT prefix, and DEFER block — rejecting any reordering that would put the moved entry on the wrong side of a boundary (#37 interim, #47 full).* | — | — |
-| 10 | *Retired 2026-08-11: the §4.0 closure repair runs — an open task placed or revealed in the task descent of a closed ancestor reopens that whole chain (`add-subtask`, `set-state` reopening, `refile`), each reopened ancestor a `state-change` side effect, and `set-next` accepts a closed project-child leaf, reopening it straight to NEXT (a closed lone task stays rejected, I3) (#56).* | — | — |
-| 11 | *Retired 2026-08-11: the §4.0 keyword-outgrown repair runs — a NEXT or WAITING leaf gaining its first direct task child demotes to TODO, the WAITING case through the §4.6 exit cleanup and additionally emitting `project-needs-review` (#56).* | — | — |
-| 12 | *Retired 2026-08-11: `refile --to` is unique-or-error — I12 applies to destinations exactly as to targets, so duplicate exact matches are rejected with their candidates named and nothing mutated — and refile reports every repair it performs (moved-NEXT demotion, keyword-outgrown demotion with its `project-needs-review` and unwound blocker links, reopened ancestors) as a side effect in the primitive commands' vocabulary; zone placement and reorder are never side effects (#57).* | — | — |
-| 13 | *Retired 2026-08-11: task traversal severs at category headings — the closure guard (I4), the activity/stuckness predicates and project detection all stop at the first keyword-less heading, and closing or archiving over open severed tasks emits the `open-severed-tasks` warning (#58).* | — | — |
-| 14 | *Retired 2026-08-07: the level-1 guard is gone — a uniform top-level group places like an implicit category bucket, per the 2026-08-02 ruling (#34).* | — | — |

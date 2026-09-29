@@ -518,9 +518,8 @@ class TestAddTask:
         assert "[#A]" in (org_dir / "inbox.org").read_text()
 
     def test_with_state_waiting_is_rejected(self, org_dir):
-        # §4.2 (#39): create never mints WAITING — this test encoded the
-        # pre-#39 behavior §7 row 5 recorded as a divergence, so it flips
-        # rather than being deleted. Full coverage: TestWaitingCreateGuard.
+        # §4.2: create never mints WAITING. Full coverage:
+        # TestWaitingCreateGuard.
         before = (org_dir / "inbox.org").read_text()
         stdout, stderr, rc = run_cli(
             "add-task", "Waiting task", "--state", "WAITING", org_dir=org_dir)
@@ -1880,15 +1879,15 @@ class TestSetPriority:
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         assert rc == 0
         assert "Priority:" in stdout
-        # §7 row 7 (#41): a task with no cookie has no old priority — text
-        # mode says so instead of fabricating the retired [#B] default,
+        # §4.10: a task with no cookie has no old priority — text mode
+        # says so instead of fabricating a [#B] default,
         # matching JSON's `old_priority: null`.
         assert "none -> [#A]" in stdout
         assert "[#B]" not in stdout
         assert "[#A] Buy groceries" in (org_dir / "inbox.org").read_text()
 
     def test_c_rejected_leaves_existing_a_alone(self, org_dir):
-        # pins §7 row 7 (#41): [#A] is the only cookie, so an attempt to
+        # §3/§4.10: [#A] is the only cookie, so an attempt to
         # move an [#A] task to [#C] is rejected and mutates nothing.
         run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "C", org_dir=org_dir)
@@ -1898,8 +1897,7 @@ class TestSetPriority:
         assert "[#C]" not in (org_dir / "inbox.org").read_text()
 
     def test_clear_priority(self, org_dir):
-        # anchor §7 row 7 (#41) — non-flipping: the --clear assertions were
-        # green before and after the [#A]-only scheme landed
+        # §4.10: clearing the cookie is always admitted
         run_cli("set-priority", "Buy groceries", "A", org_dir=org_dir)
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "--clear", org_dir=org_dir)
         assert rc == 0
@@ -1912,7 +1910,7 @@ class TestSetPriority:
         assert "Cleared priority:" in stdout
 
     def test_invalid_priority(self, org_dir):
-        # pins §7 row 7 (#41)
+        # §3/§4.10: [#A] is the only cookie
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "D", org_dir=org_dir)
         assert rc == 1
         assert "not a valid priority" in stderr
@@ -1920,7 +1918,7 @@ class TestSetPriority:
         assert "A, B, C" not in stderr
 
     def test_b_rejected_with_sibling_order_hint(self, org_dir):
-        # pins §7 row 7 (#41): B is the retired default; the rejection
+        # §3/§4.10: B is not a cookie; the rejection
         # carries the sibling-order hint and nothing is written.
         stdout, stderr, rc = run_cli("set-priority", "Buy groceries", "B", org_dir=org_dir)
         assert rc == 1
@@ -1942,7 +1940,7 @@ class TestSetPriority:
         assert "[#A] Buy groceries" not in (org_dir / "inbox.org").read_text()
 
     def test_change_existing_priority(self, org_dir):
-        # pins §7 row 7 (#41): re-setting A on an already-[#A] task is the
+        # §3/§4.10: re-setting A on an already-[#A] task is the
         # only "change" the scheme admits; the old cookie is reported.
         stdout, stderr, rc = run_cli("set-priority", "Pay quarterly taxes", "A", org_dir=org_dir)
         assert rc == 0
@@ -1997,7 +1995,7 @@ class TestSetPriority:
 
 
 class TestPriorityStrippedOnClose:
-    """§3/§4.4 (#41, §7 row 7): a close removes any priority cookie, at the
+    """§3/§4.4: a close removes any priority cookie, at the
     one seam `org-gtd-cli/run-close-post-conditions', so set-done,
     set-cancelled and a close driven through set-state all strip it.  The
     removal is part of the task's own state — reported in the `task' field,
@@ -3312,14 +3310,14 @@ class TestNextProjectGuard:
 
 
 # ===========================================================================
-# 26b. set-state legality guards + close-path parity (§7 row 8, #46)
+# 26b. set-state legality guards + close-path parity (§4.6)
 # ===========================================================================
 
 class TestSetStateProjectHeadingGuards:
     """SEMANTICS.md §3: a project (or subproject) *heading* only ever
     carries TODO/DEFER/DONE/CANCELLED. NEXT names a project's front and
     WAITING its blocked-ness — both are read from the children, never
-    asserted on the heading (I3). Retires §7 row 8's first two limbs."""
+    asserted on the heading (I3)."""
 
     ORG = (
         "#+TITLE: Tasks\n\n"
@@ -3643,7 +3641,7 @@ class TestSetStateClosePathParity:
 class TestSetNextSubprojectCandidate:
     """§4.7 / I3: `set-next`'s project path promotes the first TODO
     *non-project* direct child — the same candidate rule the §4.5
-    promotion drill uses. Retires §7 row 8's fourth limb."""
+    promotion drill uses."""
 
     @pytest.fixture
     def delta(self, org_dir):
@@ -4500,19 +4498,17 @@ class TestArchiveBatch:
 class TestSiblingReordering:
     # Pure skeleton-order assertions after state-mutation ops (set-done,
     # set-state, set-next, set-state CANCELLED, set-state DEFER/WAITING,
-    # mixed-group no-move, top-level singleton) migrated into the
-    # tier-1/tier-2 conformance suite (issue #45 part 2, kwn.3):
+    # mixed-group no-move, top-level singleton) live in the tier-1/tier-2
+    # conformance suite:
     #
     #   test_gtd_model_properties.py::test_invariants_preserved_by_any_operation_sequence
     #   test_gtd_model_properties.py::test_minimal_move_preserves_active_interleaving
     #   test_gtd_model_properties.py::test_same_boundary_class_transition_never_moves_anyone
     #   test_gtd_model_properties.py::test_mixed_groups_are_never_reordered
-    #   test_gtd_conformance.py::test_cli_conforms_to_current_mode_model
+    #   test_gtd_conformance.py::test_cli_conforms_to_model
     #
-    # The NEXT→WAITING pin below flipped with §7 row 1's retirement
-    # (#34, 2026-08-07): a task leaving NEXT moves immediately below
-    # the remaining NEXT prefix (§4.1) instead of keeping a position
-    # that full-sort placement had given it.
+    # The NEXT→WAITING pin below: a task leaving NEXT moves immediately
+    # below the remaining NEXT prefix (§4.1).
 
     def _write_reorder_org(self, org_dir, content):
         (org_dir / "reorder.org").write_text(content)
@@ -4542,21 +4538,18 @@ class TestSiblingReordering:
 
 class TestAddSubtaskStateReorder:
     # Pure skeleton-order assertions after add-subtask --state X (NEXT,
-    # DONE, CANCELLED, DEFER, TODO, empty-parent, single-child)
-    # migrated into the tier-1/tier-2 conformance suite (issue #45 part
-    # 2, kwn.3):
+    # DONE, CANCELLED, DEFER, TODO, empty-parent, single-child) live in
+    # the tier-1/tier-2 conformance suite:
     #
     #   test_gtd_model_properties.py::test_invariants_preserved_by_any_operation_sequence
-    #   test_gtd_conformance.py::test_cli_conforms_to_current_mode_model
+    #   test_gtd_conformance.py::test_cli_conforms_to_model
     #
     # Only the WAITING arrival pin remains — the §4.1 arrival rule
-    # places a new WAITING at the end of the active zone (§7 row 1
-    # retired 2026-08-07, #34).
+    # places a new WAITING at the end of the active zone.
     #
-    # #39 changed how that arrival is reached, not the rule: §4.2/§4.3
-    # make `add-subtask --state WAITING` a rejection, so the arrival is
-    # pinned through `refile` (the other §4.1 arrival site) and the
-    # rejection gets its own pin below.
+    # §4.2/§4.3 make `add-subtask --state WAITING` a rejection, so the
+    # arrival is pinned through `refile` (the other §4.1 arrival site)
+    # and the rejection gets its own pin below.
 
     def _write_reorder_org(self, org_dir, content):
         (org_dir / "reorder.org").write_text(content)
@@ -4791,7 +4784,7 @@ class TestMinimalMoveReorder:
         assert_line_before(f, "DEFER Shelf target", "DEFER Sleepy end")
 
     def test_toplevel_uniform_group_places_like_a_bucket(self, org_dir):
-        # Ex-§7 row 14 (ruling 2026-08-02): the level-1 guard is gone —
+        # §2/§4.1: a file's top level is a sibling group like any other —
         # a uniform top-level group is an implicit category bucket.
         f = self._write(org_dir, """\
 * TODO Aaa chore
@@ -11495,7 +11488,7 @@ class TestReadIdentity:
 
 
 # ===========================================================================
-# §2 severing + the open-severed-tasks warning (issue #58, §7 row 13)
+# §2 severing + the open-severed-tasks warning
 # ===========================================================================
 #
 # SEMANTICS.md §2: a task's parent task is its immediate parent heading iff
@@ -12330,20 +12323,18 @@ class TestRenderFile:
 
 # ===========================================================================
 # 55. The WAITING mechanism — SEMANTICS.md §4.2/§4.3/§4.4/§4.6/§4.11/§4.12/§5.5
-#     (issue #39, §7 row 5)
 # ===========================================================================
 #
-# Everything below is new with #39. The pure skeleton/side-effect shapes of
-# the entry guardrail, the AND-gate and the conditional wake also live in the
-# tier-1/tier-2 conformance suite:
+# The pure skeleton/side-effect shapes of the entry guardrail, the AND-gate
+# and the conditional wake also live in the tier-1/tier-2 conformance suite:
 #
 #   test_gtd_model_properties.py::test_waiting_entry_requires_reason_or_link
 #   test_gtd_model_properties.py::test_and_gate_fires_only_when_all_closed
 #   test_gtd_model_properties.py::test_conditional_wake_state
-#   test_gtd_conformance.py::test_s7row5_waiting_requires_reason
-#   test_gtd_conformance.py::test_s7row5_blocker_link_and_wake
-#   test_gtd_conformance.py::test_s7row5_multi_blocker_and_gate
-#   test_gtd_conformance.py::test_s7row5_create_never_mints_waiting
+#   test_gtd_conformance.py::test_waiting_requires_reason
+#   test_gtd_conformance.py::test_blocker_link_and_wake
+#   test_gtd_conformance.py::test_multi_blocker_and_gate
+#   test_gtd_conformance.py::test_create_never_mints_waiting
 #
 # The tier-3 tests here pin what those tiers deliberately do not model:
 # the exact property bytes on disk, the CLI's error/hint text, `--dry-run`

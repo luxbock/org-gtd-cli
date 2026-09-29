@@ -424,9 +424,9 @@ Minimal move: only the entry at point may move — cut and reinserted at
 its zone boundary — leaving every other sibling's bytes untouched.  An
 entry already at a consistent position is a strict no-op (the buffer is
 not modified at all).  Mixed sibling groups (any keyword-less sibling)
-are never reordered.  Top-level groups place like any other — a uniform
-top-level group is an implicit category bucket (ruling 2026-08-02,
-ex-§7 row 14).
+are never reordered.  Top-level groups place like any other — a file's
+top level is a sibling group too (§2), so a uniform top-level group is an
+implicit category bucket.
 
 Does not save the buffer.  Leaves point on the entry's heading (at its
 new location when moved).  Returns non-nil iff the entry moved."
@@ -509,9 +509,8 @@ new location when moved).  Returns non-nil iff the entry moved."
   "Non-nil when a task ancestor's state hides the entry at point.
 The §5.4 ancestor-state exclusion: any task ancestor (§2 walk, so a
 category heading severs the chain) in state DEFER, WAITING, CANCELLED or
-DONE hides the whole task descent below it.  Replaces the inherited
-:WAITING:/:DEFER:/:CANCELLED: tag selectors the view matchers used to
-carry (§7 row 6)."
+DONE hides the whole task descent below it.  View membership reads
+ancestor state, never inherited state-mirror tags."
   (catch 'gtd--hidden
     (gtd/map-task-ancestors
      (lambda ()
@@ -571,9 +570,7 @@ lists all subtasks."
   "Skip entries the §5.4 Deferred block excludes.
 Own-state DEFER tasks only: a task with a DEFER task ancestor is
 represented by that ancestor's row, and a stuck project belongs to the
-Stuck Projects block (§5.2).  Replaces `gtd/skip-stuck-projects', whose
-name was inverted and whose NEXT test discounted an inherited :WAITING:
-tag (§7 row 6)."
+Stuck Projects block (§5.2)."
   (save-restriction
     (widen)
     (let ((next-headline (save-excursion (or (outline-next-heading) (point-max)))))

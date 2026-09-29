@@ -507,15 +507,14 @@ fresh checkout) needs nothing beyond `nix develop` to run every test.
 pure-Python model, and two test tiers derive from that:
 
 - **Tier 1** (`test_gtd_model_properties.py`) — Hypothesis properties
-  against the model alone in *normative* mode. Emacs-free, runs in
+  against the model alone. Emacs-free, runs in
   seconds, asserts the §6 invariants over generated operation sequences.
 - **Tier 2** (`test_gtd_conformance.py`) — bounded, daemon-backed
   conformance: generated sequences run through the real CLI and the
   model, and must match exactly (exit class, file skeleton,
-  `side_effects`; `warnings` is never compared). The model's *current*
-  and *normative* modes coincide: no known code-vs-document divergence
-  is open, so `Divergences` carries no flags. The divergence-flag and
-  `xfail` witness mechanism that tracked such rows is retired.
+  `side_effects`; `warnings` is never compared). The model implements
+  the document's semantics only; a mismatch is a bug in code, document,
+  or model, triaged against `SEMANTICS.md`.
 
 Hypothesis profiles: `fast` (default) keeps the whole run quick;
 `ORG_GTD_TEST_PROFILE=thorough` is the deep opt-in run. The tier-2

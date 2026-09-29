@@ -4177,16 +4177,14 @@ PROMOTE runs the §4.5 promotion rule.  I9 admits it from
 `set-done'/`set-cancelled' only — a close driven through `set-state'
 passes nil.
 
-This is the single seam for the close post-conditions: #41 (§7 row 7)
-landed the §3/§4.4 priority-cookie strip here — a closed task carries no
-cookie, and because the removal is part of the task's own state (not an
-action taken on something else) it is reported in the `task' field, never
-as a `side_effect'.  #39 (§7 row 5) landed the §4.4 auto-unblock AND-gate
-and the §4.6 WAITING exit cleanup here — a close is a WAITING exit site
-like any other.  Because all three
-commands route through this helper, each lands once and reaches
-`set-state' for free — which is how issue #46's criterion A14 is
-satisfied structurally (its behavioral check is #39's
+This is the single seam for the close post-conditions: the §3/§4.4
+priority-cookie strip — a closed task carries no cookie, and because the
+removal is part of the task's own state (not an action taken on something
+else) it is reported in the `task' field, never as a `side_effect' — and
+the §4.4 auto-unblock AND-gate plus the §4.6 WAITING exit cleanup (a
+close is a WAITING exit site like any other).  Because all three commands
+route through this helper, each post-condition lives once and reaches
+`set-state' for free (behavioral check:
 `TestWaitingAutoUnblock::test_set_state_cancelled_fires_auto_unblock').
 
 Returns (MESSAGES . EFFECTS): the advisory message strings in printing
